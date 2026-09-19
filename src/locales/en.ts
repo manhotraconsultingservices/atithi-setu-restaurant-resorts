@@ -808,4 +808,22 @@ export const en: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'Your payment is received and your appointment is confirmed.',
   // ── Events: needs closing ──
   'events.needsClosing': 'Needs closing',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'Not enough stock for this event',
+  'events.shortage.line': '{name}: need {need}, {have} available (short {short})',
+  'events.shortage.body': 'Add anyway? The shortage is listed in Event Reports so it can be arranged before the event.',
+  'events.shortage.addAnyway': 'Add anyway',
+  'events.shortage.banner': 'Stock short for this event:',
+  'events.shortage.short': 'short {n}',
+  'events.shortage.reportTitle': 'Rental shortages',
+  'events.shortage.reportSub': 'Upcoming bookings that need more of an item than is free for their dates. Arrange these before the event.',
+  'events.shortage.reportSummary': '{bookings} booking(s) · {units} unit(s) short',
+  'events.shortage.none': 'No shortages. Every upcoming booking has the stock it needs.',
+  'events.shortage.item': 'Item',
+  'events.shortage.needed': 'Needed',
+  'events.shortage.elsewhere': 'Held by other events',
+  'events.shortage.available': 'Available',
+  'events.shortage.shortBy': 'Short by',
+  'events.complete.roomsCleaning': '{sent} of {total} event room(s) sent to cleaning.',
+  'events.calendar.completed': 'Completed',
 };

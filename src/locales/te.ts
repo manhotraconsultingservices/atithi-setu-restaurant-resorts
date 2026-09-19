@@ -741,4 +741,22 @@ export const te: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'మీ చెల్లింపు అందింది, మీ అపాయింట్‌మెంట్ నిర్ధారించబడింది.',
   // ── Events: needs closing ──
   'events.needsClosing': 'మూసివేయాల్సినవి',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'ఈ ఈవెంట్‌కు సరిపడా స్టాక్ లేదు',
+  'events.shortage.line': '{name}: {need} కావాలి, {have} అందుబాటులో ({short} తక్కువ)',
+  'events.shortage.body': 'అయినా జోడించాలా? ఈవెంట్‌కు ముందు ఏర్పాటు చేయడానికి కొరత ఈవెంట్ నివేదికల్లో చూపబడుతుంది.',
+  'events.shortage.addAnyway': 'అయినా జోడించు',
+  'events.shortage.banner': 'ఈ ఈవెంట్‌కు స్టాక్ తక్కువ:',
+  'events.shortage.short': '{n} తక్కువ',
+  'events.shortage.reportTitle': 'అద్దె వస్తువుల కొరత',
+  'events.shortage.reportSub': 'తమ తేదీల్లో అందుబాటులో ఉన్నదానికంటే ఎక్కువ వస్తువులు కావాల్సిన రాబోయే బుకింగ్‌లు. ఈవెంట్‌కు ముందు ఏర్పాటు చేయండి.',
+  'events.shortage.reportSummary': '{bookings} బుకింగ్ · {units} యూనిట్ తక్కువ',
+  'events.shortage.none': 'కొరత లేదు. ప్రతి రాబోయే బుకింగ్‌కు స్టాక్ ఉంది.',
+  'events.shortage.item': 'వస్తువు',
+  'events.shortage.needed': 'కావాలి',
+  'events.shortage.elsewhere': 'ఇతర ఈవెంట్లలో',
+  'events.shortage.available': 'అందుబాటులో',
+  'events.shortage.shortBy': 'కొరత',
+  'events.complete.roomsCleaning': 'ఈవెంట్ {total} గదుల్లో {sent} శుభ్రతకు పంపబడ్డాయి.',
+  'events.calendar.completed': 'పూర్తయింది',
 };

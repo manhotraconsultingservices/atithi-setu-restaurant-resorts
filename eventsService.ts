@@ -215,23 +215,68 @@ export async function venueBlockConflict(
  * Committed quantity of a rental item across all CONFIRMED/IN_PROGRESS bookings
  * on a given date. Used to warn on over-allocation (owned − committed < needed).
  */
+// Units of a rental item held by OTHER confirmed / in-progress events whose
+// dates overlap [eventDate, endDate]. Counts booking lines AND active rental
+// add-ons (both take the item off the shelf). A multi-day event holds the item
+// for every day it runs, so overlap is on the whole span, not the start date.
 export async function rentalCommittedQty(
   tenantDb: DbInterface,
   rentalItemId: string,
   eventDate: string,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  endDate?: string | null
 ): Promise<number> {
-  const rows = await tenantDb.query(
+  const end = endDate && endDate > eventDate ? endDate : eventDate;
+  const params: any[] = [rentalItemId, end, eventDate];
+  if (excludeBookingId) params.push(excludeBookingId);
+  const lines = await tenantDb.query(
     `SELECT COALESCE(SUM(bi.quantity),0)::int AS qty
        FROM event_booking_items bi
        JOIN event_bookings b ON b.id = bi.booking_id
       WHERE bi.rental_item_id = ?
-        AND b.event_date = ?
+        AND b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?
         AND b.status IN ('CONFIRMED','IN_PROGRESS')
         ${excludeBookingId ? "AND b.id <> ?" : ""}`,
-    excludeBookingId ? [rentalItemId, eventDate, excludeBookingId] : [rentalItemId, eventDate]
+    params
   );
-  return Number(rows[0]?.qty || 0);
+  const addons = await tenantDb.query(
+    `SELECT COALESCE(SUM(a.quantity),0) AS qty
+       FROM event_booking_addons a
+       JOIN event_bookings b ON b.id = a.booking_id
+      WHERE a.category = 'RENTAL' AND a.ref_id = ? AND COALESCE(a.status, 'ACTIVE') = 'ACTIVE'
+        AND b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?
+        AND b.status IN ('CONFIRMED','IN_PROGRESS')
+        ${excludeBookingId ? "AND b.id <> ?" : ""}`,
+    params
+  ).catch(() => [{ qty: 0 }]);
+  return Number(lines[0]?.qty || 0) + Number(addons[0]?.qty || 0);
+}
+
+export interface RentalShortage {
+  rental_item_id: string; name: string; unit: string | null;
+  requested: number; owned: number; committed_elsewhere: number; available: number; short_by: number;
+}
+
+// Which rental items a booking needs more of than the shelf holds for its dates.
+// `requested` is the booking's total quantity per item (lines + its own add-ons).
+export async function rentalShortages(
+  tenantDb: DbInterface,
+  o: { bookingId?: string; eventDate: string; endDate?: string | null; requested: Map<string, number> }
+): Promise<RentalShortage[]> {
+  const out: RentalShortage[] = [];
+  for (const [itemId, qty] of o.requested) {
+    if (!itemId || !(qty > 0)) continue;
+    const it: any = await tenantDb.get("SELECT id, name, unit, quantity_owned FROM event_rental_items WHERE id = ?", [itemId]).catch(() => null);
+    if (!it) continue;
+    const owned = Number(it.quantity_owned || 0);
+    const committed = await rentalCommittedQty(tenantDb, itemId, o.eventDate, o.bookingId, o.endDate);
+    const available = Math.max(0, owned - committed);
+    if (qty > available) {
+      out.push({ rental_item_id: itemId, name: it.name, unit: it.unit || null, requested: qty, owned,
+        committed_elsewhere: committed, available, short_by: qty - available });
+    }
+  }
+  return out;
 }
 
 // ── Schema ─────────────────────────────────────────────────────────────────

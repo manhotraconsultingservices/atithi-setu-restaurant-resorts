@@ -844,4 +844,22 @@ export const hi: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'आपका भुगतान मिल गया और आपका अपॉइंटमेंट पक्का है।',
   // ── Events: needs closing ──
   'events.needsClosing': 'बंद करना बाकी',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'इस इवेंट के लिए पर्याप्त स्टॉक नहीं',
+  'events.shortage.line': '{name}: {need} चाहिए, {have} उपलब्ध ({short} कम)',
+  'events.shortage.body': 'फिर भी जोड़ें? कमी इवेंट रिपोर्ट में दिखेगी ताकि इवेंट से पहले व्यवस्था हो सके।',
+  'events.shortage.addAnyway': 'फिर भी जोड़ें',
+  'events.shortage.banner': 'इस इवेंट के लिए स्टॉक कम:',
+  'events.shortage.short': '{n} कम',
+  'events.shortage.reportTitle': 'रेंटल सामान की कमी',
+  'events.shortage.reportSub': 'आगामी बुकिंग जिन्हें उनकी तारीखों पर उपलब्ध से अधिक सामान चाहिए। इवेंट से पहले इनकी व्यवस्था करें।',
+  'events.shortage.reportSummary': '{bookings} बुकिंग · {units} यूनिट कम',
+  'events.shortage.none': 'कोई कमी नहीं। हर आगामी बुकिंग के लिए स्टॉक उपलब्ध है।',
+  'events.shortage.item': 'सामान',
+  'events.shortage.needed': 'चाहिए',
+  'events.shortage.elsewhere': 'अन्य इवेंट में लगा',
+  'events.shortage.available': 'उपलब्ध',
+  'events.shortage.shortBy': 'कमी',
+  'events.complete.roomsCleaning': 'इवेंट के {total} में से {sent} कमरे सफ़ाई के लिए भेजे गए।',
+  'events.calendar.completed': 'पूर्ण',
 };

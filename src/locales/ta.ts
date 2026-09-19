@@ -741,4 +741,22 @@ export const ta: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'உங்கள் கட்டணம் பெறப்பட்டது, உங்கள் சந்திப்பு உறுதிசெய்யப்பட்டது.',
   // ── Events: needs closing ──
   'events.needsClosing': 'மூட வேண்டியவை',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'இந்த நிகழ்வுக்கு போதுமான இருப்பு இல்லை',
+  'events.shortage.line': '{name}: {need} தேவை, {have} உள்ளது ({short} குறைவு)',
+  'events.shortage.body': 'இருந்தாலும் சேர்க்கவா? நிகழ்வுக்கு முன் ஏற்பாடு செய்ய, குறைவு நிகழ்வு அறிக்கைகளில் காட்டப்படும்.',
+  'events.shortage.addAnyway': 'இருந்தாலும் சேர்',
+  'events.shortage.banner': 'இந்த நிகழ்வுக்கு இருப்பு குறைவு:',
+  'events.shortage.short': '{n} குறைவு',
+  'events.shortage.reportTitle': 'வாடகைப் பொருள் பற்றாக்குறை',
+  'events.shortage.reportSub': 'தங்கள் தேதிகளில் கிடைப்பதை விட அதிகப் பொருள் தேவைப்படும் வரவிருக்கும் முன்பதிவுகள். நிகழ்வுக்கு முன் ஏற்பாடு செய்யுங்கள்.',
+  'events.shortage.reportSummary': '{bookings} முன்பதிவு · {units} அலகு குறைவு',
+  'events.shortage.none': 'பற்றாக்குறை இல்லை. வரவிருக்கும் ஒவ்வொரு முன்பதிவுக்கும் இருப்பு உள்ளது.',
+  'events.shortage.item': 'பொருள்',
+  'events.shortage.needed': 'தேவை',
+  'events.shortage.elsewhere': 'பிற நிகழ்வுகளில்',
+  'events.shortage.available': 'கிடைப்பது',
+  'events.shortage.shortBy': 'குறைவு',
+  'events.complete.roomsCleaning': 'நிகழ்வின் {total} அறைகளில் {sent} சுத்தம் செய்ய அனுப்பப்பட்டன.',
+  'events.calendar.completed': 'முடிந்தது',
 };

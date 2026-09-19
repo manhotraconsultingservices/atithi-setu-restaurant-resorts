@@ -15,6 +15,7 @@ import { DateRangeBar, StatusTiles, defaultDateRange, rangeFor, type DateRange }
 import { moduleOn } from './tenantModules';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
+import { useConfirm } from './components/ConfirmDialog';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -1304,7 +1305,25 @@ function CancelEventDialog({ restaurantId, token, bookingId, onClose, onCancelle
 function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, onOpenObject }: Props & { bookingId: string; venues: any[]; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
+  const confirm = useConfirm();
   const [bk, setBk] = useState<any>(null);
+  // Rental items this booking needs more of than the shelf holds for its dates.
+  const [shortages, setShortages] = useState<any[]>([]);
+  const loadShortages = () => api(`/events/reports/rental-shortages?booking_id=${encodeURIComponent(bookingId)}&from=2000-01-01&to=2100-12-31`)
+    .then((r: any) => setShortages(Array.isArray(r?.rows) ? r.rows : [])).catch(() => setShortages([]));
+  // A write that would take more rental stock than is free returns RENTAL_SHORTAGE.
+  // Show what is short and let the user add it anyway; the server audits that.
+  const withShortageConfirm = async (send: (extra: any) => Promise<any>): Promise<boolean> => {
+    try { await send({}); return true; }
+    catch (e: any) {
+      if (e?.data?.code !== 'RENTAL_SHORTAGE') throw e;
+      const lines = (e.data.shortages || []).map((x: any) => t('events.shortage.line', { name: x.name, need: x.requested, have: x.available, short: x.short_by })).join(' · ');
+      const ok = await confirm({ title: t('events.shortage.title'), body: `${lines}. ${t('events.shortage.body')}`, confirmLabel: t('events.shortage.addAnyway'), cancelLabel: t('common.cancel') });
+      if (!ok) return false;
+      await send({ confirm_shortage: true });
+      return true;
+    }
+  };
   const [rentals, setRentals] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1332,7 +1351,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     api('/events/venues').then((r: any) => setVenueOpts(Array.isArray(r) ? r : [])).catch(() => {});
   }, [venues]);
 
-  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}${gstReady ? gstQuery() : ''}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
+  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}${gstReady ? gstQuery() : ''}`)); setNonce(n => n + 1); loadShortages(); } catch (e: any) { alert(e.message); } };
   useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); api('/events/catering-packages').then(setCaterPkgs).catch(() => {}); }, [bookingId]);
 
   // Catering line helpers (parallel to rentals/services). pax defaults to the
@@ -1369,7 +1388,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     const unitRate = rateBasis === 'HOURLY' ? Number(it.rent_hourly || 0) : Number(it.rent_daily || 0);
     const items = (bk.items || []).map((x: any) => ({ rental_item_id: x.rental_item_id, quantity: x.quantity, rate_basis: x.rate_basis, unit_rate: x.unit_rate, duration_units: x.duration_units }));
     items.push({ rental_item_id: itemId, quantity: 1, rate_basis: rateBasis, unit_rate: unitRate, duration_units: 1 });
-    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ items }) });
+    try { await withShortageConfirm(extra => api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ items, ...extra }) })); }
+    catch (e: any) { alert(e.message); }
     await load();
   };
   const addService = async (svcId: string) => {
@@ -1402,7 +1422,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     if ((f.category === 'CUSTOM' || f.category === 'ROOM') && (payload.unit_rate == null || !isFinite(payload.unit_rate) || payload.unit_rate < 0)) { alert('A valid rate is required.'); return; }
     setBusy(true);
     try {
-      await api(`/events/bookings/${bookingId}/addons`, { method: 'POST', body: JSON.stringify(payload) });
+      const added = await withShortageConfirm(extra => api(`/events/bookings/${bookingId}/addons`, { method: 'POST', body: JSON.stringify({ ...payload, ...extra }) }));
+      if (!added) return;
       setShowAddon(false);
       setAddonForm({ category: 'RENTAL', ref_id: '', name: '', quantity: 1, unit_rate: '', gst_percent: '' });
       await load();
@@ -1433,8 +1454,10 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     const num = Math.max(0, Number(value) || 0);
     if (Number(src[idx][field]) === num) return; // no-op, avoids a PUT on every blur
     src[idx] = { ...src[idx], [field]: num };
-    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [kind]: src }) });
-    await load(); flashSaved();
+    let saved = false;
+    try { saved = await withShortageConfirm(extra => api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [kind]: src, ...extra }) })); }
+    catch (e: any) { alert(e.message); }
+    await load(); if (saved) flashSaved();
   };
   const commitDiscount = async (value: string) => {
     // EVENT discount — applies to venue / rentals / services / catering / add-ons.
@@ -1516,6 +1539,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   const runAct = async (path: string, body: any, okMsg?: string) => {
     const r = await api(`/events/bookings/${bookingId}/${path}`, { method: 'POST', body: JSON.stringify(body) });
+    // Completing an event sends its hotel rooms to cleaning: say what happened to each.
+    const rooms: any[] = Array.isArray(r?.rooms_to_cleaning) ? r.rooms_to_cleaning : [];
+    if (rooms.length) {
+      const sent = rooms.filter(x => x.released).length;
+      const held = rooms.filter(x => !x.released).map(x => x.message).filter(Boolean);
+      alert([t('events.complete.roomsCleaning', { sent, total: rooms.length }), ...held].join('\n'));
+    }
     if (r?.warning) alert(r.warning); else if (okMsg) alert(okMsg);
     await load();
   };
@@ -1799,9 +1829,17 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             {editable && <select className={`${INPUT} w-auto text-xs`} value="" onChange={e => e.target.value && addRental(e.target.value)}>
               <option value="">+ {t('common.add')}</option>{rentals.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>}</div>
+          {shortages.length > 0 && (
+            <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
+              <span className="font-bold">{t('events.shortage.banner')}</span>{' '}
+              {shortages.map((x: any) => t('events.shortage.line', { name: x.name, need: x.requested, have: x.available, short: x.short_by })).join(' · ')}
+            </div>
+          )}
           {(bk.items || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.items || []).map((it: any, i: number) => (
-            <div key={it.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
-              <span className="flex-1 min-w-0 truncate">{it.name_snapshot} <span className="text-[#9d8b7e]">({it.rate_basis}{spanNote(rentalUnitsFor(it))})</span></span>
+            <div key={`${it.id}-${nonce}`} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+              <span className="flex-1 min-w-0 truncate">{it.name_snapshot} <span className="text-[#9d8b7e]">({it.rate_basis}{spanNote(rentalUnitsFor(it))})</span>
+                {shortages.some((x: any) => x.rental_item_id === it.rental_item_id) && <span className="ml-1 text-[10px] font-bold text-amber-700">{t('events.shortage.short', { n: shortages.find((x: any) => x.rental_item_id === it.rental_item_id)?.short_by })}</span>}
+              </span>
               {editable ? (
                 <>
                   <input type="number" min={0} defaultValue={it.quantity} title="Qty" onBlur={e => commitLine('items', i, 'quantity', e.target.value)} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
@@ -2261,6 +2299,7 @@ function EventObjectRouter({ restaurantId, token, obj, venues, onOpenObject, onB
 // Status palette mirroring the Hotel availability calendar (Indian-PMS convention).
 const EV_CAL = {
   CONFIRMED: { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8' },   // assigned / held (coral)
+  COMPLETED: { bg: '#d1fae5', fg: '#065f46', border: '#6ee7b7' },   // event held and closed (green)
   TENTATIVE: { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24' },   // inquiry / quoted (amber)
   BLOCKED:   { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af' },   // maintenance / hold (grey)
   FREE:      { bg: '#f7faf7', fg: '#1f513f', border: '#dcecdf' },   // available (green tint)
@@ -2311,10 +2350,13 @@ function EventCalendar({ restaurantId, token }: Props) {
   // An event whose last day is before today is over, whether or not anyone
   // marked it Completed, so it no longer occupies the calendar. Staff find the
   // ones still to close under Bookings → Needs closing.
-  const stillOn = (b: any) => evEndDate(b) >= todayIso();
+  // A COMPLETED event stays on the calendar on its own dates, as a record of the
+  // hall's use; it ranks after anything still live on the same day.
+  const stillOn = (b: any) => b.status === 'COMPLETED' || evEndDate(b) >= todayIso();
+  const rank = (b: any) => CONFIRMED_ST.includes(b.status) ? 0 : b.status === 'COMPLETED' ? 2 : 1;
   const coveringBookings = (venueId: string, date: string) => (data?.bookings || [])
-    .filter((b: any) => b.venue_id === venueId && stillOn(b) && covers(b, date) && [...CONFIRMED_ST, 'INQUIRY', 'QUOTED'].includes(b.status))
-    .sort((a: any, b: any) => (CONFIRMED_ST.includes(a.status) ? 0 : 1) - (CONFIRMED_ST.includes(b.status) ? 0 : 1));
+    .filter((b: any) => b.venue_id === venueId && stillOn(b) && covers(b, date) && [...CONFIRMED_ST, 'INQUIRY', 'QUOTED', 'COMPLETED'].includes(b.status))
+    .sort((a: any, b: any) => rank(a) - rank(b));
   const cellFor = (venueId: string, date: string) => {
     const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && String(b.from_date).slice(0, 10) <= date && String(b.to_date).slice(0, 10) >= date);
     if (blocked) return { title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED, booking: null as any, all: [] as any[], isStart: false, count: 0 };
@@ -2323,7 +2365,7 @@ function EventCalendar({ restaurantId, token }: Props) {
     const primary = all[0];
     const isConfirmed = CONFIRMED_ST.includes(primary.status);
     const extra = all.length > 1 ? ` (+${all.length - 1} ${t('events.calendar.more')})` : '';
-    return { title: `${primary.customer_name} · ${primary.status}${extra}`, sty: isConfirmed ? EV_CAL.CONFIRMED : EV_CAL.TENTATIVE, booking: primary, all, isStart: String(primary.event_date).slice(0, 10) === date, count: all.length };
+    return { title: `${primary.customer_name} · ${primary.status}${extra}`, sty: isConfirmed ? EV_CAL.CONFIRMED : primary.status === 'COMPLETED' ? EV_CAL.COMPLETED : EV_CAL.TENTATIVE, booking: primary, all, isStart: String(primary.event_date).slice(0, 10) === date, count: all.length };
   };
   const cellName = (b: any) => b.customer_name?.split(' ')[0]?.slice(0, 9) || t('events.calendar.booked');
 
@@ -2341,6 +2383,7 @@ function EventCalendar({ restaurantId, token }: Props) {
   const bookings = (data?.bookings || []).filter(stillOn);
   const kConfirmed = bookings.filter((b: any) => ['CONFIRMED', 'IN_PROGRESS'].includes(b.status)).length;
   const kTentative = bookings.filter((b: any) => ['INQUIRY', 'QUOTED'].includes(b.status)).length;
+  const kCompleted = bookings.filter((b: any) => b.status === 'COMPLETED').length;
   const kBlocked = (data?.blocks || []).length;
   const kpi = (label: string, value: number, sty: any) => (
     <div className="rounded-xl border px-3 py-2 min-w-[92px]" style={{ background: sty.bg, borderColor: sty.border }}>
@@ -2366,6 +2409,7 @@ function EventCalendar({ restaurantId, token }: Props) {
       <div className="flex flex-wrap gap-2 mb-3">
         {kpi(t('events.calendar.booked'), kConfirmed, EV_CAL.CONFIRMED)}
         {kpi(t('events.reports.inquiries'), kTentative, EV_CAL.TENTATIVE)}
+        {kpi(t('events.calendar.completed'), kCompleted, EV_CAL.COMPLETED)}
         {kpi(t('events.calendar.blocked'), kBlocked, EV_CAL.BLOCKED)}
       </div>
 
@@ -2429,6 +2473,7 @@ function EventCalendar({ restaurantId, token }: Props) {
       <div className="flex flex-wrap gap-3 mt-3 text-[10px] text-[#6b5d52]">
         {dot(EV_CAL.CONFIRMED, t('events.calendar.booked'))}
         {dot(EV_CAL.TENTATIVE, t('events.reports.inquiries'))}
+        {dot(EV_CAL.COMPLETED, t('events.calendar.completed'))}
         {dot(EV_CAL.BLOCKED, t('events.calendar.blocked'))}
         {dot(EV_CAL.FREE, t('events.calendar.free'))}
       </div>
@@ -2936,6 +2981,47 @@ function EventDashboard({ restaurantId, token }: Props) {
 }
 
 // Reports & exports — tabular breakdowns with per-table and full CSV download.
+// Upcoming bookings that need more of a rental item than the shelf holds, so the
+// event manager can arrange the difference before the day.
+function RentalShortageReport({ restaurantId, token }: Props) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => { api('/events/reports/rental-shortages').then(setData).catch((e: any) => setErr(e.message)); }, []);
+  return (
+    <div className={`${CARD} mb-4`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+        <h3 className="font-bold text-sm">{t('events.shortage.reportTitle')}</h3>
+        {data && <span className="text-[11px] text-[#6b5d52]">{t('events.shortage.reportSummary', { bookings: data.bookings_affected, units: data.total_short_units })}</span>}
+      </div>
+      <p className="text-[11px] text-[#9d8b7e] mb-2">{t('events.shortage.reportSub')}</p>
+      {err ? <p className="text-xs text-rose-700">{err}</p> : !data ? <p className="text-xs text-[#6b5d52]">{t('common.loading')}</p> : (
+        <DataTable
+          data={data.rows || []}
+          rowKey={(r: any) => `${r.booking_id}-${r.rental_item_id}`}
+          columnChooser columnFilters tableId="events-rental-shortages"
+          exportFilename="event-rental-shortages"
+          emptyMessage={t('events.shortage.none')}
+          columns={[
+            { key: 'event_date', label: t('events.bookings.eventDate'), sortable: true, getValue: (r: any) => r.event_date, render: (r: any) => r.end_date && r.end_date !== r.event_date ? `${r.event_date} → ${r.end_date}` : r.event_date },
+            { key: 'customer_name', label: t('events.bookings.customer'), sortable: true, searchable: true },
+            { key: 'venue_name', label: t('events.bookings.venue'), sortable: true, filterable: true, filterType: 'select', filterOptions: [...new Set((data.rows || []).map((r: any) => r.venue_name || '—'))].sort().map((v: any) => ({ value: v, label: v })), getValue: (r: any) => r.venue_name || '—' },
+            { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', filterOptions: ['INQUIRY', 'QUOTED', 'CONFIRMED', 'IN_PROGRESS'].map(v => ({ value: v, label: STATUS_META[v]?.label || v })), render: (r: any) => <Pill status={r.status} /> },
+            { key: 'name', label: t('events.shortage.item'), sortable: true, searchable: true, filterable: true, filterType: 'select', filterOptions: [...new Set((data.rows || []).map((r: any) => r.name))].sort().map((v: any) => ({ value: v, label: v })) },
+            { key: 'requested', label: t('events.shortage.needed'), sortable: true, align: 'right' },
+            { key: 'owned', label: t('events.rentals.qtyOwned'), sortable: true, align: 'right', hideable: true },
+            { key: 'committed_elsewhere', label: t('events.shortage.elsewhere'), sortable: true, align: 'right', hideable: true },
+            { key: 'available', label: t('events.shortage.available'), sortable: true, align: 'right' },
+            { key: 'short_by', label: t('events.shortage.shortBy'), sortable: true, align: 'right', render: (r: any) => <span className="font-bold text-amber-700">{r.short_by}</span> },
+            { key: 'customer_phone', label: t('events.bookings.phone'), hideable: true, defaultHidden: true },
+          ]}
+        />
+      )}
+    </div>
+  );
+}
+
 function EventReports({ restaurantId, token }: Props) {
   const { t } = useT();
   const { data, loading, from, to, setFrom, setTo } = useEventAnalytics(restaurantId, token);
@@ -3000,6 +3086,7 @@ function EventReports({ restaurantId, token }: Props) {
   return (
     <div>
       <SectionHeader icon={<FileText size={18} />} title={t('events.reports.title')} sub={t('events.reports.sub')} />
+      <RentalShortageReport restaurantId={restaurantId} token={token} />
       <PeriodBar from={from} to={to} setFrom={setFrom} setTo={setTo} onExport={exportAll} />
       {loading || !data ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
         <>

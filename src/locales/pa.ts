@@ -805,4 +805,22 @@ export const pa: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'ਤੁਹਾਡਾ ਭੁਗਤਾਨ ਮਿਲ ਗਿਆ ਅਤੇ ਤੁਹਾਡੀ ਅਪੌਇੰਟਮੈਂਟ ਪੱਕੀ ਹੈ।',
   // ── Events: needs closing ──
   'events.needsClosing': 'ਬੰਦ ਕਰਨੇ ਬਾਕੀ',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'ਇਸ ਇਵੈਂਟ ਲਈ ਕਾਫ਼ੀ ਸਟਾਕ ਨਹੀਂ',
+  'events.shortage.line': '{name}: {need} ਚਾਹੀਦੇ, {have} ਉਪਲਬਧ ({short} ਘੱਟ)',
+  'events.shortage.body': 'ਫਿਰ ਵੀ ਜੋੜੋ? ਘਾਟ ਇਵੈਂਟ ਰਿਪੋਰਟਾਂ ਵਿੱਚ ਦਿਖੇਗੀ ਤਾਂ ਜੋ ਇਵੈਂਟ ਤੋਂ ਪਹਿਲਾਂ ਪ੍ਰਬੰਧ ਹੋ ਸਕੇ।',
+  'events.shortage.addAnyway': 'ਫਿਰ ਵੀ ਜੋੜੋ',
+  'events.shortage.banner': 'ਇਸ ਇਵੈਂਟ ਲਈ ਸਟਾਕ ਘੱਟ:',
+  'events.shortage.short': '{n} ਘੱਟ',
+  'events.shortage.reportTitle': 'ਕਿਰਾਏ ਦੇ ਸਮਾਨ ਦੀ ਘਾਟ',
+  'events.shortage.reportSub': 'ਆਉਣ ਵਾਲੀਆਂ ਬੁਕਿੰਗਾਂ ਜਿਨ੍ਹਾਂ ਨੂੰ ਆਪਣੀਆਂ ਤਾਰੀਖਾਂ \'ਤੇ ਉਪਲਬਧ ਤੋਂ ਵੱਧ ਸਮਾਨ ਚਾਹੀਦਾ ਹੈ। ਇਵੈਂਟ ਤੋਂ ਪਹਿਲਾਂ ਪ੍ਰਬੰਧ ਕਰੋ।',
+  'events.shortage.reportSummary': '{bookings} ਬੁਕਿੰਗ · {units} ਯੂਨਿਟ ਘੱਟ',
+  'events.shortage.none': 'ਕੋਈ ਘਾਟ ਨਹੀਂ। ਹਰ ਆਉਣ ਵਾਲੀ ਬੁਕਿੰਗ ਲਈ ਸਟਾਕ ਹੈ।',
+  'events.shortage.item': 'ਸਮਾਨ',
+  'events.shortage.needed': 'ਚਾਹੀਦਾ',
+  'events.shortage.elsewhere': 'ਹੋਰ ਇਵੈਂਟਾਂ ਵਿੱਚ',
+  'events.shortage.available': 'ਉਪਲਬਧ',
+  'events.shortage.shortBy': 'ਘਾਟ',
+  'events.complete.roomsCleaning': 'ਇਵੈਂਟ ਦੇ {total} ਵਿੱਚੋਂ {sent} ਕਮਰੇ ਸਫ਼ਾਈ ਲਈ ਭੇਜੇ ਗਏ।',
+  'events.calendar.completed': 'ਪੂਰਾ',
 };

@@ -743,4 +743,22 @@ export const kn: Record<string, string> = {
   'pay.confirmedPaidHintSpa': 'ನಿಮ್ಮ ಪಾವತಿ ಸ್ವೀಕರಿಸಲಾಗಿದೆ ಮತ್ತು ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್ ದೃಢೀಕರಿಸಲಾಗಿದೆ.',
   // ── Events: needs closing ──
   'events.needsClosing': 'ಮುಚ್ಚಬೇಕಾದವು',
+  // ── Events: rental shortages, rooms to cleaning, completed on calendar ──
+  'events.shortage.title': 'ಈ ಕಾರ್ಯಕ್ರಮಕ್ಕೆ ಸಾಕಷ್ಟು ದಾಸ್ತಾನು ಇಲ್ಲ',
+  'events.shortage.line': '{name}: {need} ಬೇಕು, {have} ಲಭ್ಯ ({short} ಕೊರತೆ)',
+  'events.shortage.body': 'ಆದರೂ ಸೇರಿಸಬೇಕೆ? ಕಾರ್ಯಕ್ರಮದ ಮೊದಲು ವ್ಯವಸ್ಥೆ ಮಾಡಲು ಕೊರತೆಯನ್ನು ಕಾರ್ಯಕ್ರಮ ವರದಿಗಳಲ್ಲಿ ತೋರಿಸಲಾಗುತ್ತದೆ.',
+  'events.shortage.addAnyway': 'ಆದರೂ ಸೇರಿಸಿ',
+  'events.shortage.banner': 'ಈ ಕಾರ್ಯಕ್ರಮಕ್ಕೆ ದಾಸ್ತಾನು ಕೊರತೆ:',
+  'events.shortage.short': '{n} ಕೊರತೆ',
+  'events.shortage.reportTitle': 'ಬಾಡಿಗೆ ವಸ್ತು ಕೊರತೆ',
+  'events.shortage.reportSub': 'ತಮ್ಮ ದಿನಾಂಕಗಳಲ್ಲಿ ಲಭ್ಯಕ್ಕಿಂತ ಹೆಚ್ಚು ವಸ್ತು ಬೇಕಾದ ಮುಂಬರುವ ಬುಕಿಂಗ್‌ಗಳು. ಕಾರ್ಯಕ್ರಮದ ಮೊದಲು ವ್ಯವಸ್ಥೆ ಮಾಡಿ.',
+  'events.shortage.reportSummary': '{bookings} ಬುಕಿಂಗ್ · {units} ಘಟಕ ಕೊರತೆ',
+  'events.shortage.none': 'ಕೊರತೆ ಇಲ್ಲ. ಪ್ರತಿ ಮುಂಬರುವ ಬುಕಿಂಗ್‌ಗೆ ದಾಸ್ತಾನು ಇದೆ.',
+  'events.shortage.item': 'ವಸ್ತು',
+  'events.shortage.needed': 'ಬೇಕು',
+  'events.shortage.elsewhere': 'ಇತರ ಕಾರ್ಯಕ್ರಮಗಳಲ್ಲಿ',
+  'events.shortage.available': 'ಲಭ್ಯ',
+  'events.shortage.shortBy': 'ಕೊರತೆ',
+  'events.complete.roomsCleaning': 'ಕಾರ್ಯಕ್ರಮದ {total} ಕೊಠಡಿಗಳಲ್ಲಿ {sent} ಸ್ವಚ್ಛತೆಗೆ ಕಳುಹಿಸಲಾಗಿದೆ.',
+  'events.calendar.completed': 'ಪೂರ್ಣಗೊಂಡಿದೆ',
 };

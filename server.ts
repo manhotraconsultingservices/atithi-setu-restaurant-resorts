@@ -29,7 +29,7 @@ import {
 } from "./spaService.ts";
 import {
   createEventTables, seedEventDefaults,
-  resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
+  resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty, rentalShortages,
   recomputeEventPaid, reconcileEventSchedule, eventStaffConflict,
   halfDayWindow, venueTurnaroundMin,
 } from "./eventsService.ts";
@@ -31933,6 +31933,29 @@ ${data.tenant.name}`;
     const ids = await raiseChecklistJobs(db, { ...o, trigger });
     return ids[0] || null;
   };
+  // Put a room into CLEANING and raise its departure checklist, exactly as a
+  // guest check-out does. Shared by hotel check-out and event completion so the
+  // two can never drift apart. Never throws: cleaning must not block the caller.
+  const _sendRoomToCleaning = async (tenantDb: any, req: AuthRequest, restaurantId: string, o: { roomId: string; bookingId: string; guestName?: string | null; checkOutDate?: any; summary: string }): Promise<void> => {
+    await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [o.roomId]);
+    await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: o.roomId, action: 'CLEANING', summary: o.summary });
+    try {
+      const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout, checklist_two_stage_cleaning FROM restaurants WHERE id = ?", [restaurantId]).catch(() => null);
+      const twoStage = Number(coCfg?.checklist_two_stage_cleaning ?? 0) === 1;
+      const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
+      const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [o.roomId]).catch(() => null);
+      const rmLbl = rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : o.roomId);
+      // Stage 1 — the CHECK_OUT (inspection) checklist. In two-stage mode it MUST gate
+      // (blocking) so the Room Cleaning stage is chained only after inspection is done.
+      await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: o.roomId, facility_label: rmLbl, source_ref: o.bookingId, guest_label: o.guestName || null, room_type_id: rm?.type_id || null, blocks_release_override: twoStage ? 1 : (enforceCheckout ? null : 0), due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: o.checkOutDate }) });
+      // Single-stage: raise the ROOM_CLEANING status checklist now (non-blocking).
+      // Two-stage: the Room Cleaning (CLEANING) checklist is chained on CHECK_OUT completion instead.
+      if (!twoStage) {
+        await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: o.roomId, facility_label: rmLbl, source_ref: o.bookingId, guest_label: o.guestName || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
+      }
+    } catch { /* non-fatal — never block the caller */ }
+  };
+
   // Only RELEASE-BLOCKING open jobs gate a facility (inspections etc. don't).
   const hasOpenHousekeepingJob = async (db: any, facilityId: string): Promise<boolean> => {
     try { const r: any = await db.get("SELECT id FROM housekeeping_jobs WHERE facility_id = ? AND status = 'OPEN' AND blocks_release = 1 LIMIT 1", [facilityId]); return !!r; }
@@ -33686,7 +33709,7 @@ ${data.tenant.name}`;
       const bookings: any[] = await db.query(
         `SELECT id, venue_id, customer_name, event_date, end_date, start_time, end_time, status, event_type
            FROM event_bookings
-          WHERE status IN ('CONFIRMED','IN_PROGRESS','QUOTED','INQUIRY')
+          WHERE status IN ('CONFIRMED','IN_PROGRESS','QUOTED','INQUIRY','COMPLETED')
             AND event_date <= ? AND COALESCE(end_date, event_date) >= ?`,
         [to, from]
       );
@@ -33915,6 +33938,41 @@ ${data.tenant.name}`;
     })();
   };
 
+  // Rental items this write would take beyond what the shelf holds for the
+  // event's dates. Only items whose quantity GOES UP are checked, so an edit that
+  // does not add stock never re-asks about a shortage already accepted.
+  // `next` = the booking's new line quantities per item; `extra` = an add-on
+  // about to be appended. Returns [] when nothing is short.
+  const _eventRentalShortfall = async (db: any, bk: any, next: Map<string, number> | null, extra?: { itemId: string; qty: number }) => {
+    const cur = new Map<string, number>();
+    if (bk?.id) {
+      const lines: any[] = await db.query("SELECT rental_item_id, SUM(quantity)::int AS q FROM event_booking_items WHERE booking_id = ? GROUP BY rental_item_id", [bk.id]).catch(() => []);
+      for (const r of lines) if (r.rental_item_id) cur.set(r.rental_item_id, Number(r.q || 0));
+    }
+    const own = new Map<string, number>();
+    if (bk?.id) {
+      const adds: any[] = await db.query("SELECT ref_id, SUM(quantity) AS q FROM event_booking_addons WHERE booking_id = ? AND category = 'RENTAL' AND COALESCE(status, 'ACTIVE') = 'ACTIVE' GROUP BY ref_id", [bk.id]).catch(() => []);
+      for (const r of adds) if (r.ref_id) own.set(r.ref_id, Number(r.q || 0));
+    }
+    const after = next || cur;
+    const grow = new Map<string, number>();
+    for (const [id, q] of after) if (q > (cur.get(id) || 0)) grow.set(id, q + (own.get(id) || 0));
+    if (extra?.itemId && extra.qty > 0) grow.set(extra.itemId, (after.get(extra.itemId) || 0) + (own.get(extra.itemId) || 0) + extra.qty);
+    if (!grow.size) return [];
+    const start = normaliseDateIso(bk.event_date);
+    if (!start) return [];
+    return rentalShortages(db, { bookingId: bk.id || undefined, eventDate: start, endDate: bk.end_date ? normaliseDateIso(bk.end_date) : null, requested: grow });
+  };
+  const _eventRentalWanted = (items: any): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (const it of (Array.isArray(items) ? items : [])) {
+      if (!it?.rental_item_id) continue;
+      m.set(it.rental_item_id, (m.get(it.rental_item_id) || 0) + Math.max(0, Number(it.quantity ?? 1) || 0));
+    }
+    return m;
+  };
+  const _shortageText = (s: any[]) => s.map(x => `${x.name}: need ${x.requested}, ${x.available} available (short ${x.short_by})`).join('; ');
+
   // Insert booking line items (rentals + services) from request arrays.
   const insertEventLines = async (db: any, bookingId: string, body: any) => {
     // Default a rental's rate_basis to the EVENT's basis (hourly event → hourly rate),
@@ -33983,6 +34041,47 @@ ${data.tenant.name}`;
   // One-shot operations cockpit for the Events & Convention business: pipeline,
   // conversion, venue utilization, revenue trend, receivables, covers. Computed
   // in JS from a single windowed pull (per-tenant volumes are small).
+  // Rental shortages: every upcoming live booking that needs more of a rental
+  // item than the shelf holds for its dates, so the event manager can arrange
+  // the difference in time. Computed live, so it moves as other bookings change.
+  app.get("/api/restaurant/:id/events/reports/rental-shortages", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (!(String(req.user?.role || '').toUpperCase() === 'MANAGER' || (await _roleHasTab(req, 'EVENTS_REPORTS', 1)) || (await _roleHasTab(req, 'EVENTS_BOOKINGS', 1)))) return res.status(403).json({ error: 'You do not have access to event reports.' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const todayIst = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from || '')) ? String(req.query.from) : todayIst;
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to || '')) ? String(req.query.to) : new Date(Date.parse(from + 'T00:00:00Z') + 180 * 86400000).toISOString().slice(0, 10);
+      const onlyBooking = String(req.query.booking_id || '').trim();
+      const params: any[] = [to, from];
+      if (onlyBooking) params.push(onlyBooking);
+      const bookings: any[] = await db.query(
+        `SELECT b.id, b.customer_name, b.customer_phone, b.event_date, b.end_date, b.status, v.name AS venue_name
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.status IN ('INQUIRY','QUOTED','CONFIRMED','IN_PROGRESS')
+            AND b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?
+            ${onlyBooking ? 'AND b.id = ?' : ''}
+          ORDER BY b.event_date, b.customer_name`, params).catch(() => []);
+      const rows: any[] = [];
+      for (const bk of bookings) {
+        const want = new Map<string, number>();
+        const lines: any[] = await db.query("SELECT rental_item_id, SUM(quantity)::int AS q FROM event_booking_items WHERE booking_id = ? AND rental_item_id IS NOT NULL GROUP BY rental_item_id", [bk.id]).catch(() => []);
+        for (const r of lines) want.set(r.rental_item_id, Number(r.q || 0));
+        const adds: any[] = await db.query("SELECT ref_id, SUM(quantity) AS q FROM event_booking_addons WHERE booking_id = ? AND category = 'RENTAL' AND COALESCE(status, 'ACTIVE') = 'ACTIVE' AND ref_id IS NOT NULL GROUP BY ref_id", [bk.id]).catch(() => []);
+        for (const r of adds) want.set(r.ref_id, (want.get(r.ref_id) || 0) + Number(r.q || 0));
+        if (!want.size) continue;
+        const start = normaliseDateIso(bk.event_date);
+        const short = await rentalShortages(db, { bookingId: bk.id, eventDate: start, endDate: bk.end_date ? normaliseDateIso(bk.end_date) : null, requested: want });
+        for (const s of short) rows.push({ booking_id: bk.id, customer_name: bk.customer_name, customer_phone: bk.customer_phone, event_date: start, end_date: bk.end_date ? normaliseDateIso(bk.end_date) : null, status: bk.status, venue_name: bk.venue_name || null, ...s });
+      }
+      res.json({ from, to, rows, total_short_units: rows.reduce((a, r) => a + Number(r.short_by || 0), 0), bookings_affected: new Set(rows.map(r => r.booking_id)).size });
+    } catch (err: any) {
+      console.error('/events/reports/rental-shortages error:', err);
+      res.status(500).json({ error: 'Failed to build the rental shortage report' });
+    }
+  });
+
   app.get("/api/restaurant/:id/events/analytics", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -35003,6 +35102,13 @@ ${data.tenant.name}`;
       const acctLink = await _checkAccountLink(db, b.account_id);
       if (!acctLink.ok) return res.status(400).json({ error: acctLink.error });
 
+      let createShort: any[] = [];
+      if (Array.isArray(b.items) && b.items.length) {
+        createShort = await _eventRentalShortfall(db, { id: null, event_date: b.event_date, end_date: b.end_date || null }, _eventRentalWanted(b.items));
+        if (createShort.length && !b.confirm_shortage) {
+          return res.status(409).json({ code: 'RENTAL_SHORTAGE', error: `Not enough stock for this event's dates. ${_shortageText(createShort)}`, shortages: createShort });
+        }
+      }
       const id = mkEventId('EVT');
       // account_id is appended LAST in both the column list and the values, so
       // the existing 22 bindings keep their positions.
@@ -35021,6 +35127,9 @@ ${data.tenant.name}`;
       );
       await insertEventLines(db, id, b);
       await recomputeEventTotal(db, id);
+      if (createShort.length) {
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'RENTAL_SHORTAGE_ACCEPTED', summary: `Created despite a stock shortage — ${_shortageText(createShort)}`, after: { shortages: createShort } }).catch(() => {});
+      }
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})${acctLink.account ? ` — billed to ${acctLink.account.name}` : ''}`, after: row });
       notifyEvent(req.params.id, 'EVENT_BOOKING_CREATED', row);
@@ -35112,6 +35221,18 @@ ${data.tenant.name}`;
         b.account_id = link.account?.id || null;
       }
 
+      // Rental stock: adding more than the shelf holds needs an explicit confirm,
+      // and the accepted shortage is audited (and listed in Reports → Rental shortages).
+      let acceptedShort: any[] = [];
+      if (Array.isArray(b.items)) {
+        const merged = { ...existing, event_date: b.event_date ?? existing.event_date, end_date: b.end_date !== undefined ? b.end_date : existing.end_date };
+        const short = await _eventRentalShortfall(db, merged, _eventRentalWanted(b.items));
+        if (short.length && !b.confirm_shortage) {
+          return res.status(409).json({ code: 'RENTAL_SHORTAGE', error: `Not enough stock for this event's dates. ${_shortageText(short)}`, shortages: short });
+        }
+        acceptedShort = short;
+      }
+
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','customer_address','event_type',
         'event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot','guest_count','booking_source',
@@ -35135,6 +35256,9 @@ ${data.tenant.name}`;
       }
       if (Array.isArray(b.items) || Array.isArray(b.services) || Array.isArray(b.catering)) {
         await insertEventLines(db, req.params.bid, b);
+      }
+      if (acceptedShort.length) {
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'RENTAL_SHORTAGE_ACCEPTED', summary: `Added despite a stock shortage — ${_shortageText(acceptedShort)}`, after: { shortages: acceptedShort } }).catch(() => {});
       }
       await recomputeEventTotal(db, req.params.bid);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
@@ -35896,7 +36020,17 @@ ${data.tenant.name}`;
         } catch { /* non-fatal */ }
       }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Booking marked COMPLETED', after: { status: 'COMPLETED' } });
-      res.json({ success: true });
+      // Every hotel room reserved for this event goes to cleaning, through the Hotel API.
+      const rooms: any[] = [];
+      const links: any[] = await db.query("SELECT DISTINCT hotel_booking_id FROM event_booking_rooms WHERE booking_id = ? AND hotel_booking_id IS NOT NULL", [req.params.bid]).catch(() => []);
+      for (const l of links) {
+        const r = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings/${encodeURIComponent(l.hotel_booking_id)}/release-for-cleaning`, req.headers.authorization, {});
+        rooms.push({ hotel_booking_id: l.hotel_booking_id, released: !!r.data?.released, reason: r.ok ? (r.data?.reason || null) : 'ERROR', message: r.ok ? (r.data?.message || null) : (r.data?.error || `HTTP ${r.status}`) });
+      }
+      if (rooms.length) {
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOMS_TO_CLEANING', summary: `${rooms.filter(r => r.released).length} of ${rooms.length} event room(s) sent to cleaning`, after: { rooms } }).catch(() => {});
+      }
+      res.json({ success: true, rooms_to_cleaning: rooms });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete booking" }); }
   });
 
@@ -36240,6 +36374,14 @@ ${data.tenant.name}`;
       if (unitRate === null || !isFinite(unitRate) || unitRate < 0) return res.status(400).json({ error: "A valid unit rate is required." });
       if (gst === null || !isFinite(gst)) gst = await resolveEventGstRate(db);
       const qty = Math.max(1, Number(b.quantity || 1) || 1);
+      let addonShort: any[] = [];
+      if (category === 'RENTAL' && b.ref_id) {
+        const full: any = await db.get("SELECT id, event_date, end_date FROM event_bookings WHERE id = ?", [req.params.bid]);
+        addonShort = await _eventRentalShortfall(db, full, null, { itemId: String(b.ref_id), qty });
+        if (addonShort.length && !b.confirm_shortage) {
+          return res.status(409).json({ code: 'RENTAL_SHORTAGE', error: `Not enough stock for this event's dates. ${_shortageText(addonShort)}`, shortages: addonShort });
+        }
+      }
       const lineTotal = round2(qty * unitRate);
       const id = mkEventId('EBA');
       await db.run(
@@ -36250,6 +36392,9 @@ ${data.tenant.name}`;
          qty, unitRate, gst, lineTotal, (req.user?.email || req.user?.userName || null)]
       );
       await recomputeEventTotal(db, req.params.bid);
+      if (addonShort.length) {
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'RENTAL_SHORTAGE_ACCEPTED', summary: `Add-on despite a stock shortage — ${_shortageText(addonShort)}`, after: { shortages: addonShort } }).catch(() => {});
+      }
       const row = await db.get("SELECT * FROM event_booking_addons WHERE id = ?", [id]);
       res.status(201).json(row);
     } catch (err: any) {
@@ -54058,6 +54203,41 @@ ${data.tenant.name}`;
   });
 
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
+  // A room reserved for an EVENT goes to cleaning when the event is completed.
+  // Owned by Hotel; Events calls it through the API (never touches hotel tables).
+  // Leaves alone a room whose guest is still checked in (their own check-out sends
+  // it to cleaning), and a room another guest now occupies.
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/release-for-cleaning", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get("SELECT id, status, room_id, guest_name, check_out_date FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found' });
+      // Hotel room rights, OR the event manager completing the event this room belongs to.
+      const hotelOk = String(req.user?.role || '').toUpperCase() === 'MANAGER' || (await _roleHasTab(req, 'ROOMS', 2)) || (await _roleHasTab(req, 'HOUSEKEEPING', 2)) || (await _roleHasTab(req, 'HOTEL_BOOKINGS', 2));
+      if (!hotelOk) {
+        const link: any = await tenantDb.get("SELECT eb.id FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id WHERE r.hotel_booking_id = ? AND eb.status = 'COMPLETED' LIMIT 1", [req.params.bookingId]).catch(() => null);
+        if (!link || !(await _roleHasTab(req, 'EVENTS_BOOKINGS', 2))) return res.status(403).json({ error: 'You do not have permission to change room status.' });
+      }
+      const st = String(b.status || '').toUpperCase();
+      if (!b.room_id) return res.json({ released: false, reason: 'NO_ROOM', message: 'No room was assigned to this reservation.' });
+      if (st === 'CANCELLED') return res.json({ released: false, reason: 'CANCELLED', message: 'The reservation was cancelled.' });
+      if (st === 'CHECKED_IN') return res.json({ released: false, reason: 'GUEST_IN_HOUSE', message: 'The guest is still checked in; the room goes to cleaning at their check-out.' });
+      if (st === 'CHECKED_OUT') return res.json({ released: false, reason: 'ALREADY_CHECKED_OUT', message: 'Already sent to cleaning at check-out.' });
+      const room: any = await tenantDb.get("SELECT status FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+      const inHouse: any = await tenantDb.get("SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' AND id <> ? LIMIT 1", [b.room_id, b.id]).catch(() => null);
+      if (inHouse) return res.json({ released: false, reason: 'ROOM_OCCUPIED', message: 'Another guest is checked in to this room now.' });
+      if (['MAINTENANCE', 'BLOCKED'].includes(String(room?.status || '').toUpperCase())) return res.json({ released: false, reason: 'ROOM_' + String(room.status).toUpperCase(), message: `The room is under ${String(room.status).toLowerCase()}.` });
+      if (String(room?.status || '').toUpperCase() === 'CLEANING') return res.json({ released: true, already: true, room_id: b.room_id });
+      await _sendRoomToCleaning(tenantDb, req, req.params.id, { roomId: b.room_id, bookingId: b.id, guestName: b.guest_name, checkOutDate: b.check_out_date, summary: `Cleaning — event over (${b.guest_name || 'event guest'})` });
+      res.json({ released: true, room_id: b.room_id });
+    } catch (err: any) {
+      console.error('[hotel] release-for-cleaning failed:', err);
+      res.status(500).json({ error: 'Failed to send the room to cleaning' });
+    }
+  });
+
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'UPDATE'), aiosellEventHook('CHECKED_OUT'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -54237,29 +54417,11 @@ ${data.tenant.name}`;
       const now = new Date().toISOString();
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
       await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'CHECKED_OUT', summary: `Checked out — ${b.guest_name || ''}${settled?.grand_total != null ? ` · ₹${Number(settled.grand_total).toFixed(2)} via ${effectiveMethod}` : ''}${waive ? ' (waived)' : ''}`.trim(), before: { status: b.status, actual_checkout_at: b.actual_checkout_at || null }, after: { status: 'CHECKED_OUT', actual_checkout_at: now, grand_total: settled?.grand_total != null ? Number(settled.grand_total) : null, payment_method: effectiveMethod, waived: !!waive, folio_id: settled?.id || null } });
-      await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
-      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'CLEANING', summary: `Cleaning — guest ${b.guest_name || ''} checked out`.trim() });
+      // Housekeeping: the room goes to CLEANING with its departure checklist. When the
+      // owner keeps checklist_validate_on_checkout=1 (default) the room stays CLEANING
+      // (not bookable) until the job's mandatory tasks are done.
+      await _sendRoomToCleaning(tenantDb, req, req.params.id, { roomId: b.room_id, bookingId: req.params.bookingId, guestName: b.guest_name, checkOutDate: b.check_out_date, summary: `Cleaning — guest ${b.guest_name || ''} checked out`.trim() });
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
-      // Housekeeping: raise a cleaning job from the ROOM checklist. When the owner
-      // keeps checklist_validate_on_checkout=1 (default) the room stays CLEANING
-      // (not bookable) until the job's mandatory tasks are done. When they've
-      // turned it OFF, the same checklist is still raised for the worklist but is
-      // forced non-blocking so it never holds the room.
-      try {
-        const coCfg: any = await centralDb.get("SELECT checklist_validate_on_checkout, checklist_two_stage_cleaning FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
-        const twoStage = Number(coCfg?.checklist_two_stage_cleaning ?? 0) === 1;
-        const enforceCheckout = Number(coCfg?.checklist_validate_on_checkout ?? 1) === 1;
-        const rm: any = await tenantDb.get("SELECT name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
-        const rmLbl = rm?.name || (rm?.room_number ? `Room ${rm.room_number}` : b.room_id);
-        // Stage 1 — the CHECK_OUT (inspection) checklist. In two-stage mode it MUST gate
-        // (blocking) so the Room Cleaning stage is chained only after inspection is done.
-        await createHousekeepingJob(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLbl, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, blocks_release_override: twoStage ? 1 : (enforceCheckout ? null : 0), due_date: _checklistDueDate('CHECK_OUT', { checkOutDate: b.check_out_date }) });
-        // Single-stage: raise the ROOM_CLEANING status checklist now (non-blocking).
-        // Two-stage: the Room Cleaning (CLEANING) checklist is chained on CHECK_OUT completion instead.
-        if (!twoStage) {
-          await raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: rmLbl, source_ref: req.params.bookingId, guest_label: b.guest_name || null, room_type_id: rm?.type_id || null, trigger: 'ROOM_CLEANING', blocks_release_override: 0 });
-        }
-      } catch { /* non-fatal — never block checkout */ }
 
       // ── Fire the unified loyalty hook so the folio counts toward the
       //    guest's lifetime spend the same way a restaurant order does.
@@ -67286,8 +67448,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'wa-not-in-plan-status',
+    commit_marker: 'events-rooms-cleaning-rental-shortage-calendar-completed',
     code_features: [
+      'events-rooms-cleaning-rental-shortage-calendar-completed  Owner bug batch. (1) Completing an event sent only the hall to cleaning; every hotel room reserved for the event now goes to CLEANING with the departure checklist, through a new Hotel route POST /hotel/bookings/:bookingId/release-for-cleaning (skips a guest still checked in, a room another guest occupies, maintenance/blocked rooms). The check-out cleaning steps moved into one helper, _sendRoomToCleaning, used by both. (2) Rental items could be added beyond stock with no warning. Booking create/edit and rental add-ons now return 409 RENTAL_SHORTAGE with the per-item shortfall unless confirm_shortage is sent; an accepted shortage is audited. Availability now counts multi-day overlap and add-on rentals. New GET /events/reports/rental-shortages lists upcoming bookings short of stock. (3) The events calendar shows completed bookings.',
       'wa-not-in-plan-status  A WhatsApp notification for a property without the WhatsApp add-on is logged NOT_IN_PLAN (with the upgrade hint), not FAILED, and nothing is attempted, so the failed counters and log only show real delivery problems. Older rows blocked for the same reason are relabelled once per tenant.',
       'feedback-link-builder-wa-name-status  One feedback link builder (_feedbackLinkFor) shared by the sweep and the admin template test, which can now send a real signed feedback link for an order. The WhatsApp connection test reports the sender display-name status from Meta (approved, pending, declined, none), which decides whether guests see the business name or just the number.',
       'feedback-link-app-host  Guest feedback links pointed at the bare domain, which is the marketing site, so every guest landed on its homepage instead of the feedback form. They now use the app host (FRONTEND_URL, else erp.atithi-setu.com), where GET /feedback is served.',
