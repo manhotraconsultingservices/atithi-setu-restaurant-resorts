@@ -7,9 +7,13 @@
 //     destructive actions (cancel, delete) last and in red.
 //   • An action can be disabled with a reason, which becomes its tooltip.
 //
-// The menu is fixed-positioned from its button so a table wrapped in
-// overflow-x-auto cannot clip it, and closes on outside click, Escape, scroll.
+// The menu is portalled to <body> and fixed-positioned from its button. Inside
+// the table, later rows (sticky action cells, animated or blurred cards) painted
+// over it and hid its first entries; a transformed ancestor also re-anchors a
+// fixed element. At the body it sits above everything. It closes on outside
+// click, Escape and scroll.
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MoreHorizontal } from 'lucide-react';
 
 export type RowActionTone = 'default' | 'primary' | 'success' | 'danger';
@@ -129,11 +133,11 @@ export function RowActions({ actions, moreLabel = 'More actions', align = 'end' 
           >
             <MoreHorizontal size={16} />
           </button>
-          {open && (
+          {open && typeof document !== 'undefined' && createPortal(
             <div
               ref={menuRef}
               role="menu"
-              style={{ position: 'fixed', top: pos?.top ?? -9999, left: pos?.left ?? -9999, zIndex: 200 }}
+              style={{ position: 'fixed', top: pos?.top ?? -9999, left: pos?.left ?? -9999, zIndex: 1000 }}
               className="min-w-[200px] bg-white border border-[#e8dccf] rounded-xl shadow-lg py-1.5"
             >
               {menu.map((a, i) => {
@@ -157,7 +161,8 @@ export function RowActions({ actions, moreLabel = 'More actions', align = 'end' 
                   </React.Fragment>
                 );
               })}
-            </div>
+            </div>,
+            document.body,
           )}
         </>
       )}

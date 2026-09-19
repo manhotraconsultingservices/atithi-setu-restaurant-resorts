@@ -68210,8 +68210,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'gstr1-hsn-zero-net-tax',
+    commit_marker: 'row-menu-portal',
     code_features: [
+      'row-menu-portal  PMS Reservations: the row menu first entries were hidden behind the next rows action buttons. The shared RowActions menu now renders at the page root through a portal, so no row, sticky cell or animated card can cover it (every table using it).',
       'gstr1-hsn-zero-net-tax  GSTR-1 Table 12 skipped any journal whose revenue nets to zero, so a fully discounted bill that still collected GST (Rs 180 on RESTO-1003, May) was counted in Tables 4 and 7 but missing from the HSN summary. Its tax is now spread over the journal positive revenue lines; the discount line carries the negative taxable at 0 tax.',
       'event-invoice-after-cancel  The event invoice route returned the bookings CANCELLED/voided/superseded invoice as already billed, so the event could never be invoiced again and callers (Complete, the admin backfill) reported success with nothing posted (Parandhayya: P Madhavarao). A dead invoice no longer counts; a new one is raised.',
       'event-complete-invoices  Owner: accounts captured nothing from events. Advances were posted, but revenue, output GST and the receivable are posted only when the event tax invoice is raised, and completing an event never raised one (Ankur Cafe: 23 of 27 completed events uninvoiced, Rs 11.6 lakh). Complete now raises the invoice through the event invoice route when there is no live one (response carries invoice). Super-admin repair routes: POST /api/admin/tenants/:id/events/invoice-completed (dry_run lists, then raises; ids optional) and POST /api/admin/tenants/:id/gl/repair-dates (dry_run; sets malformed entry_date from the timestamp prefix or, for Wed Aug 05, from the posting year checked against the weekday).',
