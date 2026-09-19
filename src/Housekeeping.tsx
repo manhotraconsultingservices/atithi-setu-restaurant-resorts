@@ -7,6 +7,8 @@ import {
   Sparkles, Check, X, Plus, RefreshCw, ListChecks, History, ShieldAlert, DoorOpen, Building2, ClipboardList,
 } from 'lucide-react';
 import { canDeleteTab } from './perm';
+import { DataTable } from './components/DataTable';
+import { useT } from './i18n';
 
 const CARD = 'bg-white rounded-2xl border border-[#e8dccf] p-5';
 const BTN = 'px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-colors';
@@ -19,7 +21,8 @@ const dt = (v: any) => v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'med
 // 'ROOM' → rooms only; 'ALL' (default) → the full hotel-side view (rooms + events).
 type HkScope = 'ALL' | 'ROOM' | 'EVENT';
 export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { restaurantId: string; token: string; scope?: HkScope }) {
-  const [view, setView] = useState<'WORKLIST' | 'CHECKLIST' | 'LOG'>('WORKLIST');
+  const { t } = useT();
+  const [view, setView] = useState<'WORKLIST' | 'CHECKLIST' | 'LOG' | 'OCCUPANCY'>('WORKLIST');
   const api = async (path: string, init: RequestInit = {}) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
     const b = await r.json().catch(() => ({}));
@@ -48,8 +51,10 @@ export function HousekeepingModule({ restaurantId, token, scope = 'ALL' }: { res
           {tabBtn('WORKLIST', 'Worklist', <ListChecks size={13} />)}
           {tabBtn('CHECKLIST', 'Checklists', <ClipboardList size={13} />)}
           {tabBtn('LOG', 'Cleaning Log', <History size={13} />)}
+          {tabBtn('OCCUPANCY', t('hk.occ.tab'), <ShieldAlert size={13} />)}
         </div>
       </div>
+      {view === 'OCCUPANCY' && <OccupancyCheck api={api} scope={scope} />}
       {view === 'WORKLIST' && <Worklist api={api} scope={scope} />}
       {view === 'CHECKLIST' && <ChecklistConfig api={api} scope={scope} />}
       {view === 'LOG' && <CleaningLog api={api} scope={scope} />}
@@ -272,6 +277,65 @@ function ChecklistConfig({ api, scope = 'ALL' }: { api: (p: string, i?: RequestI
 }
 
 // ── Cleaning log — history + per-facility counts ─────────────────────────────
+// ── Occupancy check — rooms and halls still tied up when they should be free ──
+// After a guest's check-out, after an event is completed, or with nothing left
+// that will release them. Each row says what is wrong and what to do.
+const OCC_CODES = ['ROOM_OCCUPIED_NO_GUEST', 'GUEST_PAST_CHECKOUT', 'EVENT_OVER_ROOM_HELD', 'CLEANING_NO_TASK', 'HALL_IN_USE_NO_EVENT', 'EVENT_NOT_CLOSED'];
+function OccupancyCheck({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) => Promise<any>; scope?: 'ALL' | 'ROOM' | 'EVENT' }) {
+  const { t } = useT();
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const load = () => { setErr(''); api('/housekeeping/occupancy-check').then(setData).catch((e: any) => setErr(e.message)); };
+  useEffect(load, []);
+  if (err) return <p className="text-sm text-rose-700 p-4">{err}</p>;
+  if (!data) return <p className="text-sm text-[#6b5d52] p-4">{t('common.loading')}</p>;
+  const rows = (data.rows || []).filter((r: any) => scope === 'ALL' || (scope === 'ROOM' ? r.kind === 'ROOM' : r.kind === 'HALL'));
+  const vars = (r: any) => ({ who: r.who || '—', date: r.since || '—', stay: r.stay_status ? t(`hk.occ.stay.${r.stay_status}`) : '', event_status: r.event_status ? t(`hk.occ.evst.${r.event_status}`) : '' });
+  const count = (code: string) => rows.filter((r: any) => r.code === code).length;
+  return (
+    <div className="space-y-3">
+      <div className={`${CARD} flex flex-wrap items-center justify-between gap-3`}>
+        <div>
+          <h3 className="font-bold text-sm text-[#14110c]">{t('hk.occ.title')}</h3>
+          <p className="text-xs text-[#9c8e85]">{t('hk.occ.sub', { date: data.as_of })}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${rows.length ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-700'}`}>{rows.length ? t('hk.occ.found', { n: rows.length }) : t('hk.occ.allClear')}</span>
+          <button className={BTN_GHOST} onClick={load}><RefreshCw size={13} />{t('hk.occ.refresh')}</button>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {OCC_CODES.filter(c => count(c) > 0).map(c => (
+          <span key={c} className="text-[11px] px-2.5 py-1 rounded-full bg-[#faf7f2] border border-[#e8dccf] text-[#3d3128]"><b>{count(c)}</b> · {t(`hk.occ.${c}.title`)}</span>
+        ))}
+      </div>
+      <div className={`${CARD} p-0 overflow-hidden`}>
+        <DataTable
+          data={rows}
+          rowKey={(r: any) => r.id}
+          columnChooser columnFilters tableId="hk-occupancy-check"
+          exportFilename="occupancy-check"
+          emptyMessage={t('hk.occ.none')}
+          columns={[
+            { key: 'kind', label: t('hk.occ.col.type'), sortable: true, filterable: true, filterType: 'select',
+              filterOptions: [...new Set(rows.map((r: any) => r.kind))].sort().map((v: any) => ({ value: v, label: t(`hk.occ.kind.${v}`) })),
+              render: (r: any) => <span className="text-[10px] font-bold text-[#b9a897]">{t(`hk.occ.kind.${r.kind}`)}</span> },
+            { key: 'facility', label: t('hk.occ.col.facility'), sortable: true, searchable: true, render: (r: any) => <span className="font-medium text-[#14110c]">{r.facility}</span> },
+            { key: 'code', label: t('hk.occ.col.issue'), sortable: true, filterable: true, filterType: 'select',
+              filterOptions: [...new Set(rows.map((r: any) => r.code))].sort().map((v: any) => ({ value: v, label: t(`hk.occ.${v}.title`) })),
+              getValue: (r: any) => t(`hk.occ.${r.code}.title`),
+              render: (r: any) => <span><span className="font-semibold text-amber-800">{t(`hk.occ.${r.code}.title`)}</span><span className="block text-[11px] text-[#6b5d52]">{t(`hk.occ.${r.code}.detail`, vars(r))}</span></span> },
+            { key: 'who', label: t('hk.occ.col.who'), sortable: true, searchable: true, getValue: (r: any) => r.who || '' },
+            { key: 'since', label: t('hk.occ.col.since'), sortable: true, getValue: (r: any) => r.since || '' },
+            { key: 'action', label: t('hk.occ.col.action'), getValue: (r: any) => t(`hk.occ.${r.code}.action`), render: (r: any) => <span className="text-[11px] text-[#3d3128]">{t(`hk.occ.${r.code}.action`)}</span> },
+            { key: 'status', label: t('hk.occ.col.status'), sortable: true, hideable: true, defaultHidden: true },
+          ]}
+        />
+      </div>
+    </div>
+  );
+}
+
 function CleaningLog({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) => Promise<any>; scope?: 'ALL' | 'ROOM' | 'EVENT' }) {
   const [data, setData] = useState<{ log: any[]; by_facility: any[] }>({ log: [], by_facility: [] });
   const [loading, setLoading] = useState(true);

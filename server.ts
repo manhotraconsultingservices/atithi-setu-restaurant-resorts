@@ -32208,6 +32208,75 @@ ${data.tenant.name}`;
   });
 
   // ── Housekeeping worklist — open/all cleaning jobs ───────────────────────────
+  // Occupancy check — rooms and halls still tied up when they should be free:
+  // after a guest's check-out, after an event is completed, or with nothing left
+  // that will ever release them. Read-only; each row says what to do. Every query
+  // is guarded so a tenant without hotel rooms or without events still loads.
+  app.get("/api/restaurant/:id/housekeeping/occupancy-check", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const ymd = (v: any) => normaliseDateIso(v) || null;
+      const rows: any[] = [];
+      const add = (r: any) => rows.push({ id: `${r.code}:${r.facility_id}:${r.ref || ''}`, ...r });
+      const q = async (sql: string, p: any[] = []) => ((await db.query(sql, p).catch(() => [])) as any[]) || [];
+
+      // ── Rooms ──
+      // 1. Marked Occupied, but nobody is checked in to it.
+      for (const r of await q(`SELECT r.id, r.name, r.room_number FROM rooms r
+          WHERE r.status = 'OCCUPIED' AND NOT EXISTS (SELECT 1 FROM room_bookings b WHERE b.room_id = r.id AND b.status = 'CHECKED_IN')`)) {
+        add({ kind: 'ROOM', code: 'ROOM_OCCUPIED_NO_GUEST', facility_id: r.id, facility: r.name || `Room ${r.room_number}`, status: 'OCCUPIED' });
+      }
+      // 2. A guest still checked in after their check-out date (a same-day stay: after its day).
+      for (const b of await q(`SELECT b.id, b.guest_name, b.check_in_date, b.check_out_date, b.booking_source, r.id AS room_id, r.name, r.room_number, r.status
+          FROM room_bookings b JOIN rooms r ON r.id = b.room_id WHERE b.status = 'CHECKED_IN'`)) {
+        const ci = ymd(b.check_in_date), co = ymd(b.check_out_date);
+        if (!co) continue;
+        const over = co === ci ? co < today : co < today;
+        if (over) add({ kind: 'ROOM', code: 'GUEST_PAST_CHECKOUT', facility_id: b.room_id, facility: b.name || `Room ${b.room_number}`, status: b.status, ref: b.id, who: b.guest_name || null, since: co, source: b.booking_source || null });
+      }
+      // 3. The room's event is over (completed or cancelled) but the room is still held.
+      for (const b of await q(`SELECT b.id, b.status AS stay_status, b.guest_name, b.check_out_date, r.id AS room_id, r.name, r.room_number, r.status,
+              eb.id AS event_id, eb.customer_name AS event_name, eb.status AS event_status, COALESCE(eb.end_date, eb.event_date) AS event_end
+          FROM event_booking_rooms x JOIN event_bookings eb ON eb.id = x.booking_id
+          JOIN room_bookings b ON b.id = x.hotel_booking_id LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE eb.status IN ('COMPLETED','CANCELLED') AND b.status IN ('BOOKED','CHECKED_IN')`)) {
+        add({ kind: 'ROOM', code: 'EVENT_OVER_ROOM_HELD', facility_id: b.room_id || b.id, facility: b.name || (b.room_number ? `Room ${b.room_number}` : 'Unassigned room'), status: b.status || null, ref: b.id, stay_status: b.stay_status, who: b.event_name, event_id: b.event_id, event_status: b.event_status, since: ymd(b.event_end) });
+      }
+      // 4. In Cleaning, but no open cleaning task will ever release it.
+      for (const r of await q(`SELECT r.id, r.name, r.room_number FROM rooms r
+          WHERE r.status = 'CLEANING' AND NOT EXISTS (SELECT 1 FROM housekeeping_jobs j WHERE j.facility_id = r.id AND j.status = 'OPEN')`)) {
+        add({ kind: 'ROOM', code: 'CLEANING_NO_TASK', facility_id: r.id, facility: r.name || `Room ${r.room_number}`, status: 'CLEANING' });
+      }
+
+      // ── Halls ──
+      // 5. Marked in use, but no event is running there.
+      for (const v of await q(`SELECT v.id, v.name FROM event_venues v
+          WHERE v.is_active = 1 AND v.status = 'OCCUPIED'
+            AND NOT EXISTS (SELECT 1 FROM event_bookings b WHERE b.venue_id = v.id AND b.status = 'IN_PROGRESS')`)) {
+        add({ kind: 'HALL', code: 'HALL_IN_USE_NO_EVENT', facility_id: v.id, facility: v.name, status: 'OCCUPIED' });
+      }
+      // 6. The event's last day has passed but it was never completed — it still holds its hall and rooms.
+      for (const b of await q(`SELECT b.id, b.customer_name, b.status, b.event_date, b.end_date, v.id AS venue_id, v.name AS venue_name
+          FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.status IN ('CONFIRMED','IN_PROGRESS') AND COALESCE(b.end_date, b.event_date) < ?`, [today])) {
+        add({ kind: 'HALL', code: 'EVENT_NOT_CLOSED', facility_id: b.venue_id || b.id, facility: b.venue_name || 'No hall', status: b.status, ref: b.id, who: b.customer_name, event_id: b.id, event_status: b.status, since: ymd(b.end_date || b.event_date) });
+      }
+      // 7. In Cleaning, but no open cleaning task will release it.
+      for (const v of await q(`SELECT v.id, v.name FROM event_venues v
+          WHERE v.is_active = 1 AND v.status = 'CLEANING' AND NOT EXISTS (SELECT 1 FROM housekeeping_jobs j WHERE j.facility_id = v.id AND j.status = 'OPEN')`)) {
+        add({ kind: 'HALL', code: 'CLEANING_NO_TASK', facility_id: v.id, facility: v.name, status: 'CLEANING' });
+      }
+
+      const counts: Record<string, number> = {};
+      for (const r of rows) counts[r.code] = (counts[r.code] || 0) + 1;
+      res.json({ as_of: today, rows, counts, rooms: rows.filter(r => r.kind === 'ROOM').length, halls: rows.filter(r => r.kind === 'HALL').length });
+    } catch (err: any) {
+      console.error('/housekeeping/occupancy-check error:', err);
+      res.status(500).json({ error: 'Failed to build the occupancy check' });
+    }
+  });
+
   app.get("/api/restaurant/:id/housekeeping/jobs", authenticate, hkStaff, requireTabAccess('HOUSEKEEPING'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
@@ -67646,8 +67715,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-room-checkin-stay-over-guard',
+    commit_marker: 'housekeeping-occupancy-check',
     code_features: [
+      'housekeeping-occupancy-check  Owner request: a report of rooms and halls still tied up when they should be free. GET /housekeeping/occupancy-check (HOUSEKEEPING tab) lists: room Occupied with nobody checked in; guest checked in past the check-out date; event over but its room still booked or checked in; room or hall in Cleaning with no open cleaning task; hall in use with no event running; event past its end date never completed. Housekeeping gets an Occupancy check tab (smart table, what-to-do per row).',
       'event-room-checkin-stay-over-guard  Auto check-in of an event room checked that the stay had started but not that it had ended, so the hourly job checked in a stay from two weeks earlier (restored from NO_SHOW) and it took Room 205 that a later event stay needed. _eventRoomCheckin now refuses a stay whose check-out date has passed (overnight: on the check-out day; day-use: after its day) with reason STAY_OVER.',
       'event-rooms-billing-display-restore  Owner report: an event room showed its room price as outstanding on the hotel booking although the money is collected on the event invoice (the hotel screen computed total_amount minus hotel payments). The booking screen now shows Billed on the event invoice with the event total / paid / balance (GET /hotel/bookings/:bookingId/event-billing); the pay link never asks for an event room price (only hotel extras); no early check-in fee on an event room. Repair: POST /hotel/event-rooms/restore-no-shows (owner/manager, dry_run) puts back to BOOKED the event rooms the nightly sweep flagged NO_SHOW before it knew about events, when the event is still live and the room is not taken.',
       'event-rooms-auto-checkin-checkout  Owner request: event guests no longer end up NO_SHOW. Starting an event checks in its reserved hotel rooms through a new Hotel route POST /hotel/bookings/:bookingId/event-checkin (_eventRoomCheckin: date must have come, Form-C still enforced for foreign guests, room must not be occupied or out of order; a missing ID does not block — the room is listed by GET /hotel/reports/missing-guest-id, shown to the front desk on Hotel Bookings). An hourly job checks in later nights of multi-day events. Completing the event checks the rooms out: nothing on the hotel bill closes it quietly (no zero-value tax invoice), extras go through the normal check-out, unpaid extras are left for the desk. Billing: createFolioWithRoomCharges never seeds room charges for booking_source EVENT (the rooms are on the event invoice), which also fixes charge-to-room on an event room billing the nights twice; no late-checkout night on event rooms. The nightly no-show sweep skips rooms of events still confirmed or running.',
