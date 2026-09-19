@@ -54244,6 +54244,12 @@ ${data.tenant.name}`;
     const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
     const ci = normaliseDateIso(b.check_in_date);
     if (ci && ci > today) return { checked_in: false, reason: 'NOT_YET', message: `Checks in on ${ci}.` };
+    // A stay that has already ENDED is never checked in: an overnight stay is over on
+    // its check-out day, a same-day (day-use) stay the day after. Checking in a past
+    // stay put a guest in a room another event's stay needed (the Room 205 case).
+    const co = normaliseDateIso(b.check_out_date);
+    const sameDay = !!co && co === ci;
+    if (co && (sameDay ? co < today : co <= today)) return { checked_in: false, reason: 'STAY_OVER', message: `This stay ended on ${co}; it is not checked in.` };
     const nat = String(b.guest_nationality || '').trim().toUpperCase();
     if (nat && !['IN', 'INDIA', 'INDIAN'].includes(nat)) {
       const fc: any = await tenantDb.get("SELECT id FROM guest_compliance_log WHERE booking_id = ? AND form_type = 'FORM_C' LIMIT 1", [bookingId]).catch(() => null);
@@ -67640,8 +67646,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-rooms-billing-display-restore',
+    commit_marker: 'event-room-checkin-stay-over-guard',
     code_features: [
+      'event-room-checkin-stay-over-guard  Auto check-in of an event room checked that the stay had started but not that it had ended, so the hourly job checked in a stay from two weeks earlier (restored from NO_SHOW) and it took Room 205 that a later event stay needed. _eventRoomCheckin now refuses a stay whose check-out date has passed (overnight: on the check-out day; day-use: after its day) with reason STAY_OVER.',
       'event-rooms-billing-display-restore  Owner report: an event room showed its room price as outstanding on the hotel booking although the money is collected on the event invoice (the hotel screen computed total_amount minus hotel payments). The booking screen now shows Billed on the event invoice with the event total / paid / balance (GET /hotel/bookings/:bookingId/event-billing); the pay link never asks for an event room price (only hotel extras); no early check-in fee on an event room. Repair: POST /hotel/event-rooms/restore-no-shows (owner/manager, dry_run) puts back to BOOKED the event rooms the nightly sweep flagged NO_SHOW before it knew about events, when the event is still live and the room is not taken.',
       'event-rooms-auto-checkin-checkout  Owner request: event guests no longer end up NO_SHOW. Starting an event checks in its reserved hotel rooms through a new Hotel route POST /hotel/bookings/:bookingId/event-checkin (_eventRoomCheckin: date must have come, Form-C still enforced for foreign guests, room must not be occupied or out of order; a missing ID does not block — the room is listed by GET /hotel/reports/missing-guest-id, shown to the front desk on Hotel Bookings). An hourly job checks in later nights of multi-day events. Completing the event checks the rooms out: nothing on the hotel bill closes it quietly (no zero-value tax invoice), extras go through the normal check-out, unpaid extras are left for the desk. Billing: createFolioWithRoomCharges never seeds room charges for booking_source EVENT (the rooms are on the event invoice), which also fixes charge-to-room on an event room billing the nights twice; no late-checkout night on event rooms. The nightly no-show sweep skips rooms of events still confirmed or running.',
       'events-rooms-cleaning-rental-shortage-calendar-completed  Owner bug batch. (1) Completing an event sent only the hall to cleaning; every hotel room reserved for the event now goes to CLEANING with the departure checklist, through a new Hotel route POST /hotel/bookings/:bookingId/release-for-cleaning (skips a guest still checked in, a room another guest occupies, maintenance/blocked rooms). The check-out cleaning steps moved into one helper, _sendRoomToCleaning, used by both. (2) Rental items could be added beyond stock with no warning. Booking create/edit and rental add-ons now return 409 RENTAL_SHORTAGE with the per-item shortfall unless confirm_shortage is sent; an accepted shortage is audited. Availability now counts multi-day overlap and add-on rentals. New GET /events/reports/rental-shortages lists upcoming bookings short of stock. (3) The events calendar shows completed bookings.',
