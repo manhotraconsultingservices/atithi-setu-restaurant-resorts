@@ -23,6 +23,7 @@ import { NotificationsWorkspace } from './NotificationsWorkspace';
 import { ThemeColorSettings, applyThemeColor } from './ThemeColorSettings';
 import { PayOnlineButton, PaymentResultPage, usePublicPayOptions, PayChoicePicker, HoldCountdown } from './PublicPay';
 import { DateRangeBar, StatusTiles, defaultDateRange, dayInRange, spanInRange, type DateRange } from './components/ListFilters';
+import { MissingGuestIdPanel } from './MissingGuestIdPanel';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules } from './tenantModules';
@@ -24223,6 +24224,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : activeTab === 'HOTEL_BOOKINGS' && isHotelEnabled ? (
         /* ════════════════ HOTEL BOOKINGS ════════════════ */
         <div className="space-y-5">
+          {/* Event guests checked in automatically with no ID on file — collect during the stay. */}
+          <MissingGuestIdPanel restaurantId={restaurantId} token={token} />
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{tr('Hotel Bookings')}</h2>

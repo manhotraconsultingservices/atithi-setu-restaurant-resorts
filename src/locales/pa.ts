@@ -823,4 +823,15 @@ export const pa: Record<string, string> = {
   'events.shortage.shortBy': 'ਘਾਟ',
   'events.complete.roomsCleaning': 'ਇਵੈਂਟ ਦੇ {total} ਵਿੱਚੋਂ {sent} ਕਮਰੇ ਸਫ਼ਾਈ ਲਈ ਭੇਜੇ ਗਏ।',
   'events.calendar.completed': 'ਪੂਰਾ',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'ਬਿਨਾਂ ਆਈਡੀ ਚੈੱਕ-ਇਨ ਹੋਏ ਇਵੈਂਟ ਮਹਿਮਾਨ ({n})',
+  'hotel.missingId.sub': 'ਇਵੈਂਟ ਸ਼ੁਰੂ ਹੋਣ \'ਤੇ ਇਹ ਕਮਰੇ ਆਪਣੇ ਆਪ ਚੈੱਕ-ਇਨ ਹੋਏ। ਹਰ ਮਹਿਮਾਨ ਦੀ ਆਈਡੀ ਲੈ ਕੇ ਬੁਕਿੰਗ \'ਤੇ ਅੱਪਲੋਡ ਕਰੋ।',
+  'hotel.missingId.room': 'ਕਮਰਾ',
+  'hotel.missingId.guest': 'ਮਹਿਮਾਨ',
+  'hotel.missingId.phone': 'ਫ਼ੋਨ',
+  'hotel.missingId.event': 'ਇਵੈਂਟ',
+  'hotel.missingId.checkIn': 'ਚੈੱਕ-ਇਨ',
+  'hotel.missingId.checkOut': 'ਚੈੱਕ-ਆਊਟ',
+  'events.start.roomsCheckedIn': 'ਇਵੈਂਟ ਦੇ {total} ਵਿੱਚੋਂ {sent} ਕਮਰੇ ਚੈੱਕ-ਇਨ ਹੋਏ।',
+  'events.start.idMissing': '{n} ਕਮਰਿਆਂ ਵਿੱਚ ਅਜੇ ਮਹਿਮਾਨ ਦੀ ਆਈਡੀ ਨਹੀਂ — ਫਰੰਟ ਡੈਸਕ ਇਨ੍ਹਾਂ ਨੂੰ ਹੋਟਲ ਬੁਕਿੰਗਾਂ ਵਿੱਚ ਦੇਖੇਗਾ।',
 };

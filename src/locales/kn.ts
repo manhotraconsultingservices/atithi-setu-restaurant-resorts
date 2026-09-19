@@ -761,4 +761,15 @@ export const kn: Record<string, string> = {
   'events.shortage.shortBy': 'ಕೊರತೆ',
   'events.complete.roomsCleaning': 'ಕಾರ್ಯಕ್ರಮದ {total} ಕೊಠಡಿಗಳಲ್ಲಿ {sent} ಸ್ವಚ್ಛತೆಗೆ ಕಳುಹಿಸಲಾಗಿದೆ.',
   'events.calendar.completed': 'ಪೂರ್ಣಗೊಂಡಿದೆ',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'ಗುರುತಿನ ಚೀಟಿ ಇಲ್ಲದೆ ಚೆಕ್-ಇನ್ ಆದ ಕಾರ್ಯಕ್ರಮದ ಅತಿಥಿಗಳು ({n})',
+  'hotel.missingId.sub': 'ಕಾರ್ಯಕ್ರಮ ಆರಂಭವಾದಾಗ ಈ ಕೊಠಡಿಗಳು ಸ್ವಯಂಚಾಲಿತವಾಗಿ ಚೆಕ್-ಇನ್ ಆದವು. ಪ್ರತಿ ಅತಿಥಿಯ ಗುರುತಿನ ಚೀಟಿ ಪಡೆದು ಬುಕಿಂಗ್‌ನಲ್ಲಿ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ.',
+  'hotel.missingId.room': 'ಕೊಠಡಿ',
+  'hotel.missingId.guest': 'ಅತಿಥಿ',
+  'hotel.missingId.phone': 'ಫೋನ್',
+  'hotel.missingId.event': 'ಕಾರ್ಯಕ್ರಮ',
+  'hotel.missingId.checkIn': 'ಚೆಕ್-ಇನ್',
+  'hotel.missingId.checkOut': 'ಚೆಕ್-ಔಟ್',
+  'events.start.roomsCheckedIn': 'ಕಾರ್ಯಕ್ರಮದ {total} ಕೊಠಡಿಗಳಲ್ಲಿ {sent} ಚೆಕ್-ಇನ್ ಆದವು.',
+  'events.start.idMissing': '{n} ಕೊಠಡಿಗಳಿಗೆ ಇನ್ನೂ ಅತಿಥಿ ಗುರುತಿನ ಚೀಟಿ ಇಲ್ಲ — ಮುಂಭಾಗದ ಮೇಜು ಇವನ್ನು ಹೋಟೆಲ್ ಬುಕಿಂಗ್‌ಗಳಲ್ಲಿ ನೋಡುತ್ತದೆ.',
 };

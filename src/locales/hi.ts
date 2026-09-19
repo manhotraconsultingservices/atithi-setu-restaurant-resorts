@@ -862,4 +862,15 @@ export const hi: Record<string, string> = {
   'events.shortage.shortBy': 'कमी',
   'events.complete.roomsCleaning': 'इवेंट के {total} में से {sent} कमरे सफ़ाई के लिए भेजे गए।',
   'events.calendar.completed': 'पूर्ण',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'बिना आईडी चेक-इन हुए इवेंट मेहमान ({n})',
+  'hotel.missingId.sub': 'ये कमरे इवेंट शुरू होने पर अपने आप चेक-इन हुए। हर मेहमान की आईडी लेकर बुकिंग पर अपलोड करें।',
+  'hotel.missingId.room': 'कमरा',
+  'hotel.missingId.guest': 'मेहमान',
+  'hotel.missingId.phone': 'फ़ोन',
+  'hotel.missingId.event': 'इवेंट',
+  'hotel.missingId.checkIn': 'चेक-इन',
+  'hotel.missingId.checkOut': 'चेक-आउट',
+  'events.start.roomsCheckedIn': 'इवेंट के {total} में से {sent} कमरे चेक-इन हुए।',
+  'events.start.idMissing': '{n} कमरों में अभी मेहमान की आईडी नहीं है — फ्रंट डेस्क इन्हें होटल बुकिंग में देखेगा।',
 };

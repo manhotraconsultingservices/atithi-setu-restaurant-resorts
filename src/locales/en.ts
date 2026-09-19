@@ -826,4 +826,15 @@ export const en: Record<string, string> = {
   'events.shortage.shortBy': 'Short by',
   'events.complete.roomsCleaning': '{sent} of {total} event room(s) sent to cleaning.',
   'events.calendar.completed': 'Completed',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'Event guests checked in without an ID ({n})',
+  'hotel.missingId.sub': 'These rooms were checked in automatically when their event started. Collect each guest\'s ID and upload it on the booking.',
+  'hotel.missingId.room': 'Room',
+  'hotel.missingId.guest': 'Guest',
+  'hotel.missingId.phone': 'Phone',
+  'hotel.missingId.event': 'Event',
+  'hotel.missingId.checkIn': 'Check-in',
+  'hotel.missingId.checkOut': 'Check-out',
+  'events.start.roomsCheckedIn': '{sent} of {total} event room(s) checked in.',
+  'events.start.idMissing': '{n} room(s) have no guest ID yet — the front desk sees them under Hotel Bookings.',
 };

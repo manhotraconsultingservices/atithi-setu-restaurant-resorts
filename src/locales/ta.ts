@@ -759,4 +759,15 @@ export const ta: Record<string, string> = {
   'events.shortage.shortBy': 'குறைவு',
   'events.complete.roomsCleaning': 'நிகழ்வின் {total} அறைகளில் {sent} சுத்தம் செய்ய அனுப்பப்பட்டன.',
   'events.calendar.completed': 'முடிந்தது',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'அடையாள அட்டை இல்லாமல் செக்-இன் ஆன நிகழ்வு விருந்தினர்கள் ({n})',
+  'hotel.missingId.sub': 'நிகழ்வு தொடங்கியதும் இந்த அறைகள் தானாக செக்-இன் ஆயின. ஒவ்வொரு விருந்தினரின் அடையாள அட்டையையும் பெற்று முன்பதிவில் பதிவேற்றவும்.',
+  'hotel.missingId.room': 'அறை',
+  'hotel.missingId.guest': 'விருந்தினர்',
+  'hotel.missingId.phone': 'தொலைபேசி',
+  'hotel.missingId.event': 'நிகழ்வு',
+  'hotel.missingId.checkIn': 'செக்-இன்',
+  'hotel.missingId.checkOut': 'செக்-அவுட்',
+  'events.start.roomsCheckedIn': 'நிகழ்வின் {total} அறைகளில் {sent} செக்-இன் ஆயின.',
+  'events.start.idMissing': '{n} அறைகளில் விருந்தினர் அடையாள அட்டை இன்னும் இல்லை — முன் மேசை இவற்றை ஹோட்டல் முன்பதிவுகளில் பார்க்கும்.',
 };

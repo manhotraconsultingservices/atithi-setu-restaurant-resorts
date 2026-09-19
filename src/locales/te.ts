@@ -759,4 +759,15 @@ export const te: Record<string, string> = {
   'events.shortage.shortBy': 'కొరత',
   'events.complete.roomsCleaning': 'ఈవెంట్ {total} గదుల్లో {sent} శుభ్రతకు పంపబడ్డాయి.',
   'events.calendar.completed': 'పూర్తయింది',
+  // ── Event rooms: auto check-in, missing guest ID ──
+  'hotel.missingId.title': 'గుర్తింపు పత్రం లేకుండా చెక్-ఇన్ అయిన ఈవెంట్ అతిథులు ({n})',
+  'hotel.missingId.sub': 'ఈవెంట్ ప్రారంభమైనప్పుడు ఈ గదులు ఆటోమేటిక్‌గా చెక్-ఇన్ అయ్యాయి. ప్రతి అతిథి గుర్తింపు పత్రం తీసుకుని బుకింగ్‌లో అప్‌లోడ్ చేయండి.',
+  'hotel.missingId.room': 'గది',
+  'hotel.missingId.guest': 'అతిథి',
+  'hotel.missingId.phone': 'ఫోన్',
+  'hotel.missingId.event': 'ఈవెంట్',
+  'hotel.missingId.checkIn': 'చెక్-ఇన్',
+  'hotel.missingId.checkOut': 'చెక్-అవుట్',
+  'events.start.roomsCheckedIn': 'ఈవెంట్ {total} గదుల్లో {sent} చెక్-ఇన్ అయ్యాయి.',
+  'events.start.idMissing': '{n} గదులకు ఇంకా అతిథి గుర్తింపు పత్రం లేదు — ఫ్రంట్ డెస్క్ వీటిని హోటల్ బుకింగ్స్‌లో చూస్తుంది.',
 };

@@ -1546,6 +1546,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       const held = rooms.filter(x => !x.released).map(x => x.message).filter(Boolean);
       alert([t('events.complete.roomsCleaning', { sent, total: rooms.length }), ...held].join('\n'));
     }
+    // Starting an event checks in its hotel rooms: say what happened to each.
+    const cin: any[] = Array.isArray(r?.rooms_checked_in) ? r.rooms_checked_in : [];
+    if (cin.length) {
+      const inCount = cin.filter(c => c.checked_in).length;
+      const noId = cin.filter(c => c.checked_in && c.id_missing).length;
+      const held = cin.filter(c => !c.checked_in).map(c => c.message).filter(Boolean);
+      alert([t('events.start.roomsCheckedIn', { sent: inCount, total: cin.length }), noId ? t('events.start.idMissing', { n: noId }) : '', ...held].filter(Boolean).join('\n'));
+    }
     if (r?.warning) alert(r.warning); else if (okMsg) alert(okMsg);
     await load();
   };

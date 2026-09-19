@@ -2370,6 +2370,13 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
        VALUES (?, ?, ?, 'open', 0, 0, 0, ?, ?)`,
       [folioId, booking.id, booking.room_id, _folioCurrency, _folioTaxLabel]
     );
+    // A room reserved for an EVENT is billed on the event's invoice. Its hotel
+    // bill exists only for extras (room service, minibar), so it starts empty —
+    // seeding room charges here billed the same nights twice. This covers every
+    // path that opens a folio: event check-in and the first charge-to-room.
+    if (String(booking.booking_source || '').toUpperCase() === 'EVENT') {
+      return await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+    }
     // Sprint C-RP — per-night rate lookup. Each night may have a
     // different effective rate (season override / weekend rate / type-
     // scope override / base). The booking's stored room_rate is used
@@ -37012,8 +37019,19 @@ ${data.tenant.name}`;
       }
       await db.run("UPDATE event_bookings SET status = 'IN_PROGRESS' WHERE id = ?", [req.params.bid]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Event started — In Progress', before: { status: bk.status }, after: { status: 'IN_PROGRESS' } });
+      // Check in every hotel room reserved for the event whose date has come,
+      // through the Hotel API. Later nights are picked up by the hourly job.
+      const roomsIn: any[] = [];
+      const links: any[] = await db.query("SELECT DISTINCT hotel_booking_id FROM event_booking_rooms WHERE booking_id = ? AND hotel_booking_id IS NOT NULL", [req.params.bid]).catch(() => []);
+      for (const l of links) {
+        const r = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings/${encodeURIComponent(l.hotel_booking_id)}/event-checkin`, req.headers.authorization, {});
+        roomsIn.push({ hotel_booking_id: l.hotel_booking_id, checked_in: !!r.data?.checked_in, id_missing: !!r.data?.id_missing, reason: r.ok ? (r.data?.reason || null) : 'ERROR', message: r.ok ? (r.data?.message || null) : (r.data?.error || `HTTP ${r.status}`) });
+      }
+      if (roomsIn.length) {
+        await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ROOMS_CHECKED_IN', summary: `${roomsIn.filter(r => r.checked_in).length} of ${roomsIn.length} event room(s) checked in`, after: { rooms: roomsIn } }).catch(() => {});
+      }
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
-      res.json(row);
+      res.json({ ...row, rooms_checked_in: roomsIn });
     } catch (err: any) {
       console.error("/events/bookings start error:", err);
       res.status(500).json({ error: "Failed to start event" });
@@ -54203,6 +54221,95 @@ ${data.tenant.name}`;
   });
 
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
+  // Check a room reserved for an EVENT in, without the desk. Used when the event
+  // starts and by the hourly job for later nights of a multi-day event.
+  // Deliberately NOT the full check-in: the room is billed on the event invoice
+  // (the hotel bill opens empty, for extras), no payment link or welcome message
+  // goes to the organiser, no early check-in fee. A missing ID does not stop it —
+  // the room lands on the Missing guest ID list — but Form-C for a foreign guest
+  // is a legal requirement and does.
+  const _eventRoomCheckin = async (tenantDb: any, req: any, restaurantId: string, bookingId: string): Promise<{ checked_in: boolean; already?: boolean; id_missing?: boolean; reason?: string; message?: string; room_id?: string }> => {
+    const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bookingId]);
+    if (!b) return { checked_in: false, reason: 'NOT_FOUND', message: 'Reservation not found.' };
+    if (String(b.booking_source || '').toUpperCase() !== 'EVENT') return { checked_in: false, reason: 'NOT_EVENT_ROOM', message: 'Not an event reservation.' };
+    const st = String(b.status || '').toUpperCase();
+    if (st === 'CHECKED_IN') return { checked_in: true, already: true, room_id: b.room_id };
+    if (st !== 'BOOKED') return { checked_in: false, reason: st, message: `The reservation is ${st.toLowerCase().replace('_', ' ')}.` };
+    if (!b.room_id) return { checked_in: false, reason: 'NO_ROOM', message: 'No room is assigned to this reservation.' };
+    const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    const ci = normaliseDateIso(b.check_in_date);
+    if (ci && ci > today) return { checked_in: false, reason: 'NOT_YET', message: `Checks in on ${ci}.` };
+    const nat = String(b.guest_nationality || '').trim().toUpperCase();
+    if (nat && !['IN', 'INDIA', 'INDIAN'].includes(nat)) {
+      const fc: any = await tenantDb.get("SELECT id FROM guest_compliance_log WHERE booking_id = ? AND form_type = 'FORM_C' LIMIT 1", [bookingId]).catch(() => null);
+      if (!fc) return { checked_in: false, reason: 'FORM_C_REQUIRED', message: 'Foreign guest: generate Form-C, then check in at the front desk.' };
+    }
+    const room: any = await tenantDb.get("SELECT status, name, room_number, type_id FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
+    const roomLbl = room?.name || (room?.room_number ? `Room ${room.room_number}` : b.room_id);
+    if (['MAINTENANCE', 'BLOCKED'].includes(String(room?.status || '').toUpperCase())) return { checked_in: false, reason: 'ROOM_' + String(room.status).toUpperCase(), message: `${roomLbl} is under ${String(room.status).toLowerCase()}.` };
+    const other: any = await tenantDb.get("SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' AND id <> ? LIMIT 1", [b.room_id, bookingId]).catch(() => null);
+    if (other) return { checked_in: false, reason: 'ROOM_OCCUPIED', message: `${roomLbl} still has another guest checked in; it will be tried again within the hour.` };
+    const now = new Date().toISOString();
+    const flip = await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ?, room_locked = 1 WHERE id = ? AND status = 'BOOKED'", [now, bookingId]);
+    if (!flip || flip.changes === 0) return { checked_in: true, already: true, room_id: b.room_id };
+    await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [b.room_id]);
+    await writeObjectAudit(tenantDb, req, { objectType: 'ROOM', objectId: b.room_id, action: 'OCCUPIED', summary: `Occupied — event guest ${b.guest_name || ''} checked in automatically`.trim() }).catch(() => {});
+    await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: bookingId, action: 'CHECKED_IN', summary: `Checked in automatically — event started (${roomLbl})`, before: { status: 'BOOKED' }, after: { status: 'CHECKED_IN', actual_checkin_at: now, room_locked: 1 } }).catch(() => {});
+    await tenantDb.run("UPDATE guest_documents SET locked_at = ? WHERE booking_id = ? AND locked_at IS NULL", [now, bookingId]).catch(() => {});
+    raiseChecklistJobs(tenantDb, { facility_type: 'ROOM', facility_id: b.room_id, facility_label: roomLbl, source_ref: bookingId, guest_label: b.guest_name || null, room_type_id: room?.type_id || null, trigger: 'ROOM_OCCUPIED', blocks_release_override: 0 }).catch(() => {});
+    await createFolioWithRoomCharges(restaurantId, b);   // opens EMPTY for an event room — extras only
+    const docs: any = await tenantDb.get("SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?", [bookingId]).catch(() => ({ n: 0 }));
+    return { checked_in: true, id_missing: Number(docs?.n || 0) === 0, room_id: b.room_id };
+  };
+  // Who may check an event room in/out: hotel room staff, or the events staff
+  // running the event this reservation belongs to (the event's own gate).
+  const _eventRoomActorOk = async (tenantDb: any, req: AuthRequest, bookingId: string, eventStatuses: string[]): Promise<boolean> => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role === 'MANAGER' || (await _roleHasTab(req, 'ROOMS', 2)) || (await _roleHasTab(req, 'HOUSEKEEPING', 2)) || (await _roleHasTab(req, 'HOTEL_BOOKINGS', 2))) return true;
+    const ph = eventStatuses.map(() => '?').join(',');
+    const link: any = await tenantDb.get(`SELECT eb.id FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id WHERE r.hotel_booking_id = ? AND eb.status IN (${ph}) LIMIT 1`, [bookingId, ...eventStatuses]).catch(() => null);
+    return !!link && (await _roleHasTab(req, 'EVENTS_BOOKINGS', 2));
+  };
+
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/event-checkin", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      if (!(await _eventRoomActorOk(tenantDb, req, req.params.bookingId, ['IN_PROGRESS']))) return res.status(403).json({ error: 'You do not have permission to check this room in.' });
+      res.json(await _eventRoomCheckin(tenantDb, req, req.params.id, req.params.bookingId));
+    } catch (err: any) {
+      console.error('[hotel] event-checkin failed:', err);
+      res.status(500).json({ error: 'Failed to check the event room in' });
+    }
+  });
+
+  // Event guests checked in without an ID document on file — the front desk
+  // collects these during the stay (the room was checked in automatically).
+  app.get("/api/restaurant/:id/hotel/reports/missing-guest-id", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT rb.id, rb.guest_name, rb.guest_phone, rb.check_in_date, rb.check_out_date, rb.actual_checkin_at,
+                r.name AS room_name, r.room_number
+           FROM room_bookings rb LEFT JOIN rooms r ON r.id = rb.room_id
+          WHERE rb.status = 'CHECKED_IN' AND UPPER(COALESCE(rb.booking_source, '')) = 'EVENT'
+            AND NOT EXISTS (SELECT 1 FROM guest_documents d WHERE d.booking_id = rb.id)
+          ORDER BY rb.check_in_date, r.name`).catch(() => []);
+      const events: any[] = rows.length ? await tenantDb.query(
+        `SELECT r.hotel_booking_id, eb.id AS event_booking_id, eb.customer_name AS event_customer, eb.event_type
+           FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id
+          WHERE r.hotel_booking_id IN (${rows.map(() => '?').join(',')})`, rows.map(r => r.id)).catch(() => []) : [];
+      const byId = new Map(events.map((e: any) => [e.hotel_booking_id, e]));
+      res.json({ rows: rows.map(r => ({ ...r, check_in_date: normaliseDateIso(r.check_in_date), check_out_date: normaliseDateIso(r.check_out_date), ...(byId.get(r.id) || {}) })) });
+    } catch (err: any) {
+      console.error('[hotel] missing-guest-id failed:', err);
+      res.status(500).json({ error: 'Failed to list guests missing an ID' });
+    }
+  });
+
   // A room reserved for an EVENT goes to cleaning when the event is completed.
   // Owned by Hotel; Events calls it through the API (never touches hotel tables).
   // Leaves alone a room whose guest is still checked in (their own check-out sends
@@ -54215,14 +54322,35 @@ ${data.tenant.name}`;
       const b: any = await tenantDb.get("SELECT id, status, room_id, guest_name, check_out_date FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: 'Booking not found' });
       // Hotel room rights, OR the event manager completing the event this room belongs to.
-      const hotelOk = String(req.user?.role || '').toUpperCase() === 'MANAGER' || (await _roleHasTab(req, 'ROOMS', 2)) || (await _roleHasTab(req, 'HOUSEKEEPING', 2)) || (await _roleHasTab(req, 'HOTEL_BOOKINGS', 2));
-      if (!hotelOk) {
-        const link: any = await tenantDb.get("SELECT eb.id FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id WHERE r.hotel_booking_id = ? AND eb.status = 'COMPLETED' LIMIT 1", [req.params.bookingId]).catch(() => null);
-        if (!link || !(await _roleHasTab(req, 'EVENTS_BOOKINGS', 2))) return res.status(403).json({ error: 'You do not have permission to change room status.' });
-      }
+      if (!(await _eventRoomActorOk(tenantDb, req, req.params.bookingId, ['COMPLETED']))) return res.status(403).json({ error: 'You do not have permission to change room status.' });
       const st = String(b.status || '').toUpperCase();
       if (!b.room_id) return res.json({ released: false, reason: 'NO_ROOM', message: 'No room was assigned to this reservation.' });
       if (st === 'CANCELLED') return res.json({ released: false, reason: 'CANCELLED', message: 'The reservation was cancelled.' });
+      const isEventRoom = String(b.booking_source || '').toUpperCase() === 'EVENT';
+      if (st === 'CHECKED_IN' && isEventRoom) {
+        // The event is over: check the guest out. Nothing on the hotel bill → close
+        // it quietly (no ₹0 tax invoice, no serial, no email). Extras on it → the
+        // normal check-out, which invoices them; unpaid extras stay with the desk.
+        const folio: any = await tenantDb.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1", [b.id]).catch(() => null);
+        const lines: any = folio ? await tenantDb.get("SELECT COUNT(*)::int AS n FROM folio_entries WHERE folio_id = ?", [folio.id]).catch(() => ({ n: 0 })) : { n: 0 };
+        const paid: any = folio ? await tenantDb.get("SELECT COUNT(*)::int AS n FROM folio_payments WHERE folio_id = ? AND (is_voided IS NULL OR is_voided = 0)", [folio.id]).catch(() => ({ n: 0 })) : { n: 0 };
+        if (Number(lines?.n || 0) === 0 && Number(paid?.n || 0) === 0) {
+          const now = new Date().toISOString();
+          const flip = await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ? AND status = 'CHECKED_IN'", [now, b.id]);
+          if (flip && flip.changes > 0) {
+            if (folio) await tenantDb.run("UPDATE folios SET status = 'voided', cancelled_at = ?, cancelled_by = ?, cancel_reason = ? WHERE id = ? AND status = 'open'", [now, hkActor(req), 'Event room: nothing charged to the hotel bill (billed on the event invoice)', folio.id]).catch(() => {});
+            await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: b.id, action: 'CHECKED_OUT', summary: 'Checked out automatically — event completed, nothing on the hotel bill', before: { status: 'CHECKED_IN' }, after: { status: 'CHECKED_OUT', actual_checkout_at: now } }).catch(() => {});
+            await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]).catch(() => {});
+            await _sendRoomToCleaning(tenantDb, req, req.params.id, { roomId: b.room_id, bookingId: b.id, guestName: b.guest_name, checkOutDate: b.check_out_date, summary: `Cleaning — event over (${b.guest_name || 'event guest'})` });
+          }
+          return res.json({ released: true, checked_out: true, room_id: b.room_id });
+        }
+        const co = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings/${encodeURIComponent(b.id)}/checkout`, req.headers.authorization, {});
+        if (co.ok) return res.json({ released: true, checked_out: true, room_id: b.room_id, extras_invoiced: true });
+        const owed = Number(co.data?.outstanding || 0);
+        return res.json({ released: false, reason: co.status === 409 ? 'OUTSTANDING' : 'CHECKOUT_FAILED',
+          message: co.status === 409 ? `Unpaid extras of ₹${owed.toLocaleString('en-IN')} on the hotel bill — settle and check out at the front desk.` : (co.data?.error || 'Check-out failed; finish it at the front desk.') });
+      }
       if (st === 'CHECKED_IN') return res.json({ released: false, reason: 'GUEST_IN_HOUSE', message: 'The guest is still checked in; the room goes to cleaning at their check-out.' });
       if (st === 'CHECKED_OUT') return res.json({ released: false, reason: 'ALREADY_CHECKED_OUT', message: 'Already sent to cleaning at check-out.' });
       const room: any = await tenantDb.get("SELECT status FROM rooms WHERE id = ?", [b.room_id]).catch(() => null);
@@ -54289,7 +54417,8 @@ ${data.tenant.name}`;
           room_rate: Number(b.room_rate || 0),
         });
         lateFeeInfo = fee;
-        if (fee.applies && fee.fee_amount > 0 && !waive) {
+        // Event rooms are billed on the event invoice, so no late-checkout night here.
+        if (fee.applies && fee.fee_amount > 0 && !waive && String(b.booking_source || '').toUpperCase() !== 'EVENT') {
           const openFolio: any = await tenantDb.get(
             "SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]
           );
@@ -67448,8 +67577,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-rooms-cleaning-rental-shortage-calendar-completed',
+    commit_marker: 'event-rooms-auto-checkin-checkout',
     code_features: [
+      'event-rooms-auto-checkin-checkout  Owner request: event guests no longer end up NO_SHOW. Starting an event checks in its reserved hotel rooms through a new Hotel route POST /hotel/bookings/:bookingId/event-checkin (_eventRoomCheckin: date must have come, Form-C still enforced for foreign guests, room must not be occupied or out of order; a missing ID does not block — the room is listed by GET /hotel/reports/missing-guest-id, shown to the front desk on Hotel Bookings). An hourly job checks in later nights of multi-day events. Completing the event checks the rooms out: nothing on the hotel bill closes it quietly (no zero-value tax invoice), extras go through the normal check-out, unpaid extras are left for the desk. Billing: createFolioWithRoomCharges never seeds room charges for booking_source EVENT (the rooms are on the event invoice), which also fixes charge-to-room on an event room billing the nights twice; no late-checkout night on event rooms. The nightly no-show sweep skips rooms of events still confirmed or running.',
       'events-rooms-cleaning-rental-shortage-calendar-completed  Owner bug batch. (1) Completing an event sent only the hall to cleaning; every hotel room reserved for the event now goes to CLEANING with the departure checklist, through a new Hotel route POST /hotel/bookings/:bookingId/release-for-cleaning (skips a guest still checked in, a room another guest occupies, maintenance/blocked rooms). The check-out cleaning steps moved into one helper, _sendRoomToCleaning, used by both. (2) Rental items could be added beyond stock with no warning. Booking create/edit and rental add-ons now return 409 RENTAL_SHORTAGE with the per-item shortfall unless confirm_shortage is sent; an accepted shortage is audited. Availability now counts multi-day overlap and add-on rentals. New GET /events/reports/rental-shortages lists upcoming bookings short of stock. (3) The events calendar shows completed bookings.',
       'wa-not-in-plan-status  A WhatsApp notification for a property without the WhatsApp add-on is logged NOT_IN_PLAN (with the upgrade hint), not FAILED, and nothing is attempted, so the failed counters and log only show real delivery problems. Older rows blocked for the same reason are relabelled once per tenant.',
       'feedback-link-builder-wa-name-status  One feedback link builder (_feedbackLinkFor) shared by the sweep and the admin template test, which can now send a real signed feedback link for an order. The WhatsApp connection test reports the sender display-name status from Meta (approved, pending, declined, none), which decides whether guests see the business name or just the number.',
@@ -73080,7 +73210,14 @@ ${data.tenant.name}`;
             [yest]
           ).catch(() => []);
           if (candidates.length === 0) continue;
+          // A room reserved for an event that is still confirmed or running is not
+          // a no-show: the event checks its guests in. (Separate query — a tenant
+          // without the Events module has no event tables.)
+          const liveEventRooms = new Set<string>(((await tdb.query(
+            `SELECT r.hotel_booking_id FROM event_booking_rooms r JOIN event_bookings eb ON eb.id = r.booking_id
+              WHERE r.hotel_booking_id IS NOT NULL AND eb.status IN ('CONFIRMED','IN_PROGRESS')`).catch(() => [])) as any[]).map((x: any) => x.hotel_booking_id));
           for (const b of candidates) {
+            if (liveEventRooms.has(b.id)) continue;
             const result: any = await tdb.run(
               `UPDATE room_bookings
                   SET status = 'NO_SHOW', no_show = 1
@@ -73109,6 +73246,33 @@ ${data.tenant.name}`;
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[no-show-sweep] Daily 02:30 IST no-show sweep cron started');
+
+  // Every hour, check in the rooms of RUNNING events whose date has come — the
+  // later nights of a multi-day event, and any room that was still occupied by
+  // the previous guest when the event started. Idempotent; retries each hour.
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query("SELECT id FROM restaurants WHERE is_active = 1 AND access_revoked = 0 AND id <> 'SYSTEM'").catch(() => []);
+      const today = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      const sysReq: any = { user: { id: 'system', email: 'system:event-rooms', role: 'SYSTEM', userName: 'Automatic (event running)' }, headers: {}, params: {} };
+      let n = 0;
+      for (const t of tenants) {
+        try {
+          const tdb = await getTenantDb(t.id);
+          const due: any[] = await tdb.query(
+            `SELECT rb.id FROM event_booking_rooms r
+               JOIN event_bookings eb ON eb.id = r.booking_id
+               JOIN room_bookings rb ON rb.id = r.hotel_booking_id
+              WHERE eb.status = 'IN_PROGRESS' AND rb.status = 'BOOKED' AND rb.check_in_date <= ?`, [today]).catch(() => []);
+          for (const d of due) {
+            const out = await _eventRoomCheckin(tdb, { ...sysReq, params: { id: t.id } }, t.id, d.id).catch(() => null);
+            if (out?.checked_in && !out.already) n++;
+          }
+        } catch (err) { console.error(`[event-rooms] tenant ${t.id} failed:`, err); }
+      }
+      if (n > 0) console.log(`[event-rooms] checked in ${n} event room(s)`);
+    } catch (err) { console.error('[event-rooms] cron error:', err); }
+  }, { timezone: 'Asia/Kolkata' });
 
   cron.schedule('0 3 1 * *', async () => {
     try {
