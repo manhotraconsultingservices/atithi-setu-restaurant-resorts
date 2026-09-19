@@ -37293,8 +37293,13 @@ ${data.tenant.name}`;
       const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       if (bk.folio_id) {
-        const existing = await db.get("SELECT * FROM folios WHERE id = ?", [bk.folio_id]);
-        if (existing) return res.json({ ...existing, already_billed: true });
+        const existing: any = await db.get("SELECT * FROM folios WHERE id = ?", [bk.folio_id]);
+        // A cancelled / voided / superseded invoice is not a bill: the event must be
+        // invoiced again. Returning it as "already billed" left events with no live
+        // invoice and no revenue in the books while reporting success.
+        if (existing && !['voided', 'cancelled', 'superseded'].includes(String(existing.status || '').toLowerCase())) {
+          return res.json({ ...existing, already_billed: true });
+        }
       }
       const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk, parseEventGstOverride(req.body));
       const invoiceNumber = await _allocateEventInvoiceNumber(db);
@@ -68205,8 +68210,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-complete-invoices',
+    commit_marker: 'event-invoice-after-cancel',
     code_features: [
+      'event-invoice-after-cancel  The event invoice route returned a booking's CANCELLED/voided/superseded invoice as already billed, so the event could never be invoiced again and callers (Complete, the admin backfill) reported success with nothing posted (Parandhayya: P Madhavarao). A dead invoice no longer counts; a new one is raised.',
       'event-complete-invoices  Owner: accounts captured nothing from events. Advances were posted, but revenue, output GST and the receivable are posted only when the event tax invoice is raised, and completing an event never raised one (Ankur Cafe: 23 of 27 completed events uninvoiced, Rs 11.6 lakh). Complete now raises the invoice through the event invoice route when there is no live one (response carries invoice). Super-admin repair routes: POST /api/admin/tenants/:id/events/invoice-completed (dry_run lists, then raises; ids optional) and POST /api/admin/tenants/:id/gl/repair-dates (dry_run; sets malformed entry_date from the timestamp prefix or, for Wed Aug 05, from the posting year checked against the weekday).',
       'gl-entry-date-normalised  Ledger lines were being stored with non-date text in entry_date (inventory-close reversals as 2026-09-30T00:00:00.000+00:00 through 19 Sep; older F&B/folio/event journals as Wed Aug 05), so date-range reports skipped them. _postGlEntries, the single writer of gl_entries, now normalises every entryDate to YYYY-MM-DD via _glEntryDate. Existing malformed rows are not changed by this commit.',
       'admin-directory-phase1  Admin console redesign phase 1: the Businesses tiles (every tenant, ~130 columns each, ~16 buttons per tile) become a tenant directory — GET /api/admin/tenants/directory searches (name, ID, city, slug, owner name/email/phone), filters (chips: all, needs approval, active, overdue, suspended, inactive, spa, events, quiet 30+ days; type; sales rep), sorts and pages on the server, returning only the table columns plus filter counts; GET /api/admin/tenants/:id/overview feeds the side panel (row + staff logins, rooms, halls). New restaurants.last_active_at, stamped by authenticate at most once per tenant per 10 minutes. A sales rep sees only their tenants.',
