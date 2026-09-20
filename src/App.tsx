@@ -57089,48 +57089,11 @@ function CTODashboard({ token }: { token: string }) {
   const [selectedSalesRep, setSelectedSalesRep] = useState<string | null>(null);
   const [salesRepRestaurants, setSalesRepRestaurants] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'REPORTS' | 'USERS' | 'SUBSCRIPTIONS'>('REPORTS');
-  const [prices, setPrices] = useState({
-    monthly_price: '999', annual_price: '9999',
-    monthly_price_hotel: '1999', annual_price_hotel: '19999',
-    monthly_price_combined: '2499', annual_price_combined: '24999',
-  });
-  const [isSavingPrices, setIsSavingPrices] = useState(false);
 
   useEffect(() => {
     fetchReport();
     fetchInternalUsers();
-    fetchPrices();
   }, []);
-
-  const fetchPrices = async () => {
-    try {
-      const res = await fetch('/api/admin/subscription-prices', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) setPrices(await res.json());
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const savePrices = async () => {
-    setIsSavingPrices(true);
-    try {
-      const res = await fetch('/api/admin/subscription-prices', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(prices)
-      });
-      if (res.ok) toast.success("Prices updated successfully");
-    } catch (err) {
-      toast.error("Failed to update prices");
-    } finally {
-      setIsSavingPrices(false);
-    }
-  };
 
   const renewSubscription = async (restaurantId: string, type: 'MONTHLY' | 'ANNUALLY') => {
     try {

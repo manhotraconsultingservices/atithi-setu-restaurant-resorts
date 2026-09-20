@@ -68322,7 +68322,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'dates-ist-reversals',
+    commit_marker: 'admin-console-cto-cleanup',
     code_features: [
       'dates-ist-reversals  Four postings still took a UTC timestamp and cut it to a date, so they landed on the previous day in the early hours IST: the expense-claim cancel reversal, two hotel invoice dates and one settlement ledger date. All go through _glPostDate now.',
       'dates-ist-frontend  The app date pickers defaulted to the UTC date (yesterday between 00:00 and 05:30 IST), so an expense, payment or booking entered after midnight was dated the day before even after the server fix. New todayIST() in src/lib/utils.ts replaces all 121 toISOString today defaults in the frontend. Expense view drops orphan manual lines coming in.',
