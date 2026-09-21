@@ -33847,6 +33847,11 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
+      // Only the fields SENT are changed (see venue-settings): an empty PUT used to
+      // blank the title, tagline, description, contact details, hero image and gallery.
+      const cur: any = (await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null)) || {};
+      const has = (k: string) => b[k] !== undefined;
+      const pick = (k: string) => (has(k) ? (b[k] || null) : (cur[k] ?? null));
       await db.run(
         `INSERT INTO event_profile (id, hero_title, tagline, description, hero_image_url, gallery, contact_phone, contact_email, is_published, updated_at)
          VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -33855,9 +33860,10 @@ ${data.tenant.name}`;
            hero_image_url = EXCLUDED.hero_image_url, gallery = EXCLUDED.gallery,
            contact_phone = EXCLUDED.contact_phone, contact_email = EXCLUDED.contact_email,
            is_published = EXCLUDED.is_published, updated_at = CURRENT_TIMESTAMP`,
-        [b.hero_title || null, b.tagline || null, b.description || null, b.hero_image_url || null,
-         typeof b.gallery === 'string' ? b.gallery : JSON.stringify(b.gallery || []),
-         b.contact_phone || null, b.contact_email || null, b.is_published === false ? 0 : 1]
+        [pick('hero_title'), pick('tagline'), pick('description'), pick('hero_image_url'),
+         has('gallery') ? (typeof b.gallery === 'string' ? b.gallery : JSON.stringify(b.gallery || [])) : (cur.gallery ?? '[]'),
+         pick('contact_phone'), pick('contact_email'),
+         has('is_published') ? (b.is_published === false ? 0 : 1) : (cur.is_published ?? 1)]
       );
       const row = await db.get("SELECT * FROM event_profile WHERE id = 1");
       res.json(row);
@@ -33920,9 +33926,15 @@ ${data.tenant.name}`;
           splitsJson = null;
         }
       }
-      const pct = Math.max(0, Number(b.gst_percent ?? 18));
-      const enabled = (b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') ? 0 : 1;
-      const mode = ['EN', 'REGIONAL', 'BOTH'].includes(String(b.invoice_lang_mode || '').toUpperCase()) ? String(b.invoice_lang_mode).toUpperCase() : 'BOTH';
+      // Only the fields SENT are changed: a missing field keeps the saved value
+      // instead of resetting to 18% / on / bilingual.
+      const curG: any = (await db.get("SELECT gst_percent, gst_enabled, invoice_lang_mode FROM event_profile WHERE id = 1").catch(() => null)) || {};
+      const pct = Math.max(0, Number(b.gst_percent ?? curG.gst_percent ?? 18));
+      const enabled = b.gst_enabled === undefined
+        ? (Number(curG.gst_enabled ?? 1) === 0 ? 0 : 1)
+        : ((b.gst_enabled === false || b.gst_enabled === 0 || b.gst_enabled === '0' || b.gst_enabled === 'false') ? 0 : 1);
+      const mode = ['EN', 'REGIONAL', 'BOTH'].includes(String(b.invoice_lang_mode || '').toUpperCase()) ? String(b.invoice_lang_mode).toUpperCase()
+        : (['EN', 'REGIONAL', 'BOTH'].includes(String(curG.invoice_lang_mode || '').toUpperCase()) ? String(curG.invoice_lang_mode).toUpperCase() : 'BOTH');
       const upd: any = await db.run("UPDATE event_profile SET gst_percent = ?, gst_enabled = ?, invoice_lang_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", [pct, enabled, mode]);
       // Seed the singleton row if a tenant somehow has none yet.
       const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
@@ -33976,11 +33988,18 @@ ${data.tenant.name}`;
       const b = req.body || {};
       const exists = await db.get("SELECT id FROM event_profile WHERE id = 1").catch(() => null);
       if (!exists) await db.run("INSERT INTO event_profile (id) VALUES (1)").catch(() => {});
+      // Only the fields SENT are changed; anything missing keeps its saved value.
+      // This route used to rewrite every field from the body with a default for
+      // whatever was missing, so a partial or empty PUT reset the hall turnaround,
+      // the half-day windows and the weekend days (an API probe did exactly that on
+      // 21 Sep 2026 and reset a live tenant's rules).
+      const cur: any = (await db.get("SELECT default_turnaround_min, hd_am_start, hd_am_end, hd_pm_start, hd_pm_end, weekend_days FROM event_profile WHERE id = 1").catch(() => null)) || {};
+      const turn = Math.max(0, Number(b.default_turnaround_min ?? cur.default_turnaround_min ?? 120));
       await db.run(
         `UPDATE event_profile SET default_turnaround_min = ?, hd_am_start = ?, hd_am_end = ?, hd_pm_start = ?, hd_pm_end = ?, weekend_days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
-        [Math.max(0, Number(b.default_turnaround_min ?? 120)), b.hd_am_start || '08:00', b.hd_am_end || '14:00', b.hd_pm_start || '17:00', b.hd_pm_end || '23:00', b.weekend_days || '0,6']
+        [turn, b.hd_am_start || cur.hd_am_start || '08:00', b.hd_am_end || cur.hd_am_end || '14:00', b.hd_pm_start || cur.hd_pm_start || '17:00', b.hd_pm_end || cur.hd_pm_end || '23:00', b.weekend_days || cur.weekend_days || '0,6']
       );
-      await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'VENUE_RULES', action: 'UPDATED', summary: `Venue rules updated (turnaround ${Number(b.default_turnaround_min ?? 120)}m)` });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: 'VENUE_RULES', action: 'UPDATED', summary: `Venue rules updated (turnaround ${turn}m)` });
       res.json({ success: true });
     } catch (err: any) { console.error("/events venue-settings error:", err); res.status(500).json({ error: "Failed to save venue settings" }); }
   });
@@ -68439,8 +68458,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-rbac-round1',
+    commit_marker: 'events-settings-partial-update',
     code_features: [
+      'events-settings-partial-update  PUT /events/venue-settings, /events/profile and /events/gst-settings rewrote every field they own from the body with a default for whatever was missing, so a partial or empty PUT reset the hall turnaround (to 120 min), the half-day windows and weekend days, blanked the public page title/tagline/description/contact/hero/gallery, and reset GST language mode. They now change only the fields sent; the UI always sends the whole form, so screens behave the same. Found when the Events RBAC probe sent empty PUTs as Edit-level roles on RESTO-1003.',
       'events-rbac-round1  Events RBAC click-through and API probe (21 Sep 2026). UI: a View role no longer sees enabled controls it cannot use: hall status dropdown (and it now changes only after the server accepts), Charge GST / GST %, Add + Save GST details, Generate Quotation (needs Quotations Edit), Email invoice (Bookings Edit; its dialog is titled for the invoice), and the Public Page image pickers (read-only). Home launchpad: a module tile, public link or quick action shows only when the user can open one of its pages, and a tile opens the first page they can (the Events tile opened the Dashboard, which a Bookings-only role cannot see); the boot-time hotel tariff and travel-agent fetches and the launchpad hotel fetch no longer fire for a user with no hotel page. Refusals name the page in words (You do not have permission to change Events Bookings) instead of the role id and tab code; Access Restricted likewise. API: requireEventsAny gates 9 reads (analytics; bookings list and detail, schedule, hotel-availability, BEO, invoice pdf, audit, where-used) to the pages that use them, so a checklist-only role can no longer read revenue, customers and invoices. The catalog reads (venues, rentals, services, catering, profile, settings, availability) stay module-level.',
       'inventory-module-permissions  Hotel, Spa and Events share one inventory screen and the /inventory/* routes, which all required the kitchen INVENTORY tab (restaurant-only, so a hotel- or events-scoped role could never hold it): Hotel Inventory = Full showed no Add item and the API refused the write, and Events Inventory had no permission at all. New _requireInvWrite: each module answers to its own tab (HOTEL_INVENTORY, SPA_INVENTORY, new INVENTORY_EVENTS), INVENTORY still covers every module, and the module comes from the record touched (item, category, supplier link, PO, GRN items, count, period). inventoryStaff module gate admits the spa/events inventory tabs. Events Inventory is grantable in Staff Access (eventsOnly; Events-exclusive for role scope). Screen, supplier panel and month-end buttons use canWriteInventory(module).',
       'dates-ist-reversals  Four postings still took a UTC timestamp and cut it to a date, so they landed on the previous day in the early hours IST: the expense-claim cancel reversal, two hotel invoice dates and one settlement ledger date. All go through _glPostDate now.',
