@@ -13661,9 +13661,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (floorData) { fetchReports(); fetchTables(); fetchOrders(); }
     }
     fetchRestaurant();
-    fetchStaff();
+    // The staff directory needs the Staff page and the owner profile exists only for the owner
+    // account: for anyone else these are refused / not found on every page change.
+    if (canSeeTab('STAFF')) fetchStaff();
     fetchCustomRoles();
-    fetchOwnerProfile();
+    if (['OWNER', 'SUPER_ADMIN', 'CTO'].includes((localStorage.getItem('role') || '').toUpperCase())) fetchOwnerProfile();
     if (activeTab === 'FEEDBACK') fetchFeedback();
     if (activeTab === 'NOTIFICATIONS') fetchNotificationSettings();
     if (activeTab === 'MONITOR') fetchLiveTables();
