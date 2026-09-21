@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { canWriteTab } from './perm';
 
 // ── Owner-facing configuration for the Configurable Checklist Templates feature.
 // Categories → named templates → ordered steps → per-entity assignments. Staff
@@ -125,6 +126,9 @@ function ModuleToggles({ api }: { api: (p: string, i?: RequestInit) => Promise<a
 
 export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL', present }: Props) {
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
+  // Managing templates needs Edit on Checklist Templates (hotel or events) — the server's
+  // _canManageChecklists rule. A View role can read the list and open a template, not change one.
+  const canManage = canWriteTab('CHECKLISTS') || canWriteTab('EVENTS_CHECKLISTS');
   const [tab, setTab] = useState<'TEMPLATES' | 'CATEGORIES'>('TEMPLATES');
   const [cats, setCats] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -181,13 +185,13 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL',
 
       {err && <div className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{err}</div>}
 
-      {tab === 'CATEGORIES' && <CategoriesPanel api={api} cats={cats} reload={load} facilityScope={facilityScope} />}
+      {tab === 'CATEGORIES' && <CategoriesPanel api={api} cats={cats} reload={load} facilityScope={facilityScope} canManage={canManage} />}
 
       {tab === 'TEMPLATES' && !editing && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <p className="text-sm text-[#6b5d52]">{shown.length} template{shown.length === 1 ? '' : 's'}</p>
-            <button onClick={() => setEditing({ __new: true, name: '', category_id: inScopeActiveCats[0]?.id || '', facility_type: defaultFType, trigger_event: defaultTrigger, blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button>
+            {canManage ? <button onClick={() => setEditing({ __new: true, name: '', category_id: inScopeActiveCats[0]?.id || '', facility_type: defaultFType, trigger_event: defaultTrigger, blocks_release: 0, recurrence_nights: 1, steps: [], assignments: [] })} className={BTN}>+ New template</button> : <span className="text-xs text-[#9c8e85]">View only</span>}
           </div>
           {loading ? <p className="text-sm text-[#6b5d52]">Loading…</p> : shown.length === 0 ? (
             <p className="text-sm text-[#6b5d52] italic">No templates yet. Create one, or the default check-out checklists will show here.</p>
@@ -217,13 +221,13 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL',
                         ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-stone-100 text-stone-500">Inactive</span>
                         : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Active</span>}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap">
-                        <button onClick={async () => { try { setEditing(await api(`/checklists/templates/${t.id}`)); } catch (e: any) { setErr(e?.message); } }} className="text-xs px-2 py-1 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">Edit</button>
+                        <button onClick={async () => { try { setEditing(await api(`/checklists/templates/${t.id}`)); } catch (e: any) { setErr(e?.message); } }} className="text-xs px-2 py-1 border border-[#d4c4a8] rounded hover:bg-[#f5f0e8]">{canManage ? 'Edit' : 'View'}</button>
                         {/* Activate / Deactivate — only ACTIVE templates are ever triggered. Works for
                             system templates too (deactivate to stop the default checklist firing). */}
-                        <button onClick={async () => { try { await api(`/checklists/templates/${t.id}`, { method: 'PATCH', body: JSON.stringify({ is_active: Number(t.is_active) === 0 ? 1 : 0 }) }); load(); } catch (e: any) { setErr(e?.message); } }}
+                        {canManage && <button onClick={async () => { try { await api(`/checklists/templates/${t.id}`, { method: 'PATCH', body: JSON.stringify({ is_active: Number(t.is_active) === 0 ? 1 : 0 }) }); load(); } catch (e: any) { setErr(e?.message); } }}
                           className={`ml-1 text-xs px-2 py-1 border rounded ${Number(t.is_active) === 0 ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50' : 'border-[#d4c4a8] text-[#6b5d52] hover:bg-[#f5f0e8]'}`}>
                           {Number(t.is_active) === 0 ? 'Activate' : 'Deactivate'}
-                        </button>
+                        </button>}
                       </td>
                     </tr>
                   ))}
@@ -236,14 +240,14 @@ export function ChecklistTemplates({ restaurantId, token, facilityScope = 'ALL',
 
       {tab === 'TEMPLATES' && editing && (
         <TemplateEditor api={api} cats={cats} restaurantId={restaurantId} token={token} facilityScope={facilityScope} present={present}
-          initial={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} onError={setErr} />
+          initial={editing} readOnly={!canManage} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} onError={setErr} />
       )}
     </div>
   );
 }
 
 // ── Categories ─────────────────────────────────────────────────────────────
-function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: any; cats: any[]; reload: () => void; facilityScope?: FacilityScope }) {
+function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL', canManage = true }: { api: any; cats: any[]; reload: () => void; facilityScope?: FacilityScope; canManage?: boolean }) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const shownCats = cats.filter(c => catInScope(c, facilityScope)); // only this module's categories
@@ -255,10 +259,10 @@ function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: an
   };
   return (
     <div className="space-y-4 max-w-2xl">
-      <div className="flex items-end gap-2">
+      {canManage && <div className="flex items-end gap-2">
         <div className="flex-1"><label className="text-xs text-[#6b5d52] block">New category</label><input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Kitchen / Pool / Safety" className={INPUT + ' w-full'} /></div>
         <button onClick={add} disabled={busy || !name.trim()} className={BTN}>Add</button>
-      </div>
+      </div>}
       <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
         <table className="w-full text-sm border-collapse">
           <thead><tr className="bg-[#f5f0e8] text-left"><th className="px-3 py-2 font-semibold text-[#1a1208]">Category</th><th className="px-3 py-2 font-semibold text-[#1a1208]">Status</th><th className="px-3 py-2"></th></tr></thead>
@@ -267,7 +271,7 @@ function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: an
               <tr key={c.id} className="border-t border-[#f0e8d8]">
                 <td className="px-3 py-2 font-medium">{c.name}{c.is_system ? <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-[#f0e8d8] text-[#6b5d52]">system</span> : null}</td>
                 <td className="px-3 py-2">{Number(c.is_active) === 1 ? <span className="text-emerald-700 text-xs">Active</span> : <span className="text-[#9c8e85] text-xs">Inactive</span>}</td>
-                <td className="px-3 py-2 text-right">{!c.is_system && Number(c.is_active) === 1 && <button onClick={async () => { await api(`/checklists/categories/${c.id}`, { method: 'DELETE' }); reload(); }} className="text-xs px-2 py-1 border border-rose-200 text-rose-600 rounded hover:bg-rose-50">Deactivate</button>}</td>
+                <td className="px-3 py-2 text-right">{canManage && !c.is_system && Number(c.is_active) === 1 && <button onClick={async () => { await api(`/checklists/categories/${c.id}`, { method: 'DELETE' }); reload(); }} className="text-xs px-2 py-1 border border-rose-200 text-rose-600 rounded hover:bg-rose-50">Deactivate</button>}</td>
               </tr>
             ))}
           </tbody>
@@ -278,8 +282,8 @@ function CategoriesPanel({ api, cats, reload, facilityScope = 'ALL' }: { api: an
 }
 
 // ── Template editor (fields + steps + assignments) ───────────────────────────
-function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL', present, initial, onClose, onSaved, onError }:
-  { api: any; cats: any[]; restaurantId: string; token: string; facilityScope?: FacilityScope; present?: Record<string, boolean>; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
+function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL', present, initial, readOnly = false, onClose, onSaved, onError }:
+  { readOnly?: boolean; api: any; cats: any[]; restaurantId: string; token: string; facilityScope?: FacilityScope; present?: Record<string, boolean>; initial: any; onClose: () => void; onSaved: () => void; onError: (s: string) => void }) {
   const isNew = !!initial.__new;
   const ftypeOpts = FTYPES.filter(f => typesForTenant(facilityScope, present).includes(f.v));
   const [form, setForm] = useState<any>({
@@ -326,10 +330,12 @@ function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL',
   return (
     <div className="space-y-5 max-w-3xl">
       <div className="flex items-center justify-between">
-        <h3 className="text-xl font-bold text-[#1a1208]">{isNew ? 'New template' : `Edit — ${initial.name}`}</h3>
+        <h3 className="text-xl font-bold text-[#1a1208]">{isNew ? 'New template' : `${readOnly ? 'View' : 'Edit'} — ${initial.name}`}</h3>
         <button onClick={onClose} className={GHOST}>← Back</button>
       </div>
 
+      {/* A View role sees the template read-only: the fieldset disables every input and button inside it. */}
+      <fieldset disabled={readOnly} className="space-y-5 min-w-0 border-0 p-0 m-0">
       <div className="grid sm:grid-cols-2 gap-3">
         <div><label className="text-xs text-[#6b5d52] block mb-1">Name</label><input value={form.name} onChange={e => set('name', e.target.value)} placeholder="e.g. PMS - Check-Out" className={INPUT + ' w-full'} /></div>
         <div><label className="text-xs text-[#6b5d52] block mb-1">Category</label><select value={form.category_id} onChange={e => set('category_id', e.target.value)} className={INPUT + ' w-full'}>{cats.filter(c => Number(c.is_active) === 1 && catInScope(c, facilityScope)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
@@ -363,9 +369,11 @@ function TemplateEditor({ api, cats, restaurantId, token, facilityScope = 'ALL',
         <AssignmentsPanel api={api} restaurantId={restaurantId} token={token} facilityScope={facilityScope} template={initial} assignments={assignments} setAssignments={setAssignments} onError={onError} />
       )}
 
+      </fieldset>
+
       <div className="flex items-center gap-3">
-        <button onClick={save} disabled={saving} className={BTN}>{saving ? 'Saving…' : (isNew ? 'Create template' : 'Save changes')}</button>
-        <button onClick={onClose} className={GHOST}>Cancel</button>
+        {!readOnly && <button onClick={save} disabled={saving} className={BTN}>{saving ? 'Saving…' : (isNew ? 'Create template' : 'Save changes')}</button>}
+        <button onClick={onClose} className={GHOST}>{readOnly ? 'Close' : 'Cancel'}</button>
         {isNew && <span className="text-[11px] text-[#9c8e85]">Save first, then you can target specific rooms / halls.</span>}
       </div>
     </div>

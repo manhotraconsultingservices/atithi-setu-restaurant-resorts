@@ -24032,7 +24032,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           {smokingBadge.label}
                         </span>
                       </div>
-                      <div className="flex gap-1.5 flex-wrap mb-3">
+                      {/* Changing a room's status needs Edit on Rooms (server: ROOMS UPDATE) — a View role sees the status badge only. */}
+                      {canWriteTab('ROOMS') && (<div className="flex gap-1.5 flex-wrap mb-3">
                         {['VACANT','OCCUPIED','CLEANING','MAINTENANCE','BLOCKED'].map(st => (
                           <button
                             key={st}
@@ -24043,7 +24044,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {st[0]}
                           </button>
                         ))}
-                      </div>
+                      </div>)}
                       <div className="flex gap-2 pt-3 border-t border-brand/10">
                         <button onClick={() => setRoomQrPreview({ ...room, qrUrl })} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-brand text-xs font-bold hover:bg-brand/10 flex items-center justify-center gap-1" title="View QR code"><QrCode size={14} /> QR</button>
                         {/* Edit / Block / Delete are SETUP-only (owner). The status board
@@ -29459,7 +29460,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
            addPropertyGalleryImage, deletePropertyGalleryImage,
            addRoomTypeGalleryImage, deleteRoomTypeGalleryImage,
            fetchRoomTypeGallery — same ones SETTINGS previously used). */
-        <div className="max-w-4xl space-y-5">
+        /* Saving the public page writes the property profile, gallery and images, which the server gates on
+           Settings (Edit) — a role that only holds Direct Booking Page sees it read-only. */
+        <fieldset disabled={!canWriteTab('SETTINGS')} className="max-w-4xl space-y-5 min-w-0 border-0 p-0 m-0">
+          {!canWriteTab('SETTINGS') && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-800">View only — changing the public page needs Edit access to Settings.</div>}
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🌐 Public Booking Page</h2>
@@ -29896,7 +29900,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </div>
           )}
-        </div>
+        </fieldset>
       ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-3xl space-y-6">
           {/* ── Property Type — READ-ONLY for Owners ─────────────────────
@@ -30225,11 +30229,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                 {/* Save */}
                 <div className="flex items-center gap-3 pt-2">
-                  <button
+                  {canWriteTab('SETTINGS') && <button
                     onClick={savePropertyProfile}
                     disabled={propertyProfileSaving}
                     className="px-5 py-2.5 rounded-2xl bg-brand text-white text-sm font-bold hover:bg-brand-dark disabled:opacity-50"
-                  >{propertyProfileSaving ? 'Saving…' : 'Save public page'}</button>
+                  >{propertyProfileSaving ? 'Saving…' : 'Save public page'}</button>}
                   {propertyProfileSaved && <span className="text-xs font-bold text-emerald-600">✓ Saved</span>}
                 </div>
               </div>
@@ -45366,6 +45370,7 @@ const PendingRoomOrdersAlert: React.FC<{
                   </option>
                 ))}
               </select>
+              {!canWriteTab('FOLIOS') ? <span className="text-[11px] font-semibold text-[#9c8e85] whitespace-nowrap">View only</span> : (<>
               <button
                 type="button"
                 onClick={() => (picks[o.id] ? charge(o) : deliverOrder(o, false))}
@@ -45384,6 +45389,7 @@ const PendingRoomOrdersAlert: React.FC<{
               >
                 💵 Guest paid
               </button>
+              </>)}
             </div>
           );
         })}
@@ -45880,7 +45886,7 @@ const RestaurantBillModal: React.FC<{
         </div>
         <div className="shrink-0 px-6 py-4 border-t border-brand/10 flex items-center justify-end gap-2">
           <button onClick={onClose} className="px-4 py-2 rounded-2xl border border-brand/20 text-[#3d3128] text-sm font-bold">Close</button>
-          {!loading && data && data.unpaid > 0.01 && (
+          {!loading && data && data.unpaid > 0.01 && canWriteTab('FOLIOS') && (
             <button
               onClick={markPaid}
               disabled={busy}
@@ -46147,6 +46153,7 @@ const CheckoutModal: React.FC<{
                     {o.created_at && <p className="text-[10px] text-[#9c8e85]">{new Date(o.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' })}</p>}
                   </div>
                   <span className="font-mono text-sm font-bold text-[#1a1208] whitespace-nowrap">{fmt(Number(o.total_amount || 0))}</span>
+                  {!canWriteTab('FOLIOS') ? <span className="text-[11px] font-semibold text-[#9c8e85] whitespace-nowrap">View only</span> : (<>
                   <button
                     type="button"
                     onClick={() => reconcilePending(o, false)}
@@ -46160,6 +46167,7 @@ const CheckoutModal: React.FC<{
                     title="Guest already paid this in the room — keep it off the folio"
                     className="px-3 py-1.5 rounded-lg border border-emerald-600 text-emerald-700 bg-white text-[11px] font-bold hover:bg-emerald-50 disabled:opacity-50 whitespace-nowrap"
                   >💵 Guest paid</button>
+                  </>)}
                 </div>
               ))}
             </div>

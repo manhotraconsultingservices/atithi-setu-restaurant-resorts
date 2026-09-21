@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import {
   Sparkles, Check, X, Plus, RefreshCw, ListChecks, History, ShieldAlert, DoorOpen, Building2, ClipboardList,
 } from 'lucide-react';
-import { canDeleteTab } from './perm';
+import { canDeleteTab, canWriteTab } from './perm';
 import { DataTable } from './components/DataTable';
 import { useT } from './i18n';
 
@@ -69,6 +69,9 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
   const [openJob, setOpenJob] = useState<any>(null); // {..., tasks}
   const [busy, setBusy] = useState(false);
   const canOverride = canDeleteTab('HOUSEKEEPING');  // mirrors the server rule (manager/owner or Housekeeping Full)
+  // Ticking a task, completing a job and starting a checklist all need Edit on Housekeeping
+  // (server: requireTabAction HOUSEKEEPING UPDATE / CREATE). A View role sees the worklist only.
+  const canWrite = canWriteTab('HOUSEKEEPING');
   // Manual / on-demand start (inspections, ad-hoc runs).
   const [showStart, setShowStart] = useState(false);
   const [startTpls, setStartTpls] = useState<any[]>([]);
@@ -138,7 +141,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
     <div>
       <div className="flex items-center gap-2 mb-3">
         <button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /> Refresh</button>
-        <button className={BTN_GHOST} onClick={openStart}>+ Start checklist</button>
+        {canWrite && <button className={BTN_GHOST} onClick={openStart}>+ Start checklist</button>}
         <span className="text-[11px] text-[#9c8e85]">{jobs.length} facilities awaiting cleaning</span>
       </div>
       {loading ? <p className="text-sm text-[#6b5d52] p-4">Loading…</p> : jobs.length === 0 ? (
@@ -180,7 +183,7 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             </div>
             <div className="flex flex-col gap-1.5 my-3">
               {(openJob.tasks || []).map((t: any) => (
-                <button key={t.id} onClick={() => toggle(t)} className={`flex items-center gap-2.5 text-left px-3 py-3 rounded-xl border transition-colors active:scale-[0.99] ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-brand'}`}>
+                <button key={t.id} onClick={() => toggle(t)} disabled={!canWrite} className={`flex items-center gap-2.5 text-left px-3 py-3 rounded-xl border transition-colors active:scale-[0.99] ${t.is_done ? 'bg-emerald-50 border-emerald-200' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-brand'}`}>
                   <span className={`w-6 h-6 rounded-md grid place-items-center shrink-0 ${t.is_done ? 'bg-emerald-500 text-white' : 'border-2 border-[#cbb9a8]'}`}>{t.is_done && <Check size={15} />}</span>
                   <span className={`text-sm flex-1 ${t.is_done ? 'line-through text-[#9c8e85]' : 'text-[#3d3128]'}`}>{t.label}</span>
                   {!t.is_mandatory && <span className="text-[9px] font-bold text-[#b9a897] uppercase shrink-0">optional</span>}
@@ -192,8 +195,8 @@ function Worklist({ api, scope = 'ALL' }: { api: (p: string, i?: RequestInit) =>
             <div className="flex flex-col sm:flex-row sm:justify-end gap-2 sticky bottom-0 bg-white pt-1">
               {/* F-C3 — skipping a checklist is a manager/Full action on the server;
                   don't offer the button to an Edit-level user who'd only get a 403. */}
-              {canOverride && <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>}
-              <button className={`${BTN_PRIMARY} w-full sm:w-auto justify-center py-2.5`} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button>
+              {canWrite && canOverride && <button className={`${BTN_GHOST} w-full sm:w-auto justify-center py-2.5`} onClick={override} disabled={busy}><ShieldAlert size={13} /> Override</button>}
+              {canWrite ? <button className={`${BTN_PRIMARY} w-full sm:w-auto justify-center py-2.5`} onClick={complete} disabled={busy || pendMand > 0}><Check size={13} /> Mark cleaned &amp; release</button> : <span className="text-xs text-[#9c8e85] self-center">View only</span>}
             </div>
           </div>
         </div>
@@ -239,6 +242,8 @@ function ChecklistConfig({ api, scope = 'ALL' }: { api: (p: string, i?: RequestI
   const [data, setData] = useState<{ ROOM: any[]; EVENT: any[] }>({ ROOM: [], EVENT: [] });
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<Record<string, string>>({ ROOM: '', EVENT: '' });
+  const canEditCfg = canWriteTab('HOUSEKEEPING');   // server: owner/manager or Housekeeping Edit (delete: Full)
+  const canDelCfg = canDeleteTab('HOUSEKEEPING');
   const load = async () => { setLoading(true); try { setData(await api('/housekeeping/checklist')); } catch { /* */ } finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
   const add = async (ft: 'ROOM' | 'EVENT') => {
@@ -257,17 +262,17 @@ function ChecklistConfig({ api, scope = 'ALL' }: { api: (p: string, i?: RequestI
         {(data[ft] || []).length === 0 ? <p className="text-xs text-[#9c8e85]">No tasks yet.</p> : (data[ft] || []).map((t: any) => (
           <div key={t.id} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border ${t.is_active ? 'border-[#e8dccf]' : 'border-dashed border-[#e0d4c5] opacity-60'}`}>
             <span className="text-sm flex-1 text-[#3d3128] break-words min-w-0">{t.label}</span>
-            <button onClick={() => patch(t, { is_mandatory: !t.is_mandatory })}
+            <button onClick={() => patch(t, { is_mandatory: !t.is_mandatory })} disabled={!canEditCfg}
               className={`text-[9px] font-bold px-2 py-1 rounded-full shrink-0 ${t.is_mandatory ? 'bg-rose-50 text-rose-600' : 'bg-[#f0e9df] text-[#9c8e85]'}`}
               title="Toggle mandatory / optional">{t.is_mandatory ? 'MANDATORY' : 'OPTIONAL'}</button>
-            <button onClick={() => del(t)} title="Remove" className="p-1.5 shrink-0 text-rose-400 hover:text-rose-600"><X size={16} /></button>
+            {canDelCfg && <button onClick={() => del(t)} title="Remove" className="p-1.5 shrink-0 text-rose-400 hover:text-rose-600"><X size={16} /></button>}
           </div>
         ))}
       </div>
-      <div className="flex gap-2">
+      {canEditCfg && <div className="flex gap-2">
         <input className={INPUT} value={draft[ft]} onChange={e => setDraft({ ...draft, [ft]: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') add(ft); }} placeholder="Add a task…" />
         <button className={BTN_PRIMARY} onClick={() => add(ft)}><Plus size={13} /> Add</button>
-      </div>
+      </div>}
     </div>
   );
   if (loading) return <p className="text-sm text-[#6b5d52] p-4">Loading…</p>;

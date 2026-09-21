@@ -9177,6 +9177,54 @@ function requireEventsAny(tabIds: string[]) {
 const EV_READ_BOOKINGS = ['EVENTS_BOOKINGS', 'EVENTS_CALENDAR', 'EVENTS_QUOTATIONS', 'EVENTS_ADDONS', 'EVENTS_DASHBOARD', 'EVENTS_REPORTS'];
 const EV_READ_ANALYTICS = ['EVENTS_DASHBOARD', 'EVENTS_REPORTS'];
 
+// The same lesson for the Hotel / PMS module (22 Sep 2026 Hotel RBAC test): hotelStaff
+// only proves the role holds SOME hotel page, so ~70 read routes were open to a role
+// holding just Checklists, Service Catalogue or Concierge — guest names and phones,
+// every booking, folio PDFs, police / Form-C reports, revenue reports and the channel
+// manager's credentials and sync logs. Each read below now also needs a page that uses
+// it. Same rules as requireEventsAny: View is enough; owner / super admin / CTO pass;
+// a never-configured role passes; a built-in operational role with none of these pages
+// in its saved matrix is grandfathered. The first id must be a hotel page (it picks the
+// grandfathered role list and names the page in the refusal).
+function requireHotelAny(tabIds: string[]) {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (role === 'SUPER_ADMIN' || role === 'CTO' || role === 'OWNER') return next();
+      const tenantId = (req.user as any)?.restaurantId || req.params.id;
+      if (!tenantId) return next();
+      const perms: any = await getTabPermissionsForRole(tenantId, role);
+      if (perms === null) return next();
+      if (tabIds.some(t => Number(perms[t] || 0) >= 1)) return next();
+      if (tabIds.every(t => !(t in perms))) {
+        const ops = _moduleOperationalRolesForTab(tabIds[0]);
+        if (ops && ops.includes(role)) return next();
+      }
+      return res.status(403).json({
+        error: `You do not have access to this part of the hotel. Ask the property owner to grant ${_prettyTab(tabIds[0])} in Staff Access.`,
+        required_tab: tabIds[0], required_any_of: tabIds,
+      });
+    } catch (err) {
+      console.error('[requireHotelAny] permission lookup error — denying access:', err);
+      return res.status(503).json({ error: 'Permission check temporarily unavailable. Try again shortly.' });
+    }
+  };
+}
+// Which pages read what (each list = the screens that use that data).
+// Guest, booking and stay data: the front desk, folios, rooms, guest requests, housekeeping
+// (occupancy), compliance, reports and the channel manager (its booking report).
+const HOTEL_READ_GUESTS = ['HOTEL_BOOKINGS', 'FOLIOS', 'ROOMS', 'SERVICE_REQUESTS', 'HOUSEKEEPING', 'COMPLIANCE', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER'];
+// Guest documents: the invoice PDF and the Form-C PDF.
+const HOTEL_READ_DOCS = ['HOTEL_BOOKINGS', 'FOLIOS', 'COMPLIANCE', 'FRONT_OFFICE_REPORTS'];
+// Revenue and payment reports.
+const HOTEL_READ_MONEY = ['FRONT_OFFICE_REPORTS', 'FOLIOS', 'CHANNEL_MANAGER'];
+// Dashboards drawn from bookings and folios (also the Groups tab and the invoice list).
+const HOTEL_READ_ANALYTICS = ['FRONT_OFFICE_REPORTS', 'FOLIOS', 'HOTEL_BOOKINGS', 'CHANNEL_MANAGER'];
+// The channel manager's own data: OTA sync logs, room mappings, partner invoices, calendar feeds.
+const HOTEL_READ_CHANNEL = ['CHANNEL_MANAGER'];
+// Lists the booking form also uses (channel names for the booking-source picker, travel agents).
+const HOTEL_READ_LOOKUP = ['CHANNEL_MANAGER', 'HOTEL_BOOKINGS', 'FOLIOS', 'FRONT_OFFICE_REPORTS'];
+
 // Service-request read/status endpoints. Permission-aware (mirrors hotelStaff):
 // the built-in ops allowlist (front desk / concierge / manager + housekeeping /
 // maintenance who action requests) PLUS any CUSTOM role the owner granted the
@@ -42920,7 +42968,7 @@ ${data.tenant.name}`;
   // slabs is taxed per night exactly as it will be billed.
   // Query: booking_id with the check-in screen's changes (room_id, room_rate,
   // meal_plan_id, gst_exclusive); or amount + nights for a stay not yet booked.
-  app.get("/api/restaurant/:id/hotel/stay-tax-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/stay-tax-preview", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44234,7 +44282,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS stats — counts for KPI tiles, always unfiltered ───────────
-  app.get("/api/restaurant/:id/hotel/bookings/stats", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/stats", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44271,7 +44319,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BOOKINGS — list / create / cancel / check-in / check-out ────────────
-  app.get("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44517,7 +44565,7 @@ ${data.tenant.name}`;
   // FRONT_DESK user can pull their morning Arrival report without
   // bouncing it to the owner.
 
-  app.get("/api/restaurant/:id/hotel/reports/arrivals", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/arrivals", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44549,7 +44597,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/departures", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/departures", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44640,7 +44688,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44760,7 +44808,7 @@ ${data.tenant.name}`;
   //    by day/week/month, split by method and by DIRECT-vs-OTA source, net
   //    of refunds. (OTA *commission receivables* live in the Outstanding /
   //    Receivables reports — this one is money actually received.)
-  app.get("/api/restaurant/:id/hotel/reports/payment-received", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/payment-received", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44816,7 +44864,7 @@ ${data.tenant.name}`;
   });
 
   // 2) REVENUE BY ROOM TYPE — settled-folio revenue, room nights, ADR.
-  app.get("/api/restaurant/:id/hotel/reports/revenue-by-room-type", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/revenue-by-room-type", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44891,7 +44939,7 @@ ${data.tenant.name}`;
   });
 
   // 4) CUSTOMERS / GUEST DIRECTORY — lifetime stays + spend per guest.
-  app.get("/api/restaurant/:id/hotel/reports/customers", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/customers", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44918,7 +44966,7 @@ ${data.tenant.name}`;
   // 4b) CANCELLED RESERVATIONS — answers "how to identify a cancellation":
   //     bookings with status='CANCELLED', with when / who / why / refund.
   //     (Cancellations are excluded from arrival/departure by design.)
-  app.get("/api/restaurant/:id/hotel/reports/cancellations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/cancellations", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -45572,7 +45620,7 @@ ${data.tenant.name}`;
   // REQ 5 — Returning-guest lookup: aggregate every past stay for a phone
   // number. Surfaces lifetime stays, total spend, and the most recent
   // stay so the front desk can welcome a returning guest with context.
-  app.get("/api/restaurant/:id/hotel/guests/lookup", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/guests/lookup", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -46489,7 +46537,7 @@ ${data.tenant.name}`;
   // CRUD for iCal subscription URLs. The cron worker (further down)
   // fetches each enabled feed every 30 min and creates BOOKED rows for
   // any new VEVENT UIDs.
-  app.get("/api/restaurant/:id/hotel/ical-feeds", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/ical-feeds", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -46610,7 +46658,7 @@ ${data.tenant.name}`;
   // Agoda is out of scope for this sprint; this commit just exposes
   // the UI surface so the owner can enter keys, which a follow-up
   // worker can consume.
-  app.get("/api/restaurant/:id/hotel/channel-credentials", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-credentials", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_LOOKUP), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -46919,7 +46967,7 @@ ${data.tenant.name}`;
   //
   // Resolution order at inbound time:
   //   exact (channel + code + plan) → (channel + code + NULL) → type-level
-  app.get("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -47412,7 +47460,7 @@ ${data.tenant.name}`;
   app.post("/api/public/aiosell/reservation/:restaurantId", express.json({ limit: '256kb' }), aiosellWebhookHandler);
 
   // ── Per-tenant Aiosell control endpoints ──
-  app.get("/api/restaurant/:id/hotel/aiosell/status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/aiosell/status", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
@@ -47492,7 +47540,7 @@ ${data.tenant.name}`;
       res.json({ ok: true, hotel_name: d.hotel_name, hotel_id: d.hotel_id, currency: d.currency, rooms: Array.isArray(d.rooms) ? d.rooms.length : 0 });
     } catch (e: any) { res.status(500).json({ ok: false, error: e?.message }); }
   });
-  app.get("/api/restaurant/:id/hotel/aiosell/property", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/aiosell/property", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
@@ -47518,7 +47566,7 @@ ${data.tenant.name}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
   // Sync log — the plain-English record of every PMS↔Aiosell exchange.
-  app.get("/api/restaurant/:id/hotel/aiosell/sync-log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/aiosell/sync-log", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       await aiosellEnsureSyncLogTable(tenantDb);
@@ -47542,7 +47590,7 @@ ${data.tenant.name}`;
   // `unrecognised` = recent hits (last 60 min) whose hotelCode resolved to NO
   // property — the tell-tale of Aiosell sending the wrong hotel code (returns
   // only the code + time + outcome, never credentials).
-  app.get("/api/restaurant/:id/hotel/aiosell/inbound-attempts", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/aiosell/inbound-attempts", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       await ensureAiosellCentral();
@@ -47727,7 +47775,7 @@ ${data.tenant.name}`;
   // dependent am I on OTAs vs direct (channel mix + dependency flag), and how much
   // cash to collect from guests (prepaid vs pay-at-hotel). Money totals exclude
   // cancelled bookings.
-  app.get("/api/restaurant/:id/hotel/aiosell/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/aiosell/bookings", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
@@ -47968,7 +48016,7 @@ ${data.tenant.name}`;
   // ════════════════════════════════════════════════════════════════════
   // Aggregates commission paid/owed per channel for a date range. Used
   // by the Channel Manager Commission tab + monthly P&L reconciliation.
-  app.get("/api/restaurant/:id/hotel/reports/commission-summary", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/commission-summary", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -48027,7 +48075,7 @@ ${data.tenant.name}`;
   //   • top_channel_by_net, best_margin_channel, worst_margin_channel
   //   • concentration_top1, concentration_top2 (revenue share)
   //   • channel_count
-  app.get("/api/restaurant/:id/hotel/reports/ota-360", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/ota-360", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -48249,7 +48297,7 @@ ${data.tenant.name}`;
   };
 
   // ─── TRAVEL AGENTS CRUD ────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/agents", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/agents", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_LOOKUP), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -48926,7 +48974,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PARTNER INVOICES ──────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49062,7 +49110,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PARTNER PAYMENTS ──────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/partner-payments", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/partner-payments", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49134,7 +49182,7 @@ ${data.tenant.name}`;
   // Per-partner aging grid: Current / 30-60d / 60-90d / 90+d.
   // Outstanding = net_due - net_received, per invoice.
   // Bucket by (today - due_date) for invoiced amounts.
-  app.get("/api/restaurant/:id/hotel/reports/receivables-aging", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/receivables-aging", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49471,7 +49519,7 @@ ${data.tenant.name}`;
   });
 
   // Per-partner statement: bookings + invoices + payments + running balance.
-  app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const partnerType = String(req.query.partner_type || 'OTA');
@@ -49542,7 +49590,7 @@ ${data.tenant.name}`;
   //   PARTIAL   → on an invoice, some payment received
   //   PAID      → fully settled
   //   OVERDUE   → past invoice due_date and not PAID
-  app.get("/api/restaurant/:id/hotel/reports/outstanding-payments", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/outstanding-payments", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -49751,7 +49799,7 @@ ${data.tenant.name}`;
   //
   // Query params: date=YYYY-MM-DD (defaults to today)
   //               range=N (defaults to 1, max 31 — rolling N-day window)
-  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const today = _todayIST();
@@ -49979,7 +50027,7 @@ ${data.tenant.name}`;
   // rows. The queue worker (cron) auto-retries up to 5 times with
   // exponential backoff; this UI surface lets the operator inspect
   // queued/failed/permanently_failed rows and manually retry or dismiss.
-  app.get("/api/restaurant/:id/hotel/channel-sync-queue", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-sync-queue", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50032,7 +50080,7 @@ ${data.tenant.name}`;
   // ════════════════════════════════════════════════════════════════════
   // ─── RECONCILIATION REPORTS (Gap 8) ────────────────────────────────
   // ════════════════════════════════════════════════════════════════════
-  app.get("/api/restaurant/:id/hotel/channel-reconciliation-reports", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-reconciliation-reports", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50480,7 +50528,7 @@ ${data.tenant.name}`;
 
   // ─── WEBHOOK AUDIT LOG VIEWER (owner-facing) ───────────────────────
   // Powers the channel-manager dashboard's "Recent inbound events" pane.
-  app.get("/api/restaurant/:id/hotel/webhook-log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/webhook-log", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -52693,7 +52741,7 @@ ${data.tenant.name}`;
   });
 
   // List groups (room_booking_groups + booking count per group).
-  app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -53273,7 +53321,7 @@ ${data.tenant.name}`;
   });
 
   // GET group-revenue report: revenue by group, filterable by date range.
-  app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_ANALYTICS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -53308,7 +53356,7 @@ ${data.tenant.name}`;
   // Nine new endpoints that close the gap between Atithi Setu and Aiosell's
   // 26-report catalogue.  All share the /hotel/reports/* prefix.
 
-  app.get("/api/restaurant/:id/hotel/reports/room-changes", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/room-changes", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53335,7 +53383,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/police-enquiry", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/police-enquiry", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53364,7 +53412,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/no-shows", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/no-shows", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53410,7 +53458,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/hotel-sales", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/hotel-sales", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53437,7 +53485,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/pos-report", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/pos-report", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53462,7 +53510,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/item-consumption", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/item-consumption", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53492,7 +53540,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/daily-forecast", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/daily-forecast", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -53516,7 +53564,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/monthly-pnl", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/monthly-pnl", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || new Date().toISOString().slice(0, 8) + '01');
@@ -53558,7 +53606,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/reports/contribution", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/contribution", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
@@ -54590,7 +54638,7 @@ ${data.tenant.name}`;
 
   // Pre-check-in perk preview — UI shows a banner BEFORE the cashier
   // taps Check-In so they can prepare the complimentary perk in advance.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/perk-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/perk-preview", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -54858,7 +54906,7 @@ ${data.tenant.name}`;
   // For a room reserved for an EVENT: which event it belongs to and that event's
   // money. The hotel booking screen shows this instead of a hotel "outstanding",
   // because the room is paid on the event invoice, not at the hotel.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/event-billing", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/event-billing", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -54915,7 +54963,7 @@ ${data.tenant.name}`;
 
   // Event guests checked in without an ID document on file — the front desk
   // collects these during the stay (the room was checked in automatically).
-  app.get("/api/restaurant/:id/hotel/reports/missing-guest-id", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/reports/missing-guest-id", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -55419,7 +55467,7 @@ ${data.tenant.name}`;
 
   // Late-checkout preview — UI fetches this before opening the checkout
   // modal so the cashier can see the late-fee that will be added.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/late-checkout-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/late-checkout-preview", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -55442,7 +55490,7 @@ ${data.tenant.name}`;
   // Cancellation refund preview — UI fetches this before showing the
   // cancel-confirm modal so the cashier can see the refund the guest
   // is entitled to. Pure read; does not mutate the booking.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/cancellation-preview", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/cancellation-preview", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_GUESTS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -55856,7 +55904,7 @@ ${data.tenant.name}`;
   // ─── CHANNEL MANAGER RE-SYNC LOG (Phase H1 scaffold) ─────────────────────
   // Today: log-only. The actual OTA push (Booking.com, MakeMyTrip, etc.)
   // is a follow-up commit that will read the 'queued' rows and forward.
-  app.get("/api/restaurant/:id/hotel/channel-sync/log", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-sync/log", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -58067,7 +58115,7 @@ ${data.tenant.name}`;
   });
 
 
-  app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_DOCS), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -59568,7 +59616,7 @@ ${data.tenant.name}`;
   });
 
   // ─── HOTEL ANALYTICS (Phase 3) ────────────────────────────────────────────
-  app.get("/api/restaurant/:id/hotel/analytics", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/analytics", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_ANALYTICS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -59702,7 +59750,7 @@ ${data.tenant.name}`;
   });
 
   // GET /hotel/compliance/form-c/:bookingId/pdf — generate & download Form-C PDF (Phase 4)
-  app.get("/api/restaurant/:id/hotel/compliance/form-c/:bookingId/pdf", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/compliance/form-c/:bookingId/pdf", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_DOCS), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -68507,8 +68555,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'xmodule-read-gates-2',
+    commit_marker: 'hotel-read-gates',
     code_features: [
+      'hotel-read-gates  Hotel / PMS RBAC test (22 Sep 2026). The probe found no write leaks, but hotelStaff ("holds SOME hotel page") was the only gate on ~70 hotel reads, so a role holding just Checklists, Service Catalogue or Concierge could read every booking and guest phone, folio and Form-C PDFs, police-enquiry and revenue reports, and the channel manager credentials, sync logs and partner invoices. requireHotelAny(pages) (mirror of requireEventsAny) now adds a page-family check: HOTEL_READ_GUESTS / DOCS / MONEY / ANALYTICS / CHANNEL / LOOKUP. Rooms, room types, availability, rates, services, settings and the public-page profile stay open to any hotel page (front-desk screens need them). UI: room status buttons, Guest Bills charge-to-room / guest-paid / mark-paid, Housekeeping start / tick / complete, Checklist Templates new / edit / activate (read-only editor) and the Direct Booking Page (read-only fieldset; saving needs Settings Edit) are hidden or disabled for a View role.',
       'xmodule-read-gates  Cross-module READ gates (docs/RBAC_HARDENING_PLAN.md RC-1). About 140 GET routes needed only a login: a role holding no page at all could read restaurant orders, invoices and revenue, the profit-and-loss, cash-flow, GST ledger and vendor ageing, every spa appointment and folio, all inventory and recipes, aggregator settlements, feedback, brand cross-location revenue, email server settings and message delivery logs. They now mirror their write routes with module-family gates: floorStaff (restaurant floor + hotel front desk), reportsStaff, inventoryReadStaff, spaStaff / spaFrontDeskStaff, voucherStaff, hotelStaff; finance statements use the finance read gate, notification config the Notifications read gate, brand admin data owner/manager/Settings-edit. Left open on purpose: my-permissions, me/*, billing-status, brand announcements banner, checklists/my, custom-roles (names only), tax-config, loyalty lookup, bill preview-totals, integrations/channels.',
       'events-settings-partial-update  PUT /events/venue-settings, /events/profile and /events/gst-settings rewrote every field they own from the body with a default for whatever was missing, so a partial or empty PUT reset the hall turnaround (to 120 min), the half-day windows and weekend days, blanked the public page title/tagline/description/contact/hero/gallery, and reset GST language mode. They now change only the fields sent; the UI always sends the whole form, so screens behave the same. Found when the Events RBAC probe sent empty PUTs as Edit-level roles on RESTO-1003.',
       'events-rbac-round1  Events RBAC click-through and API probe (21 Sep 2026). UI: a View role no longer sees enabled controls it cannot use: hall status dropdown (and it now changes only after the server accepts), Charge GST / GST %, Add + Save GST details, Generate Quotation (needs Quotations Edit), Email invoice (Bookings Edit; its dialog is titled for the invoice), and the Public Page image pickers (read-only). Home launchpad: a module tile, public link or quick action shows only when the user can open one of its pages, and a tile opens the first page they can (the Events tile opened the Dashboard, which a Bookings-only role cannot see); the boot-time hotel tariff and travel-agent fetches and the launchpad hotel fetch no longer fire for a user with no hotel page. Refusals name the page in words (You do not have permission to change Events Bookings) instead of the role id and tab code; Access Restricted likewise. API: requireEventsAny gates 9 reads (analytics; bookings list and detail, schedule, hotel-availability, BEO, invoice pdf, audit, where-used) to the pages that use them, so a checklist-only role can no longer read revenue, customers and invoices. The catalog reads (venues, rentals, services, catering, profile, settings, availability) stay module-level.',
