@@ -68,7 +68,7 @@ async function uploadEventImage(restaurantId: string, token: string, file: File)
 
 // A single image slot: preview + upload button + remove, with an optional
 // "paste a URL instead" fallback. Used for the hero image and venue photos.
-function SingleImagePicker({ restaurantId, token, value, onChange, allowUrl = true, aspect = 'h-24 w-full max-w-md' }: { restaurantId: string; token: string; value: string; onChange: (url: string) => void; allowUrl?: boolean; aspect?: string }) {
+function SingleImagePicker({ restaurantId, token, value, onChange, allowUrl = true, aspect = 'h-24 w-full max-w-md', readOnly = false }: { readOnly?: boolean; restaurantId: string; token: string; value: string; onChange: (url: string) => void; allowUrl?: boolean; aspect?: string }) {
   const { t } = useT();
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -82,19 +82,19 @@ function SingleImagePicker({ restaurantId, token, value, onChange, allowUrl = tr
         {value
           ? <img src={value} alt="" className={`${aspect} object-cover rounded-xl border border-[#e8dccf]`} />
           : <div className={`${aspect} rounded-xl border border-dashed border-[#d9cbbb] bg-[#faf7f2] grid place-items-center text-[#b9a897]`}><ImageIcon size={22} /></div>}
-        <div className="flex flex-col gap-1.5">
+        {!readOnly && <div className="flex flex-col gap-1.5">
           <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { pick(e.target.files?.[0]); e.currentTarget.value = ''; }} />
           <button type="button" className={BTN_GHOST} disabled={busy} onClick={() => ref.current?.click()}><Upload size={13} />{busy ? '…' : t('events.settings.uploadImage')}</button>
           {value && <button type="button" className="text-[11px] text-rose-600 hover:underline text-left" onClick={() => onChange('')}>{t('common.delete')}</button>}
-        </div>
+        </div>}
       </div>
-      {allowUrl && <input className={`${INPUT} mt-2`} value={value || ''} onChange={e => onChange(e.target.value)} placeholder={t('events.settings.orPasteUrl')} />}
+      {allowUrl && !readOnly && <input className={`${INPUT} mt-2`} value={value || ''} onChange={e => onChange(e.target.value)} placeholder={t('events.settings.orPasteUrl')} />}
     </div>
   );
 }
 
 // A gallery grid: thumbnails with remove + an "add photo" upload tile.
-function GalleryPicker({ restaurantId, token, images, onChange }: { restaurantId: string; token: string; images: string[]; onChange: (imgs: string[]) => void }) {
+function GalleryPicker({ restaurantId, token, images, onChange, readOnly = false }: { readOnly?: boolean; restaurantId: string; token: string; images: string[]; onChange: (imgs: string[]) => void }) {
   const { t } = useT();
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -107,15 +107,15 @@ function GalleryPicker({ restaurantId, token, images, onChange }: { restaurantId
       {images.map((src, i) => (
         <div key={i} className="relative">
           <img src={src} alt="" className="h-20 w-28 object-cover rounded-xl border border-[#e8dccf]" />
-          <button type="button" onClick={() => onChange(images.filter((_, idx) => idx !== i))}
-            className="absolute -top-1.5 -right-1.5 bg-white border border-[#e8dccf] rounded-full w-5 h-5 grid place-items-center shadow text-rose-500 hover:bg-rose-50"><X size={12} /></button>
+          {!readOnly && <button type="button" onClick={() => onChange(images.filter((_, idx) => idx !== i))}
+            className="absolute -top-1.5 -right-1.5 bg-white border border-[#e8dccf] rounded-full w-5 h-5 grid place-items-center shadow text-rose-500 hover:bg-rose-50"><X size={12} /></button>}
         </div>
       ))}
-      <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { add(e.target.files?.[0]); e.currentTarget.value = ''; }} />
-      <button type="button" disabled={busy} onClick={() => ref.current?.click()}
+      {!readOnly && <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { add(e.target.files?.[0]); e.currentTarget.value = ''; }} />}
+      {!readOnly && <button type="button" disabled={busy} onClick={() => ref.current?.click()}
         className="h-20 w-28 rounded-xl border border-dashed border-[#d9cbbb] bg-[#faf7f2] grid place-items-center text-[#b9a897] hover:bg-[#f3ece1] transition-colors">
         <span className="flex flex-col items-center gap-0.5 text-[10px] font-semibold">{busy ? '…' : <><Plus size={16} />{t('events.settings.addPhoto')}</>}</span>
-      </button>
+      </button>}
     </div>
   );
 }
@@ -167,8 +167,8 @@ const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximum
 // at send time (defaulting to the customer's email when one is on file). The
 // /send endpoint accepts { email } as an override — email is never mandatory on
 // the booking itself, so this is the point where a recipient is chosen.
-function SendQuoteDialog({ restaurantId, token, quotationId, sendUrl, defaultEmail, onClose, onSent }:
-  { restaurantId: string; token: string; quotationId?: string; sendUrl?: string; defaultEmail?: string; onClose: () => void; onSent: (to: string) => void }) {
+function SendQuoteDialog({ restaurantId, token, quotationId, sendUrl, title, defaultEmail, onClose, onSent }:
+  { restaurantId: string; token: string; quotationId?: string; sendUrl?: string; title?: string; defaultEmail?: string; onClose: () => void; onSent: (to: string) => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [email, setEmail] = useState(defaultEmail || '');
@@ -188,7 +188,7 @@ function SendQuoteDialog({ restaurantId, token, quotationId, sendUrl, defaultEma
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-bold text-sm flex items-center gap-1.5 text-[#14110c]"><Mail size={15} />{t('events.quotes.sendTitle')}</h3>
+          <h3 className="font-bold text-sm flex items-center gap-1.5 text-[#14110c]"><Mail size={15} />{title || t('events.quotes.sendTitle')}</h3>
           <button onClick={onClose} aria-label={t('common.cancel')}><X size={16} className="text-[#9d8b7e]" /></button>
         </div>
         <label className="block text-xs text-[#6b5d52] mb-1">{t('events.quotes.recipientEmail')}</label>
@@ -292,8 +292,10 @@ function EventVenues({ restaurantId, token }: Props) {
   const remove = async (id: string) => { if (!window.confirm('Delete this venue?')) return; try { await api(`/events/venues/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
   // Manual hall status board — setting it raises the matching VENUE_<status> checklist (non-blocking).
   const setStatus = async (id: string, status: string) => {
-    setRows(rs => rs.map(r => r.id === id ? { ...r, status } : r));
-    try { await api(`/events/venues/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); }
+    if (!evCanEdit('EVENTS_VENUES')) return;
+    // Server first: the screen changes only once the change is accepted, so a
+    // refused change never lingers looking applied.
+    try { await api(`/events/venues/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); setRows(rs => rs.map(r => r.id === id ? { ...r, status } : r)); }
     catch (e: any) { alert(e.message); await load(); }
   };
   const VENUE_STATUSES = ['VACANT', 'OCCUPIED', 'CLEANING', 'MAINTENANCE', 'BLOCKED'];
@@ -401,8 +403,8 @@ function EventVenues({ restaurantId, token }: Props) {
           { key: 'hourly_min_hours', label: 'Min hrs', sortable: true, align: 'right', defaultHidden: true, getValue: (r: any) => Number(r.hourly_min_hours || 0), render: (r: any) => r.hourly_min_hours || '—' },
           { key: 'turnaround_min', label: 'Turnaround (min)', sortable: true, align: 'right', defaultHidden: true, getValue: (r: any) => Number(r.turnaround_min || 0), render: (r: any) => (r.turnaround_min != null && r.turnaround_min !== '') ? r.turnaround_min : '—' },
           { key: 'status', label: 'Status', filterable: true, filterType: 'select', getValue: (r: any) => String(r.status || 'VACANT').toUpperCase(), render: (r: any) => (
-            <select value={String(r.status || 'VACANT').toUpperCase()} onChange={e => setStatus(r.id, e.target.value)}
-              className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-brand/20">
+            <select value={String(r.status || 'VACANT').toUpperCase()} onChange={e => setStatus(r.id, e.target.value)} disabled={!evCanEdit('EVENTS_VENUES')}
+              className="text-xs border border-[#e8dccf] rounded-lg px-1.5 py-1 bg-white outline-none focus:ring-2 ring-brand/20 disabled:opacity-60 disabled:cursor-not-allowed">
               {VENUE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           ) },
@@ -1149,6 +1151,7 @@ function GstDetailsPanel({ restaurantId, token, booking, onSaved }: Props & { bo
   const cancelled = String(booking.status || '').toUpperCase() === 'CANCELLED';
   useEffect(() => { setGstin(booking.customer_gstin || ''); setAddress(booking.customer_address || ''); }, [booking.customer_gstin, booking.customer_address]);
   const save = async () => {
+    if (!evCanEdit('EVENTS_BOOKINGS')) return;
     setBusy(true); setMsg('');
     try {
       await api(`/events/bookings/${booking.id}/gst-details`, { method: 'PUT', body: JSON.stringify({ customer_gstin: gstin.trim(), customer_address: address.trim() }) });
@@ -1165,9 +1168,9 @@ function GstDetailsPanel({ restaurantId, token, booking, onSaved }: Props & { bo
         {onFile
           ? <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-semibold">Prints on the invoice · {booking.customer_gstin}</span>
           : <span className="text-[11px] text-[#9d8b7e]">Not provided — the invoice prints without GST details</span>}
-        <button className={`${BTN_GHOST} ml-auto py-1`} onClick={() => setOpen(o => !o)}>{open ? 'Close' : (onFile ? 'Edit' : 'Add')}</button>
+        {evCanEdit('EVENTS_BOOKINGS') && <button className={`${BTN_GHOST} ml-auto py-1`} onClick={() => setOpen(o => !o)}>{open ? 'Close' : (onFile ? 'Edit' : 'Add')}</button>}
       </div>
-      {open && (
+      {open && evCanEdit('EVENTS_BOOKINGS') && (
         <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className={LABEL}>Customer GSTIN</label>
@@ -1598,6 +1601,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   // balance post-event); only a cancelled booking freezes money-in, matching the
   // backend payment guard.
   const canRecordPayment = bk.status !== 'CANCELLED' && evCanEdit('EVENTS_BOOKINGS');
+  // The Invoice GST override shapes the quotation / invoice generated next, so it follows who can generate them.
+  const canShapeDoc = evCanEdit('EVENTS_BOOKINGS') || evCanEdit('EVENTS_QUOTATIONS');
   // Bill ledger figures come from the backend breakdown (subtotal / GST / discount
   // / grand). total_amount is now the tax-inclusive grand total; older responses
   // without `bill` fall back to deriving from total_amount (treated as pre-tax).
@@ -2081,11 +2086,12 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {/* Staff rostering — assign roster staff to the event per working date */}
       <StaffPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
 
-      {/* GST override for the quotation / invoice generated next */}
+      {/* GST override for the quotation / invoice generated next. Only a role that
+          can edit the booking or write quotations may change it. */}
       <div className="flex flex-wrap items-center gap-3 mt-4 mb-1 px-3 py-2 rounded-lg bg-[#faf6f1] border border-[#efe6db]">
         <span className="text-[11px] font-bold text-[#6b5d52] uppercase tracking-wide">Invoice GST</span>
-        <label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={docGst.enabled} onChange={e => setDocGst({ ...docGst, enabled: e.target.checked })} />Charge GST</label>
-        <label className="flex items-center gap-1.5 text-xs">%<input type="number" min={0} max={28} step={0.5} disabled={!docGst.enabled} className={`${INPUT} w-20 py-1`} value={docGst.pct} onChange={e => setDocGst({ ...docGst, pct: Number(e.target.value) })} /></label>
+        <label className="flex items-center gap-1.5 text-xs"><input type="checkbox" checked={docGst.enabled} disabled={!canShapeDoc} onChange={e => setDocGst({ ...docGst, enabled: e.target.checked })} />Charge GST</label>
+        <label className="flex items-center gap-1.5 text-xs">%<input type="number" min={0} max={28} step={0.5} disabled={!docGst.enabled || !canShapeDoc} className={`${INPUT} w-20 py-1`} value={docGst.pct} onChange={e => setDocGst({ ...docGst, pct: Number(e.target.value) })} /></label>
         <span className="text-[10px] text-[#9d8b7e]">Applies to the quotation / invoice you generate next. Hotel rooms follow Hotel GST.</span>
       </div>
 
@@ -2102,12 +2108,12 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
             over, the thing to produce is the invoice, and offering to quote for
             work already delivered only invites someone to send the wrong
             document. */}
-        {!['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(String(bk.status || '').toUpperCase()) && (
+        {!['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(String(bk.status || '').toUpperCase()) && evCanEdit('EVENTS_QUOTATIONS') && (
           <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
         )}
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
         <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf${gstQuery()}`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
-        <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
+        {evCanEdit('EVENTS_BOOKINGS') && <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>}
         {['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CHECKED_OUT'].includes(bk.status) && canCancelEventInvoice() && (
           <button className={`${BTN_GHOST} !text-rose-700 !border-rose-200 hover:!bg-rose-50`} disabled={busy} title="Cancel the invoice — reverses it in the accounts (the booking stays)" onClick={async () => {
             const reason = window.prompt('Cancel this event invoice?\n\nThis reverses it in the accounts (banquet revenue, GST). The booking stays; the invoice is voided and kept for audit.\n\nEnter a reason (required):');
@@ -2157,7 +2163,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       )}
 
       {emailInvoice && (
-        <SendQuoteDialog restaurantId={restaurantId} token={token} sendUrl={`/events/bookings/${bookingId}/invoice/send`} defaultEmail={bk.customer_email || ''}
+        <SendQuoteDialog restaurantId={restaurantId} token={token} sendUrl={`/events/bookings/${bookingId}/invoice/send`} title={t('events.bookings.emailInvoice')} defaultEmail={bk.customer_email || ''}
           onClose={() => setEmailInvoice(false)} onSent={(to) => alert(`${t('events.quotes.sent')} ${to}`)} />
       )}
 
@@ -3410,9 +3416,9 @@ function EventSettings({ restaurantId, token }: Props) {
         <div><label className={LABEL}>{t('events.settings.tagline')}</label><input className={INPUT} disabled={!canEdit} value={form.tagline || ''} onChange={e => setForm({ ...form, tagline: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.description')}</label><textarea className={INPUT} rows={3} disabled={!canEdit} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.heroImage')}</label>
-          <SingleImagePicker restaurantId={restaurantId} token={token} value={form.hero_image_url || ''} onChange={(url) => setForm({ ...form, hero_image_url: url })} /></div>
+          <SingleImagePicker restaurantId={restaurantId} token={token} readOnly={!canEdit} value={form.hero_image_url || ''} onChange={(url) => setForm({ ...form, hero_image_url: url })} /></div>
         <div><label className={LABEL}>{t('events.settings.gallery')}</label>
-          <GalleryPicker restaurantId={restaurantId} token={token} images={form.gallery_list || []} onChange={(imgs) => setForm({ ...form, gallery_list: imgs })} />
+          <GalleryPicker restaurantId={restaurantId} token={token} readOnly={!canEdit} images={form.gallery_list || []} onChange={(imgs) => setForm({ ...form, gallery_list: imgs })} />
           <p className="text-[11px] text-[#9d8b7e] mt-1.5">{t('events.settings.galleryHint')}</p></div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} disabled={!canEdit} value={form.contact_phone || ''} onChange={e => setForm({ ...form, contact_phone: e.target.value })} /></div>

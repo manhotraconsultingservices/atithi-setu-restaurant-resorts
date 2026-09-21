@@ -21,3 +21,8 @@ export function prettyRoleLabel(role?: string | null): string {
     .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(' ');
 }
+
+// A page id (HOTEL_BOOKINGS) as words (Hotel Bookings) for messages a person reads.
+export function prettyTabLabel(tab?: string | null): string {
+  return String(tab ?? '').split('_').filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}

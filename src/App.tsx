@@ -34,8 +34,8 @@ import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory } from './perm';
-import { prettyRoleLabel } from './roleLabel';
+import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canSeeTab, firstOpenTab } from './perm';
+import { prettyRoleLabel, prettyTabLabel } from './roleLabel';
 import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, LANGUAGE_SHORT, SECONDARY_LANGUAGE_OPTIONS, setSecondaryLanguage } from './i18n';
@@ -12443,6 +12443,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // ready by the time the owner opens the Settings or Hotel Bookings tab.
   useEffect(() => {
     if (!isHotelEnabled || !restaurantId || !token) return;
+    // Only for a user who can open a hotel page: for anyone else these are refused.
+    if (!firstOpenTab('HOTEL')) return;
     fetchTariff();
   }, [isHotelEnabled, restaurantId, token, fetchTariff]);
 
@@ -16350,7 +16352,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // always ready in the booking modal regardless of which tab the user
   // navigated to first.
   useEffect(() => {
-    if (isHotelEnabled) fetchTravelAgents();
+    if (isHotelEnabled && firstOpenTab('HOTEL')) fetchTravelAgents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHotelEnabled]);
 
@@ -17401,7 +17403,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           <h3 className="text-xl font-bold text-[#3d3128]">Access Restricted</h3>
           <p className="text-sm text-[#9c8e85] text-center max-w-xs">
-            Your account does not have permission to access the <span className="font-bold">{activeTab}</span> section.
+            Your account does not have permission to open <span className="font-bold">{prettyTabLabel(activeTab)}</span>.
             Contact your administrator to request access.
           </p>
         </div>
@@ -17449,15 +17451,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           token={token!}
           propertyName={restaurant?.name || 'your property'}
           restaurantImageUrl={(restaurant as any)?.logo_url || (restaurant as any)?.cover_image_url || ''}
-          isHotelEnabled={isHotelEnabled}
-          isRestaurantEnabled={isRestaurantEnabled}
-          isSpaEnabled={isSpaEnabled}
+          // A module is offered only when this user can open at least one of its
+          // pages: the property having a module is not the same as the user having
+          // it. (Also stops the launchpad fetching hotel data for a user with none.)
+          isHotelEnabled={isHotelEnabled && !!firstOpenTab('HOTEL')}
+          isRestaurantEnabled={isRestaurantEnabled && !!firstOpenTab('RESTAURANT')}
+          isSpaEnabled={isSpaEnabled && !!firstOpenTab('SPA')}
           spaName={spaCustomName || undefined}
-          isEventsEnabled={isEventsEnabled}
-          onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
-          onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
-          onOpenSpa={() => setActiveTab('SPA_CALENDAR')}
-          onOpenEvents={() => setActiveTab('EVENTS_DASHBOARD')}
+          isEventsEnabled={isEventsEnabled && !!firstOpenTab('EVENTS')}
+          onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab((firstOpenTab('HOTEL') || 'HOTEL_BOOKINGS') as any); }}
+          onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab((firstOpenTab('RESTAURANT') || 'MONITOR') as any); }}
+          onOpenSpa={() => setActiveTab((firstOpenTab('SPA') || 'SPA_CALENDAR') as any)}
+          onOpenEvents={() => setActiveTab((firstOpenTab('EVENTS') || 'EVENTS_DASHBOARD') as any)}
           onNewBooking={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onNewOrder={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
@@ -47001,13 +47006,13 @@ function HotelHomeLaunchpad({
 
         {/* Quick actions */}
         <div className="flex flex-wrap gap-2">
-          {isHotelEnabled && (
+          {isHotelEnabled && canSeeTab('HOTEL_BOOKINGS') && (
             <button type="button" onClick={onNewBooking} className="text-[12px] font-bold text-[#3d3128] bg-white border border-brand/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-brand/40 transition-colors">New booking</button>
           )}
-          {isRestaurantEnabled && (
+          {isRestaurantEnabled && canSeeTab('MONITOR') && (
             <button type="button" onClick={onNewOrder} className="text-[12px] font-bold text-[#3d3128] bg-white border border-brand/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-brand/40 transition-colors">Live orders</button>
           )}
-          {isHotelEnabled && (
+          {isHotelEnabled && canSeeTab('FRONT_OFFICE_REPORTS') && (
             <button type="button" onClick={onOpenReports} className="text-[12px] font-bold text-[#3d3128] bg-white border border-brand/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-brand/40 transition-colors">Reports</button>
           )}
         </div>

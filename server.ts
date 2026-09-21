@@ -9029,7 +9029,7 @@ async function _requireTabWrite(req: AuthRequest, res: Response, tab: string, mi
   if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
   if (await _roleHasTab(req, tab, minLevel)) return true;
   res.status(403).json({
-    error: `Forbidden — ${tab} ${minLevel >= 3 ? 'Full' : 'Edit'} access required. Ask the property owner to grant it in Staff Access.`,
+    error: `You need ${minLevel >= 3 ? 'Full' : 'Edit'} access to ${_prettyTab(tab)} for this. Ask the property owner to grant it in Staff Access.`,
     required_tab: tab, required_level: minLevel,
   });
   return false;
@@ -9107,6 +9107,44 @@ function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], m
 
 const hotelStaff = requireModuleAccess(HOTEL_TAB_IDS, HOTEL_OPERATIONAL_ROLES, 'Hotel');
 const eventsStaff = requireModuleAccess(EVENTS_TAB_IDS, EVENTS_OPERATIONAL_ROLES, 'Events & Convention');
+
+// eventsStaff only proves the role holds SOME Events page. Reads of money and
+// customer data must also match the page they belong to, or a role holding only
+// the cleaning checklist could pull every booking, invoice and the revenue
+// dashboard straight from the API (found in the 21 Sep 2026 Events RBAC test).
+// requireEventsAny passes when the role holds at least ONE of the listed pages
+// (View is enough): each list is exactly the screens that use that endpoint.
+// Owner / super admin / CTO pass; a role that was never configured passes, like
+// requireTabAction; a built-in operational role with none of these pages in its
+// saved matrix is grandfathered so shipping this locks nobody out.
+function requireEventsAny(tabIds: string[]) {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (role === 'SUPER_ADMIN' || role === 'CTO' || role === 'OWNER') return next();
+      const tenantId = (req.user as any)?.restaurantId || req.params.id;
+      if (!tenantId) return next();
+      const perms: any = await getTabPermissionsForRole(tenantId, role);
+      if (perms === null) return next();
+      if (tabIds.some(t => Number(perms[t] || 0) >= 1)) return next();
+      if (tabIds.every(t => !(t in perms))) {
+        const ops = _moduleOperationalRolesForTab(tabIds[0]);
+        if (ops && ops.includes(role)) return next();
+      }
+      return res.status(403).json({
+        error: `You do not have access to this part of Events & Convention. Ask the property owner to grant ${_prettyTab(tabIds[0])} in Staff Access.`,
+        required_tab: tabIds[0], required_any_of: tabIds,
+      });
+    } catch (err) {
+      console.error('[requireEventsAny] permission lookup error — denying access:', err);
+      return res.status(503).json({ error: 'Permission check temporarily unavailable. Try again shortly.' });
+    }
+  };
+}
+// Which pages read what. Bookings and their documents are used by the booking,
+// calendar, quotation and add-on screens and by the dashboard / reports drill-downs.
+const EV_READ_BOOKINGS = ['EVENTS_BOOKINGS', 'EVENTS_CALENDAR', 'EVENTS_QUOTATIONS', 'EVENTS_ADDONS', 'EVENTS_DASHBOARD', 'EVENTS_REPORTS'];
+const EV_READ_ANALYTICS = ['EVENTS_DASHBOARD', 'EVENTS_REPORTS'];
 
 // Service-request read/status endpoints. Permission-aware (mirrors hotelStaff):
 // the built-in ops allowlist (front desk / concierge / manager + housekeeping /
@@ -9228,6 +9266,12 @@ async function _healZeroAccessCustomRoles(tenantId: string): Promise<string[]> {
  *   app.post('/api/restaurant/:id/hotel/bookings',
  *     authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), handler);
  */
+// A page id (EVENTS_BOOKINGS) as words for a message a person reads. A refusal must
+// never spell out the role id or the internal tab code.
+function _prettyTab(tab: string): string {
+  return String(tab || '').split('_').filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}
+const _REFUSAL_VERB: Record<string, string> = { READ: 'view', CREATE: 'add to', UPDATE: 'change', DELETE: 'delete from' };
 // RBAC-6: action-level enforcement. action levels: READ=1, CREATE/UPDATE=2, DELETE=3
 function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 'DELETE' = 'READ') {
   const minLevel = action === 'DELETE' ? 3 : action === 'READ' ? 1 : 2;
@@ -9249,7 +9293,7 @@ function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 
         const opRoles = _moduleOperationalRolesForTab(tabId);
         if (opRoles && opRoles.includes(role)) return next();
         return res.status(403).json({
-          error: `Your role (${role}) does not have access to "${tabId}". Ask the owner to grant it in Staff Access.`,
+          error: `You do not have access to ${_prettyTab(tabId)}. Ask the property owner to grant it in Staff Access.`,
           required_tab: tabId,
           required_action: action,
         });
@@ -9257,7 +9301,7 @@ function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 
       const level = (perms[tabId] ?? 0) as number;
       if (level >= minLevel) return next();
       return res.status(403).json({
-        error: `Your role (${role}) does not have ${action} access to "${tabId}". Ask the owner to update Staff Access.`,
+        error: `You do not have permission to ${_REFUSAL_VERB[action] || 'change'} ${_prettyTab(tabId)}. Ask the property owner to change your access in Staff Access.`,
         required_tab: tabId,
         required_action: action,
       });
@@ -34410,7 +34454,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/analytics", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/analytics", authenticate, eventsStaff, requireEventsAny(EV_READ_ANALYTICS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35249,7 +35293,7 @@ ${data.tenant.name}`;
     }
   };
 
-  app.get("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35322,7 +35366,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -35774,7 +35818,7 @@ ${data.tenant.name}`;
   });
 
   // ─── PAYMENT SCHEDULE (staged deposits) ────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -36443,7 +36487,7 @@ ${data.tenant.name}`;
   };
 
   // Read hotel availability + rates for an event's dates (read-only, quote time).
-  app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37155,7 +37199,7 @@ ${data.tenant.name}`;
   });
 
   // ─── BEO / function sheet PDF (Sprint 2) ────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/beo.pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/beo.pdf", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37226,7 +37270,7 @@ ${data.tenant.name}`;
     };
   };
 
-  app.get("/api/restaurant/:id/events/bookings/:bid/invoice.pdf", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/invoice.pdf", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37448,7 +37492,7 @@ ${data.tenant.name}`;
   // ══════════════════════════════════════════════════════════════════════════
 
   // ── EVENT BOOKING ──────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/events/bookings/:bid/audit", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/audit", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37457,7 +37501,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
   });
 
-  app.get("/api/restaurant/:id/events/bookings/:bid/where-used", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/events/bookings/:bid/where-used", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -68395,8 +68439,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-module-permissions',
+    commit_marker: 'events-rbac-round1',
     code_features: [
+      'events-rbac-round1  Events RBAC click-through and API probe (21 Sep 2026). UI: a View role no longer sees enabled controls it cannot use: hall status dropdown (and it now changes only after the server accepts), Charge GST / GST %, Add + Save GST details, Generate Quotation (needs Quotations Edit), Email invoice (Bookings Edit; its dialog is titled for the invoice), and the Public Page image pickers (read-only). Home launchpad: a module tile, public link or quick action shows only when the user can open one of its pages, and a tile opens the first page they can (the Events tile opened the Dashboard, which a Bookings-only role cannot see); the boot-time hotel tariff and travel-agent fetches and the launchpad hotel fetch no longer fire for a user with no hotel page. Refusals name the page in words (You do not have permission to change Events Bookings) instead of the role id and tab code; Access Restricted likewise. API: requireEventsAny gates 9 reads (analytics; bookings list and detail, schedule, hotel-availability, BEO, invoice pdf, audit, where-used) to the pages that use them, so a checklist-only role can no longer read revenue, customers and invoices. The catalog reads (venues, rentals, services, catering, profile, settings, availability) stay module-level.',
       'inventory-module-permissions  Hotel, Spa and Events share one inventory screen and the /inventory/* routes, which all required the kitchen INVENTORY tab (restaurant-only, so a hotel- or events-scoped role could never hold it): Hotel Inventory = Full showed no Add item and the API refused the write, and Events Inventory had no permission at all. New _requireInvWrite: each module answers to its own tab (HOTEL_INVENTORY, SPA_INVENTORY, new INVENTORY_EVENTS), INVENTORY still covers every module, and the module comes from the record touched (item, category, supplier link, PO, GRN items, count, period). inventoryStaff module gate admits the spa/events inventory tabs. Events Inventory is grantable in Staff Access (eventsOnly; Events-exclusive for role scope). Screen, supplier panel and month-end buttons use canWriteInventory(module).',
       'dates-ist-reversals  Four postings still took a UTC timestamp and cut it to a date, so they landed on the previous day in the early hours IST: the expense-claim cancel reversal, two hotel invoice dates and one settlement ledger date. All go through _glPostDate now.',
       'dates-ist-frontend  The app date pickers defaulted to the UTC date (yesterday between 00:00 and 05:30 IST), so an expense, payment or booking entered after midnight was dated the day before even after the server fix. New todayIST() in src/lib/utils.ts replaces all 121 toISOString today defaults in the frontend. Expense view drops orphan manual lines coming in.',
