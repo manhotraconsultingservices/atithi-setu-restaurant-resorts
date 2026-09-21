@@ -41800,7 +41800,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
   });
 
-  app.put("/api/restaurant/:id/spa/profile", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/profile", authenticate, spaStaff, requireTabAction('SPA_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -50114,7 +50114,7 @@ ${data.tenant.name}`;
   // env vars). Read-only — operators rotate IPs by updating env +
   // restarting the server, since OTA IP ranges change rarely and
   // burying them in a DB editor invites misconfiguration.
-  app.get("/api/restaurant/:id/hotel/channel-security-config", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-security-config", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const channels: Record<string, { cidrs: string[]; enforcing: boolean }> = {};
@@ -68555,8 +68555,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-lead-time-500-fix',
+    commit_marker: 'roleless-allowlist-2-routes',
     code_features: [
+      'roleless-allowlist-2-routes  Two routes still used a fixed requireRole allowlist (OWNER / MANAGER), which refuses every custom role even when the page is granted: PUT /spa/profile (the Spa Settings save, whose screen already gates on SPA_SETTINGS) and GET /hotel/channel-security-config (the Channel Manager screen). Now spaStaff + requireTabAction SPA_SETTINGS UPDATE and hotelStaff + requireTabAccess CHANNEL_MANAGER. Found by the Hotel RBAC test (a Channel Manager Edit role got a 403 opening its own page).',
       'hotel-lead-time-500-fix  GET /hotel/reports/booking-lead-time returned 500 for every role ("function pg_catalog.extract(unknown, integer) does not exist"): in Postgres date - date is already an integer number of days, so EXTRACT(DAY FROM …) over it errors. Found by the Hotel RBAC test opening Hotel Reports → Owner / Manager as a reports-only role; same class as the earlier /inventory/expiring fix.',
       'hotel-read-gates  Hotel / PMS RBAC test (22 Sep 2026). The probe found no write leaks, but hotelStaff ("holds SOME hotel page") was the only gate on ~70 hotel reads, so a role holding just Checklists, Service Catalogue or Concierge could read every booking and guest phone, folio and Form-C PDFs, police-enquiry and revenue reports, and the channel manager credentials, sync logs and partner invoices. requireHotelAny(pages) (mirror of requireEventsAny) now adds a page-family check: HOTEL_READ_GUESTS / DOCS / MONEY / ANALYTICS / CHANNEL / LOOKUP. Rooms, room types, availability, rates, services, settings and the public-page profile stay open to any hotel page (front-desk screens need them). UI: room status buttons, Guest Bills charge-to-room / guest-paid / mark-paid, Housekeeping start / tick / complete, Checklist Templates new / edit / activate (read-only editor) and the Direct Booking Page (read-only fieldset; saving needs Settings Edit) are hidden or disabled for a View role.',
       'xmodule-read-gates  Cross-module READ gates (docs/RBAC_HARDENING_PLAN.md RC-1). About 140 GET routes needed only a login: a role holding no page at all could read restaurant orders, invoices and revenue, the profit-and-loss, cash-flow, GST ledger and vendor ageing, every spa appointment and folio, all inventory and recipes, aggregator settlements, feedback, brand cross-location revenue, email server settings and message delivery logs. They now mirror their write routes with module-family gates: floorStaff (restaurant floor + hotel front desk), reportsStaff, inventoryReadStaff, spaStaff / spaFrontDeskStaff, voucherStaff, hotelStaff; finance statements use the finance read gate, notification config the Notifications read gate, brand admin data owner/manager/Settings-edit. Left open on purpose: my-permissions, me/*, billing-status, brand announcements banner, checklists/my, custom-roles (names only), tax-config, loyalty lookup, bill preview-totals, integrations/channels.',
