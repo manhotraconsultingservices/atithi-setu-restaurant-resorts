@@ -34,7 +34,7 @@ import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canSeeTab, firstOpenTab } from './perm';
+import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canSeeTab, firstOpenTab, canSeeFloorData } from './perm';
 import { prettyRoleLabel, prettyTabLabel } from './roleLabel';
 import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -13654,11 +13654,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // 4 fetches per tab switch cuts ~50 requests off a full SPA navigation
     // sweep, keeping well clear of the global 200-req/min rate limit.
     const isSpaTab = activeTab.startsWith('SPA_');
+    // Nor for a user with no floor page: the server refuses those reads to them.
+    const floorData = canSeeFloorData();
     if (!isSpaTab) {
       fetchMenu();
-      fetchReports();
-      fetchTables();
-      fetchOrders();
+      if (floorData) { fetchReports(); fetchTables(); fetchOrders(); }
     }
     fetchRestaurant();
     fetchStaff();
@@ -13672,8 +13672,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'DELIVERY') fetchDeliveryForSubTab();
 
     const interval = setInterval(() => {
-      fetchOrders();
-      if (activeTab === 'REPORTS') fetchReports();
+      if (floorData) fetchOrders();
+      if (activeTab === 'REPORTS' && floorData) fetchReports();
       if (activeTab === 'MONITOR') fetchLiveTables();
       if (activeTab === 'INVOICES') fetchInvoices();
       // 30s auto-refresh for the live platform-orders feed when on DELIVERY tab

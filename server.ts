@@ -9108,6 +9108,37 @@ function requireModuleAccess(moduleTabs: string[], operationalRoles: string[], m
 const hotelStaff = requireModuleAccess(HOTEL_TAB_IDS, HOTEL_OPERATIONAL_ROLES, 'Hotel');
 const eventsStaff = requireModuleAccess(EVENTS_TAB_IDS, EVENTS_OPERATIONAL_ROLES, 'Events & Convention');
 
+// ── Cross-module READ gates (the "direct-API read leak", RC-1) ────────────────
+// Reads of another module's data used to need only a login: a role holding NO page
+// at all could pull every restaurant order and invoice, the profit-and-loss, all
+// spa appointments and every inventory table (found in the 21-22 Sep 2026 Events
+// RBAC test). The write routes were always gated; these mirror them for reads.
+// Each gate is a MODULE FAMILY: it passes a role that holds at least one page of a
+// module that legitimately touches that data, so cross-module screens keep working
+// (hotel checkout reads F&B orders; Events reads receipts; Procurement reads the
+// supplier and purchase-order lists). Owner / super admin / CTO always pass.
+// Refining a family to one exact page is a later, per-screen step.
+const _FINANCE_TAB_IDS = ['ACCOUNTING', 'ACCOUNTS_PNL', 'ACCOUNTS_CASHFLOW', 'ACCOUNTS_GST', 'ACCOUNTS_VENDOR_AGING', 'ACCOUNTS_MSME_43B', 'EXPENSE_JOURNAL', 'RECEIVABLES'];
+// The restaurant floor: orders, tables, sessions, bills, waiter calls, loyalty, aggregators.
+// The hotel front desk is in it because it settles room charges against F&B orders.
+const FLOOR_TAB_IDS = ['MONITOR', 'ORDERS', 'MENU', 'INVOICES', 'LOYALTY', 'QR', 'DELIVERY', 'BOOKINGS', 'FEEDBACK', 'RESTAURANT_REPORTS', 'SETTINGS', 'CASH_DRAWER', 'CUSTOMER_ACCOUNTS', 'ALL_REPORTS', 'HOTEL_BOOKINGS', 'FOLIOS'];
+const FLOOR_OPERATIONAL_ROLES = [...new Set([...RESTAURANT_OPERATIONAL_ROLES, ...HOTEL_OPERATIONAL_ROLES])];
+const floorStaff = requireModuleAccess(FLOOR_TAB_IDS, FLOOR_OPERATIONAL_ROLES, 'Restaurant');
+// The revenue report and analytics: floor + hotel front-office reports + finance.
+const reportsStaff = requireModuleAccess([...FLOOR_TAB_IDS, 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', ..._FINANCE_TAB_IDS], FLOOR_OPERATIONAL_ROLES, 'Reports');
+// Stock and recipes: every inventory page of every module, Procurement, the menu (recipes) and reports.
+const inventoryReadStaff = requireModuleAccess(['INVENTORY', 'HOTEL_INVENTORY', 'SPA_INVENTORY', 'INVENTORY_EVENTS', 'PROCUREMENT', 'MENU', 'SPA_CATALOG', 'ALL_REPORTS', 'RESTAURANT_REPORTS'], RESTAURANT_OPERATIONAL_ROLES, 'Inventory');
+// Spa. The hotel front desk also reads today's appointment list and the service list
+// (its home worklist), so those two reads admit the front-desk pages as well.
+const spaFrontDeskStaff = requireModuleAccess([...SPA_TAB_IDS, 'HOTEL_BOOKINGS', 'FOLIOS'], SPA_OPERATIONAL_ROLES, 'Spa & Wellness');
+// Advance receipt / refund vouchers: money receipts raised by hotel, events, spa and the floor.
+const voucherStaff = requireModuleAccess([...FLOOR_TAB_IDS, ...EVENTS_TAB_IDS, 'SPA_BILLING', 'SPA_APPOINTMENTS', 'RECEIVABLES', 'ACCOUNTING'], FLOOR_OPERATIONAL_ROLES, 'Receipts');
+// Brand-level admin data (cross-location revenue, brand suppliers, transfer log):
+// the owner, a manager, or a role that may edit Settings.
+async function _brandAdminOk(req: AuthRequest): Promise<boolean> {
+  const r = String(req.user?.role || '').toUpperCase();
+  return ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(r) || await _roleHasTab(req, 'SETTINGS', 2);
+}
 // eventsStaff only proves the role holds SOME Events page. Reads of money and
 // customer data must also match the page they belong to, or a role holding only
 // the cleaning checklist could pull every booking, invoice and the revenue
@@ -13021,6 +13052,7 @@ async function startServer() {
   //   period = TODAY | YESTERDAY | WTD | MTD | YTD (mirrors A2)
   //   Optional brand_id query param narrows the aggregation.
   app.get("/api/brand/cross-summary", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _brandAdminOk(req))) return res.status(403).json({ error: 'This is available to the property owner and managers.' });
     try {
       const period = String(req.query.period || 'MTD').toUpperCase();
       const brandFilter = req.query.brand_id ? String(req.query.brand_id) : null;
@@ -13228,6 +13260,7 @@ async function startServer() {
 
   // GET — brand-level admin view of all announcements (active + expired)
   app.get("/api/brand/announcements", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _brandAdminOk(req))) return res.status(403).json({ error: 'This is available to the property owner and managers.' });
     try {
       const brandId = await _findBrandIdForUser(req);
       if (!brandId) return res.json([]);
@@ -13320,6 +13353,7 @@ async function startServer() {
 
   // ── Brand menu templates ─────────────────────────────────────────────
   app.get("/api/brand/menu-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _brandAdminOk(req))) return res.status(403).json({ error: 'This is available to the property owner and managers.' });
     try {
       const brandId = await _findBrandIdForUser(req);
       if (!brandId) return res.json([]);
@@ -13410,6 +13444,7 @@ async function startServer() {
 
   // ── Brand suppliers (Phase B3) ──────────────────────────────────────
   app.get("/api/brand/suppliers", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _brandAdminOk(req))) return res.status(403).json({ error: 'This is available to the property owner and managers.' });
     try {
       const brandId = await _findBrandIdForUser(req);
       if (!brandId) return res.json([]);
@@ -13690,6 +13725,7 @@ async function startServer() {
 
   // GET transfer history for the brand (audit)
   app.get("/api/brand/staff/transfer-log", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _brandAdminOk(req))) return res.status(403).json({ error: 'This is available to the property owner and managers.' });
     try {
       const accessible = await _listUserRestaurants(req);
       const ids = accessible.map(r => r.id);
@@ -14249,6 +14285,7 @@ async function startServer() {
   // are shared too — this lists what Meta has approved so an owner picks a real
   // one instead of typing a name that will be rejected at send time.
   app.get("/api/owner/whatsapp/templates", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const { businessAccountId: waba, accessToken: tokenEnv } = whatsAppCreds();
       if (!waba || !tokenEnv) {
@@ -14389,6 +14426,7 @@ async function startServer() {
   // free-form replies once 24 hours have passed since the contact last wrote,
   // and the only way through after that is an approved template.
   app.get("/api/owner/messaging/threads", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const rid = req.user!.restaurantId;
       const db = await getTenantDb(rid);
@@ -14450,6 +14488,7 @@ async function startServer() {
 
   // One conversation, oldest first, the way it is read.
   app.get("/api/owner/messaging/thread", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const rid = req.user!.restaurantId;
       const contact = String(req.query.contact || '').trim();
@@ -14484,6 +14523,7 @@ async function startServer() {
   // own delivery log; the cost line comes from the central usage table, which
   // records the Meta billing category of every send.
   app.get("/api/owner/messaging/summary", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const rid = req.user!.restaurantId;
       const db = await getTenantDb(rid);
@@ -14589,6 +14629,7 @@ async function startServer() {
   // Who has asked us to stop. Platform-wide for WhatsApp: the number is shared,
   // so an ignored opt-out damages deliverability for every property on it.
   app.get("/api/owner/messaging-optouts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       await ensureWaTables();
       const rows = await centralDb.query("SELECT contact, channel, source, created_at FROM messaging_optout ORDER BY created_at DESC LIMIT 200").catch(() => []);
@@ -14614,6 +14655,7 @@ async function startServer() {
   // Guest email should come from the property, not a shared platform mailbox.
   // The password is written encrypted and never read back out to the browser.
   app.get("/api/owner/email-config", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req)) && !(await _roleHasTab(req, 'SETTINGS', 1))) return res.status(403).json({ error: 'You do not have access to email settings.' });
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await ensureTenantEmailConfig(db);
@@ -14686,6 +14728,7 @@ async function startServer() {
 
   // Owner: Notification Settings
   app.get("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const settings = await db.query("SELECT * FROM notification_settings");
@@ -14733,6 +14776,7 @@ async function startServer() {
   // status + error. Powers the "Delivery Log" panel so the owner can see the
   // engine working (and diagnose a mis-configured channel).
   app.get("/api/owner/notification-deliveries", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await ensureNotifDeliveries(db, req.user!.restaurantId);
@@ -16464,7 +16508,7 @@ async function startServer() {
 
   // Bulk fetch all channel_prices rows for the tenant (used by Menu UI to
   // render per-channel pills and by the menu-push cron to compute payloads).
-  app.get("/api/restaurant/:id/menu/channel-prices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/menu/channel-prices", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query("SELECT * FROM channel_prices ORDER BY menu_item_id, channel");
@@ -16483,7 +16527,7 @@ async function startServer() {
   // Get one menu item's channel-prices (driver for the Menu modal section).
   // Returns a row per channel — synthesises an "inherits from default markup"
   // entry if no channel_prices row exists yet.
-  app.get("/api/restaurant/:id/menu/:itemId/channel-prices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/menu/:itemId/channel-prices", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const item: any = await db.get(
@@ -16883,7 +16927,7 @@ async function startServer() {
   }
 
   // List all configured tiers for a tenant.
-  app.get("/api/restaurant/:id/loyalty/tiers", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/loyalty/tiers", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -17086,7 +17130,7 @@ async function startServer() {
   });
 
   // Customer detail — includes recent orders + tier history.
-  app.get("/api/restaurant/:id/loyalty/customers/:phone", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/loyalty/customers/:phone", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const phone = _normalisePhone(req.params.phone);
       if (!phone) return res.status(400).json({ error: "Invalid phone" });
@@ -17286,7 +17330,7 @@ async function startServer() {
   });
 
   // Analytics for the LOYALTY tab — KPI cards + chart data.
-  app.get("/api/restaurant/:id/loyalty/analytics", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/loyalty/analytics", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const tiers: any[] = await db.query(
@@ -17900,7 +17944,7 @@ async function startServer() {
   // ─────────────────────────────────────────────────────────────────────
 
   // List all promo codes (owner view — includes disabled and expired)
-  app.get("/api/restaurant/:id/loyalty/promo-codes", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/loyalty/promo-codes", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -23456,7 +23500,7 @@ ${data.tenant.name}`;
   // POST .../rotate generates a fresh ciphertext for an existing row.
 
   // GET — list credential metadata for a channel (NEVER returns plaintext)
-  app.get("/api/restaurant/:id/integrations/:channel/credentials", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/:channel/credentials", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const channel = String(req.params.channel).toUpperCase();
       if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
@@ -23772,7 +23816,7 @@ ${data.tenant.name}`;
   );
 
   // GET .../settlements — list settlements (ordered DESC by period_to)
-  app.get("/api/restaurant/:id/integrations/settlements", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/settlements", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { channel } = req.query as any;
@@ -23798,7 +23842,7 @@ ${data.tenant.name}`;
   });
 
   // GET .../settlements/:id — detail with reconciliation lines
-  app.get("/api/restaurant/:id/integrations/settlements/:settlementId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/settlements/:settlementId", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const settlement: any = await db.get(
@@ -23842,7 +23886,7 @@ ${data.tenant.name}`;
   // True-margin analytics per channel over a date range. Joins orders →
   // stock_movements (CONSUMPTION) → ingredients to compute food cost, then
   // subtracts from net_payout (or commission-adjusted total) to get profit.
-  app.get("/api/restaurant/:id/integrations/analytics/channel-pnl", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/analytics/channel-pnl", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
@@ -24014,7 +24058,7 @@ ${data.tenant.name}`;
   // came in from Swiggy / Zomato / Dunzo / etc. via the Phase 3 webhook.
   // Filters: ?platform= (case-insensitive) · ?status= · ?from= · ?to= · ?limit=
   // Default limit 100, max 500. Sorted by created_at DESC for live monitoring.
-  app.get("/api/restaurant/:id/integrations/orders", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/orders", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { platform, status, from, to } = req.query as any;
@@ -24358,7 +24402,7 @@ ${data.tenant.name}`;
   // consumption, and dashboard come in subsequent phases.
 
   // Ingredients: list all (active by default; ?include_inactive=1 for full)
-  app.get("/api/restaurant/:id/inventory/ingredients", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/ingredients", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const includeInactive = String(req.query.include_inactive || '') === '1';
@@ -24395,7 +24439,7 @@ ${data.tenant.name}`;
   });
 
   // Ingredients: get one
-  app.get("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/ingredients/:id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const row = await db.get("SELECT * FROM ingredients WHERE id = ?", [req.params.id]);
@@ -25326,7 +25370,7 @@ ${data.tenant.name}`;
   // ─── Recipes — menu_item ↔ ingredient mapping ────────────────────────────
 
   // Get recipe rows for a menu item. Returns array (may be empty if no recipe yet).
-  app.get("/api/restaurant/:id/menu/:menuItemId/recipe", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/menu/:menuItemId/recipe", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -25443,7 +25487,7 @@ ${data.tenant.name}`;
 
   // Bulk recipe export — every recipe row joined with menu_item + ingredient names.
   // One call instead of 200+ for tenants with large menus.
-  app.get("/api/restaurant/:id/recipes", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/recipes", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows = await db.query(
@@ -25470,7 +25514,7 @@ ${data.tenant.name}`;
 
   // ─── Suppliers — vendor directory ────────────────────────────────────────
 
-  app.get("/api/restaurant/:id/inventory/suppliers", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/suppliers", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const includeInactive = String(req.query.include_inactive || '') === '1';
@@ -25485,7 +25529,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/suppliers/:id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const row = await db.get("SELECT * FROM suppliers WHERE id = ?", [req.params.id]);
@@ -25581,7 +25625,7 @@ ${data.tenant.name}`;
   // ─── Purchase Orders — DRAFT → SENT → PARTIAL → RECEIVED → CANCELLED ─────
 
   // List POs with optional status filter and supplier-name join
-  app.get("/api/restaurant/:id/inventory/purchase-orders", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/purchase-orders", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const status = String(req.query.status || '').toUpperCase();
@@ -25621,7 +25665,7 @@ ${data.tenant.name}`;
   });
 
   // Get one PO with its line items + ingredient names
-  app.get("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/purchase-orders/:id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get(
@@ -25650,7 +25694,7 @@ ${data.tenant.name}`;
   });
 
   // Get one PO by ID — restaurant-scoped (uses req.params.id, works for SUPER_ADMIN)
-  app.get("/api/restaurant/:id/inventory/purchase-orders/:poId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/purchase-orders/:poId", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const po: any = await db.get(
@@ -25933,7 +25977,7 @@ ${data.tenant.name}`;
   };
 
   // Download PO as PDF
-  app.get("/api/inventory/purchase-orders/:id/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/purchase-orders/:id/pdf", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
@@ -26027,7 +26071,7 @@ ${data.tenant.name}`;
 
   // ─── Goods Receipts (GRN) — physical arrival, increments stock ───────────
 
-  app.get("/api/restaurant/:id/inventory/grn", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/grn", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       // A receipt has no module column of its own — it is a delivery, and what
@@ -26069,7 +26113,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/inventory/grn/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/grn/:id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const grn: any = await db.get(
@@ -26658,7 +26702,7 @@ ${data.tenant.name}`;
   // GET /inventory/cost-per-dish — for each menu item with a recipe,
   // compute ingredient cost, sell price, and margin. Drives the
   // profitability report and surfaces dishes that need re-pricing.
-  app.get("/api/restaurant/:id/inventory/cost-per-dish", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/cost-per-dish", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const recipes: any[] = await db.query(
@@ -26869,7 +26913,7 @@ ${data.tenant.name}`;
 
   // POST /inventory/auto-po/preview — owner-triggered: see what auto-PO
   // WOULD generate without committing. Useful before enabling the cron.
-  app.get("/api/restaurant/:id/inventory/auto-po/preview", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/auto-po/preview", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const suppliers: any[] = await db.query(
@@ -27047,7 +27091,7 @@ ${data.tenant.name}`;
   }
 
   // 1. PERIOD SUMMARY — revenue, count, AOV with comparison
-  app.get("/api/restaurant/:id/analytics/v2/period-summary", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/analytics/v2/period-summary", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const period = String(req.query.period || 'MTD');
       const b = _periodBounds(period);
@@ -27805,7 +27849,7 @@ ${data.tenant.name}`;
   //   • Restaurant-side (regular output liability — goes on GSTR-1)
   //   • ECO-paid (sec 9(5) — declared separately, not added to liability)
   // Owner downloads this monthly and hands it to their CA.
-  app.get("/api/restaurant/:id/analytics/eco-gst-report", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/analytics/eco-gst-report", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
@@ -27871,7 +27915,7 @@ ${data.tenant.name}`;
   });
 
   // 2. HOURLY HEATMAP — orders + revenue by day-of-week × hour-of-day
-  app.get("/api/restaurant/:id/analytics/v2/hourly-heatmap", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/analytics/v2/hourly-heatmap", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
@@ -27914,7 +27958,7 @@ ${data.tenant.name}`;
   // 3. TOP ITEMS — Pareto. Walks every order's items JSON, sums revenue per
   // item name. Optional limit (default 10). Returns the cumulative % so the
   // frontend can draw the 80/20 line.
-  app.get("/api/restaurant/:id/analytics/v2/top-items", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/analytics/v2/top-items", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const start = String(req.query.start || '').trim();
       const end   = String(req.query.end   || '').trim();
@@ -27967,7 +28011,7 @@ ${data.tenant.name}`;
   // for each cohort, what % returned in week+1, week+2, week+4, week+8.
   // Identity = phone number (loyalty key). Tenants without phone capture
   // get empty rows.
-  app.get("/api/restaurant/:id/analytics/v2/cohort-retention", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/analytics/v2/cohort-retention", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const weeks = Math.max(4, Math.min(26, Number(req.query.weeks || 12)));
       const db = await getTenantDb(req.params.id);
@@ -28036,7 +28080,7 @@ ${data.tenant.name}`;
 
   // ─── Wastage logs ────────────────────────────────────────────────────────
 
-  app.get("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/wastage", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const wmf = _invModuleFilter(req, 'i.module');
@@ -28114,7 +28158,7 @@ ${data.tenant.name}`;
 
   // ─── Physical Counts — periodic stock-audit reconciliation ───────────────
 
-  app.get("/api/restaurant/:id/inventory/counts", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/counts", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       // Scoped to one module so a department sees its own stock-takes.
@@ -28141,7 +28185,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/inventory/counts/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/inventory/counts/:id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
@@ -28584,7 +28628,7 @@ ${data.tenant.name}`;
   //  • Top consumers: top 10 by 30-day consumption value
   //  • Wastage breakdown: by reason, last 30 days
   //  • Stock status: rows below reorder OR within 3 days of cover
-  app.get("/api/restaurant/:id/inventory/dashboard", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/dashboard", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const horizon = String(req.query.horizon || 'daily').toLowerCase();
@@ -28878,7 +28922,7 @@ ${data.tenant.name}`;
     return out;
   }
 
-  app.get("/api/restaurant/:id/inventory/audit-log", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/audit-log", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { ingredient_id, type, from, to, limit } = req.query as any;
@@ -28959,7 +29003,7 @@ ${data.tenant.name}`;
   // Aggregates physical-count variances over a date range. Each completed
   // count contributes per-ingredient (expected − actual) deltas. We monetise
   // them at the ingredient's last-known unit price for a shrinkage estimate.
-  app.get("/api/restaurant/:id/inventory/variance-report", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/variance-report", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
@@ -29020,7 +29064,7 @@ ${data.tenant.name}`;
   // ─── COGS Report ────────────────────────────────────────────────────────
   // Cost-of-Goods-Sold over a date range, broken down by ingredient + category.
   // CONSUMPTION movements monetised at default_unit_price; revenue from orders.
-  app.get("/api/restaurant/:id/inventory/cogs-report", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/cogs-report", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
@@ -29103,7 +29147,7 @@ ${data.tenant.name}`;
   // ─── Supplier Price History ─────────────────────────────────────────────
   // Returns price observations per (supplier, ingredient) over time.
   // Supports filtering by supplier_id and/or ingredient_id.
-  app.get("/api/restaurant/:id/inventory/supplier-prices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/supplier-prices", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { supplier_id, ingredient_id, from, to } = req.query as any;
@@ -29137,7 +29181,7 @@ ${data.tenant.name}`;
 
   // Compare current/avg supplier prices for a single ingredient — to spot
   // who's cheapest right now and which supplier hiked recently.
-  app.get("/api/restaurant/:id/inventory/supplier-prices/compare/:ingredient_id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/supplier-prices/compare/:ingredient_id", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -29174,7 +29218,7 @@ ${data.tenant.name}`;
 
   // ─── Recipe Versioning — history viewer ─────────────────────────────────
   // Returns all recipe rows for a menu item across time (current + retired).
-  app.get("/api/restaurant/:id/menu/:menuItemId/recipe-history", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/menu/:menuItemId/recipe-history", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -29193,7 +29237,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Seasonality Factors CRUD ───────────────────────────────────────────
-  app.get("/api/restaurant/:id/inventory/seasonality", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/seasonality", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -29247,6 +29291,7 @@ ${data.tenant.name}`;
 
   // ─── Notification Templates CRUD ────────────────────────────────────────
   app.get("/api/restaurant/:id/notification-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query("SELECT * FROM notification_templates ORDER BY event_type");
@@ -29287,7 +29332,7 @@ ${data.tenant.name}`;
   // ─── Stock Batches (FIFO traceability) ──────────────────────────────────
   // Returns active batches for an ingredient ordered by FIFO consumption order
   // (oldest received first, but expiring batches jump the queue).
-  app.get("/api/restaurant/:id/inventory/batches", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/batches", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { ingredient_id, include_empty } = req.query as any;
@@ -29432,7 +29477,7 @@ ${data.tenant.name}`;
   //
   // The response shapes are deliberately UNCHANGED so the existing Hotel
   // Inventory screen keeps working untouched.
-  app.get("/api/restaurant/:id/hotel-inventory", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel-inventory", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -29587,7 +29632,7 @@ ${data.tenant.name}`;
   });
 
   // Movement history for one item
-  app.get("/api/restaurant/:id/hotel-inventory/:itemId/movements", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel-inventory/:itemId/movements", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const limit = Math.min(Number(req.query.limit || 50), 200);
@@ -29621,7 +29666,7 @@ ${data.tenant.name}`;
   });
 
   // All hotel stock movements (cross-item log for the Movements sub-tab)
-  app.get("/api/restaurant/:id/hotel-inventory/movements", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel-inventory/movements", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const limit = Math.min(Number(req.query.limit || 200), 500);
@@ -30626,7 +30671,7 @@ ${data.tenant.name}`;
 
   // ─── Inventory Analytics (ABC analysis · expiring batches · dead stock) ─────
 
-  app.get("/api/restaurant/:id/inventory/abc-analysis", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/abc-analysis", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const amf2 = _invModuleFilter(req, 'i.module');
@@ -30657,7 +30702,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/inventory/expiring", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/expiring", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
@@ -30732,7 +30777,7 @@ ${data.tenant.name}`;
   // GET /inventory/ledger-integrity?module=&include_shared=1&include_inactive=1
   // Read-only. The items whose stock figure and movement ledger disagree; an
   // empty list is the healthy answer.
-  app.get("/api/restaurant/:id/inventory/ledger-integrity", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/ledger-integrity", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const f = _invModuleFilter(req, 'i.module');
@@ -30781,7 +30826,7 @@ ${data.tenant.name}`;
   //   • days_below_reorder is measured against TODAY'S reorder point, because
   //     the historical value is not stored. It is a useful risk signal, not an
   //     audit of what the threshold was at the time, and is labelled as such.
-  app.get("/api/restaurant/:id/inventory/stockouts", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/stockouts", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.min(730, Math.max(7, Number(req.query.days) || 90));
@@ -30991,7 +31036,7 @@ ${data.tenant.name}`;
   //
   // Module scoping follows the close too: strictly one module, no include_shared
   // overlay. A period belongs to exactly one set of books.
-  app.get("/api/restaurant/:id/inventory/turns", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/turns", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const mod = _normaliseCostModule(req.query.module, 'RESTAURANT');
       // A quarter by default. A month is too short for anything slow-moving —
@@ -31128,7 +31173,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/inventory/dead-stock", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/inventory/dead-stock", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const days = Math.min(180, Math.max(7, Number(req.query.days) || 30));
@@ -31160,7 +31205,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Storage Locations CRUD (multi-location stock) ──────────────────────
-  app.get("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/storage-locations", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -31344,7 +31389,7 @@ ${data.tenant.name}`;
   // Returns the rider's current pouch contents (e.g. spare bottles, packaging
   // they carry). v1 = read-only stub backed by the same ingredient table with
   // a "pouch" location filter; full implementation comes when rider app launches.
-  app.get("/api/restaurant/:id/rider-stock/:riderId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/rider-stock/:riderId", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
@@ -31641,7 +31686,7 @@ ${data.tenant.name}`;
   });
 
   // Tables: Get Tables
-  app.get("/api/restaurant/:id/tables", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/tables", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const tables = await db.query("SELECT * FROM tables ORDER BY name");
@@ -37691,7 +37736,7 @@ ${data.tenant.name}`;
   });
 
   // ─── CATALOG: services ─────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/services", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/services", authenticate, spaFrontDeskStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37805,7 +37850,7 @@ ${data.tenant.name}`;
   });
 
   // service add-ons
-  app.get("/api/restaurant/:id/spa/services/:sid/addons", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/services/:sid/addons", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37864,7 +37909,7 @@ ${data.tenant.name}`;
   });
 
   // service consumables (supply-chain bridge → ingredient_id)
-  app.get("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -37970,7 +38015,7 @@ ${data.tenant.name}`;
   });
 
   // ─── RESOURCES (cabins) + blocks ───────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/resources", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/resources", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38026,7 +38071,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update resource" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/resource-blocks", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/resource-blocks", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38062,7 +38107,7 @@ ${data.tenant.name}`;
   });
 
   // ─── THERAPISTS + skills + schedules ───────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/therapists", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/therapists", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38124,7 +38169,7 @@ ${data.tenant.name}`;
   });
 
   // skill matrix
-  app.get("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38176,7 +38221,7 @@ ${data.tenant.name}`;
   });
 
   // schedules
-  app.get("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38300,7 +38345,7 @@ ${data.tenant.name}`;
   };
 
   // ── Skills master ──────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/skills", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/skills", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38356,7 +38401,7 @@ ${data.tenant.name}`;
   });
 
   // ── Cabin types master ─────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/cabin-types", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/cabin-types", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38411,7 +38456,7 @@ ${data.tenant.name}`;
   });
 
   // ── A therapist's skills: level and certification ──────────────────────────
-  app.get("/api/restaurant/:id/spa/therapists/:tid/skills", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/therapists/:tid/skills", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38464,7 +38509,7 @@ ${data.tenant.name}`;
   });
 
   // ── What a treatment needs: skills at a level, a cabin type, a gender rule ──
-  app.get("/api/restaurant/:id/spa/services/:sid/requirements", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/services/:sid/requirements", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38727,7 +38772,7 @@ ${data.tenant.name}`;
   });
 
   // ─── SPA INVENTORY (ingredients tagged SPA_PRODUCT / SPA_RETAIL) ───────────
-  app.get("/api/restaurant/:id/spa/inventory", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/inventory", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38740,7 +38785,7 @@ ${data.tenant.name}`;
   });
 
   // ─── AVAILABILITY (dual-resource slot engine) ──────────────────────────────
-  app.get("/api/restaurant/:id/spa/availability", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/availability", authenticate, spaFrontDeskStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38870,7 +38915,7 @@ ${data.tenant.name}`;
   // Therapist search (Phase 2): every active therapist, whether they can give a
   // treatment — and at a time, when one is asked — and in words why not. Also
   // finds therapists by name, skill (at a minimum level), gender and language.
-  app.get("/api/restaurant/:id/spa/therapist-search", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/therapist-search", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39017,7 +39062,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to list in-house guests" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/appointments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/appointments", authenticate, spaFrontDeskStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -39087,7 +39132,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch my appointments" }); }
   });
 
-  app.get("/api/restaurant/:id/spa/appointments/:aid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/appointments/:aid", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -40228,7 +40273,7 @@ ${data.tenant.name}`;
   });
 
   // List spa folios
-  app.get("/api/restaurant/:id/spa/folios", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/folios", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -40252,7 +40297,7 @@ ${data.tenant.name}`;
   });
 
   // Get one spa folio with entries + payment ledger
-  app.get("/api/restaurant/:id/spa/folios/:fid", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/folios/:fid", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -40419,7 +40464,7 @@ ${data.tenant.name}`;
   });
 
   // Spa invoice PDF — reuses the module-agnostic generateInvoicePdf renderer.
-  app.get("/api/restaurant/:id/spa/folios/:fid/invoice.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/folios/:fid/invoice.pdf", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -40594,7 +40639,7 @@ ${data.tenant.name}`;
   };
 
   // ─── PACKAGES (prepaid series) ──────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/packages", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/packages", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_packages WHERE is_active = 1 ORDER BY name")); }
@@ -40645,7 +40690,7 @@ ${data.tenant.name}`;
   });
 
   // ─── MEMBERSHIPS ─────────────────────────────────────────────────────────────
-  app.get("/api/restaurant/:id/spa/memberships", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/memberships", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_membership_plans WHERE is_active = 1 ORDER BY monthly_fee")); }
@@ -41690,7 +41735,7 @@ ${data.tenant.name}`;
   };
 
   // spa profile settings (admin)
-  app.get("/api/restaurant/:id/spa/profile", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/spa/profile", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -42737,7 +42782,7 @@ ${data.tenant.name}`;
   //
   // Default window: today → today+13 (14 days). Capped at 90 days to
   // avoid huge payloads.
-  app.get("/api/restaurant/:id/hotel/availability", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/availability", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -44936,7 +44981,7 @@ ${data.tenant.name}`;
   });
 
   // 5) PURCHASE SPEND — purchase-order spend by supplier + period.
-  app.get("/api/restaurant/:id/reports/purchase", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/reports/purchase", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || _todayIST());
@@ -49149,6 +49194,7 @@ ${data.tenant.name}`;
 
   // ─── P&L REPORT ────────────────────────────────────────────────────────
   app.get("/api/restaurant/:id/reports/pnl", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
@@ -49214,6 +49260,7 @@ ${data.tenant.name}`;
 
   // ─── CASH FLOW REPORT ──────────────────────────────────────────────────
   app.get("/api/restaurant/:id/reports/cash-flow", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
@@ -49312,6 +49359,7 @@ ${data.tenant.name}`;
 
   // ─── GST LEDGER REPORT ─────────────────────────────────────────────────
   app.get("/api/restaurant/:id/reports/gst-ledger", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const month = (req.query.month as string) || new Date().toISOString().slice(0, 7);
@@ -49350,6 +49398,7 @@ ${data.tenant.name}`;
 
   // ─── VENDOR AGING REPORT ───────────────────────────────────────────────
   app.get("/api/restaurant/:id/reports/vendor-aging", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
       // Payables carried no module dimension at all: supplier invoices are
@@ -57276,7 +57325,7 @@ ${data.tenant.name}`;
   const _canSeeVoucher = (req: AuthRequest, module: string) =>
     String(module || '').toUpperCase() === 'EVENTS' ? _roleHasTab(req, 'EVENTS_BOOKINGS') : _roleHasTab(req, 'FOLIOS');
 
-  app.get("/api/restaurant/:id/receipt-vouchers", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/receipt-vouchers", authenticate, voucherStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { folio_id, event_booking_id, booking_id } = req.query as Record<string, string>;
       if (!folio_id && !event_booking_id && !booking_id) {
@@ -57319,7 +57368,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Failed to list receipt vouchers' }); }
   });
 
-  app.get("/api/restaurant/:id/receipt-vouchers/:rvId/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/receipt-vouchers/:rvId/pdf", authenticate, voucherStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const rv: any = await db.get("SELECT * FROM receipt_vouchers WHERE id = ?", [req.params.rvId]);
@@ -57407,7 +57456,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/refund-vouchers/:rfvId/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/refund-vouchers/:rfvId/pdf", authenticate, voucherStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const f: any = await db.get("SELECT * FROM refund_vouchers WHERE id = ?", [req.params.rfvId]);
@@ -60278,7 +60327,7 @@ ${data.tenant.name}`;
   });
 
   // Sessions: Get active session for a specific table (owner/waiter use)
-  app.get("/api/restaurant/:id/tables/:tableId/active-session", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/tables/:tableId/active-session", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const restaurant = await centralDb.get(
@@ -60460,7 +60509,7 @@ ${data.tenant.name}`;
   });
 
   // Sessions: Owner — list all sessions for a restaurant
-  app.get("/api/restaurant/:id/sessions", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/sessions", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       // CMD-CENTER-FIX: hide soft-deleted sessions from the staff list by default
@@ -61358,7 +61407,7 @@ ${data.tenant.name}`;
   });
 
   // Orders: Get Orders
-  app.get("/api/restaurant/:id/orders", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/orders", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       // T1-L1: filter out soft-deleted invoices by default. An audit endpoint
@@ -61372,7 +61421,7 @@ ${data.tenant.name}`;
   });
 
   // Orders: Live Kitchen Orders (for owner/manager monitor dashboard — active orders only)
-  app.get("/api/restaurant/:id/orders/live", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/orders/live", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureOrderCols(db);   // once per tenant, not per poll (was 5 ADD-COLUMN locks/poll)
@@ -61530,7 +61579,7 @@ ${data.tenant.name}`;
   // ─── Invoice Endpoints ─────────────────────────────────────────────────────
 
   // Invoices: consolidated list — SESSION invoices (postpaid, 1 per session) + ORDER invoices (prepaid/manual)
-  app.get("/api/restaurant/:id/invoices", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/invoices", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
 
@@ -62542,7 +62591,7 @@ ${data.tenant.name}`;
   });
 
   // GET /api/restaurant/:id/waiter-calls — All active calls (pending + acknowledged)
-  app.get("/api/restaurant/:id/waiter-calls", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/waiter-calls", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await ensureWaiterCallsTable(db);
@@ -64634,7 +64683,7 @@ ${data.tenant.name}`;
   });
 
   // Bookings: Get Bookings
-  app.get("/api/restaurant/:id/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/bookings", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const bookings = await db.query("SELECT * FROM bookings ORDER BY booking_date, booking_time");
@@ -64914,7 +64963,7 @@ ${data.tenant.name}`;
   });
 
   // Reports: Full Analytics (date-range aware, roll-up aggregations)
-  app.get("/api/restaurant/:id/reports", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/reports", authenticate, reportsStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
 
@@ -65413,7 +65462,7 @@ ${data.tenant.name}`;
   });
 
   // Feedback: Get Feedback
-  app.get("/api/owner/feedback", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/owner/feedback", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const feedback = await db.query("SELECT * FROM feedback ORDER BY created_at DESC");
@@ -65864,7 +65913,7 @@ ${data.tenant.name}`;
 
   // Tables: Live Monitoring View  (OWNER / MANAGER / WAITER)
   // Returns every table enriched with its active session data and waiter name.
-  app.get("/api/restaurant/:id/tables/live", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/tables/live", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await _ensureTableFloorCols(db);   // once per tenant, not per C&C poll (was 6 ADD-COLUMN locks/poll on `tables`)
@@ -66033,7 +66082,7 @@ ${data.tenant.name}`;
   //
   // SLA threshold: 30 min from order creation; rows past this are flagged so
   // the panel can render them red so the owner notices delivery delays.
-  app.get("/api/restaurant/:id/cloud-kitchen/active", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/cloud-kitchen/active", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const SLA_MINUTES = 30;
@@ -66360,7 +66409,7 @@ ${data.tenant.name}`;
   });
 
   // ─── Invoice: GET full order detail (items parsed + discount + apply_gst)
-  app.get("/api/restaurant/:id/orders/:orderId/invoice", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/orders/:orderId/invoice", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount FLOAT DEFAULT 0").catch(() => {});
@@ -68458,8 +68507,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-settings-partial-update',
+    commit_marker: 'xmodule-read-gates',
     code_features: [
+      'xmodule-read-gates  Cross-module READ gates (docs/RBAC_HARDENING_PLAN.md RC-1). About 140 GET routes needed only a login: a role holding no page at all could read restaurant orders, invoices and revenue, the profit-and-loss, cash-flow, GST ledger and vendor ageing, every spa appointment and folio, all inventory and recipes, aggregator settlements, feedback, brand cross-location revenue, email server settings and message delivery logs. They now mirror their write routes with module-family gates: floorStaff (restaurant floor + hotel front desk), reportsStaff, inventoryReadStaff, spaStaff / spaFrontDeskStaff, voucherStaff, hotelStaff; finance statements use the finance read gate, notification config the Notifications read gate, brand admin data owner/manager/Settings-edit. Left open on purpose: my-permissions, me/*, billing-status, brand announcements banner, checklists/my, custom-roles (names only), tax-config, loyalty lookup, bill preview-totals, integrations/channels.',
       'events-settings-partial-update  PUT /events/venue-settings, /events/profile and /events/gst-settings rewrote every field they own from the body with a default for whatever was missing, so a partial or empty PUT reset the hall turnaround (to 120 min), the half-day windows and weekend days, blanked the public page title/tagline/description/contact/hero/gallery, and reset GST language mode. They now change only the fields sent; the UI always sends the whole form, so screens behave the same. Found when the Events RBAC probe sent empty PUTs as Edit-level roles on RESTO-1003.',
       'events-rbac-round1  Events RBAC click-through and API probe (21 Sep 2026). UI: a View role no longer sees enabled controls it cannot use: hall status dropdown (and it now changes only after the server accepts), Charge GST / GST %, Add + Save GST details, Generate Quotation (needs Quotations Edit), Email invoice (Bookings Edit; its dialog is titled for the invoice), and the Public Page image pickers (read-only). Home launchpad: a module tile, public link or quick action shows only when the user can open one of its pages, and a tile opens the first page they can (the Events tile opened the Dashboard, which a Bookings-only role cannot see); the boot-time hotel tariff and travel-agent fetches and the launchpad hotel fetch no longer fire for a user with no hotel page. Refusals name the page in words (You do not have permission to change Events Bookings) instead of the role id and tab code; Access Restricted likewise. API: requireEventsAny gates 9 reads (analytics; bookings list and detail, schedule, hotel-availability, BEO, invoice pdf, audit, where-used) to the pages that use them, so a checklist-only role can no longer read revenue, customers and invoices. The catalog reads (venues, rentals, services, catering, profile, settings, availability) stay module-level.',
       'inventory-module-permissions  Hotel, Spa and Events share one inventory screen and the /inventory/* routes, which all required the kitchen INVENTORY tab (restaurant-only, so a hotel- or events-scoped role could never hold it): Hotel Inventory = Full showed no Add item and the API refused the write, and Events Inventory had no permission at all. New _requireInvWrite: each module answers to its own tab (HOTEL_INVENTORY, SPA_INVENTORY, new INVENTORY_EVENTS), INVENTORY still covers every module, and the module comes from the record touched (item, category, supplier link, PO, GRN items, count, period). inventoryStaff module gate admits the spa/events inventory tabs. Events Inventory is grantable in Staff Access (eventsOnly; Events-exclusive for role scope). Screen, supplier panel and month-end buttons use canWriteInventory(module).',
@@ -68934,7 +68984,7 @@ ${data.tenant.name}`;
   });
 
   // List sync jobs (status filter, limit) — drives the future Sync Health UI
-  app.get("/api/restaurant/:id/integrations/sync-jobs", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/integrations/sync-jobs", authenticate, floorStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const { status, channel } = req.query as any;

@@ -44,3 +44,10 @@ export const MODULE_HOME_TABS: Record<'HOTEL' | 'RESTAURANT' | 'SPA' | 'EVENTS',
 };
 export const firstOpenTab = (module: keyof typeof MODULE_HOME_TABS): string | null =>
   MODULE_HOME_TABS[module].find(t => canSeeTab(t)) || null;
+
+// The restaurant floor's data (orders, tables, reports) is served only to a role that
+// holds one of these pages — the same list as FLOOR_TAB_IDS in server.ts. A user
+// with none of them (Events-only, Spa-only, cleaning staff ...) is refused those
+// reads, so the app does not ask for them at all.
+export const FLOOR_DATA_TABS = ['MONITOR', 'ORDERS', 'MENU', 'INVOICES', 'LOYALTY', 'QR', 'DELIVERY', 'BOOKINGS', 'FEEDBACK', 'RESTAURANT_REPORTS', 'SETTINGS', 'CASH_DRAWER', 'CUSTOMER_ACCOUNTS', 'ALL_REPORTS', 'HOTEL_BOOKINGS', 'FOLIOS'];
+export const canSeeFloorData = (): boolean => FLOOR_DATA_TABS.some(t => canSeeTab(t));
