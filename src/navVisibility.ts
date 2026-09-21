@@ -155,7 +155,9 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   // spelling would have handed the Events nav group and the Events API gate to
   // every role with inventory access.
   if (id === 'INVENTORY_EVENTS') {
-    return isEventsEnabled && (isOwnerOrAdmin || baseTabVisible('INVENTORY'));
+    // Its own grant (Staff Access → Inventory → Events Inventory), or the
+    // kitchen INVENTORY grant it used to borrow — kept so nobody loses it.
+    return isEventsEnabled && (isOwnerOrAdmin || baseTabVisible('INVENTORY_EVENTS') || baseTabVisible('INVENTORY'));
   }
 
   // Events "Cleaning Checklist" reuses the HOUSEKEEPING permission but lives

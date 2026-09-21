@@ -34,7 +34,7 @@ import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab, tabLevel } from './perm';
+import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory } from './perm';
 import { prettyRoleLabel } from './roleLabel';
 import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -28883,6 +28883,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'CHANNEL_MANAGER',      label: 'Channel Manager',      description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
               { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page',  description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
               { id: 'HOTEL_INVENTORY',      label: 'Hotel Inventory',       description: 'Housekeeping consumables, amenities, linen — stock levels, movements, low-stock alerts.', hotelOnly: true },
+              { id: 'INVENTORY_EVENTS',     label: 'Events Inventory',      description: 'Event consumables — crockery, linen, decor, disposables: stock, receiving, usage, stock takes.', eventsOnly: true },
               // Finance tabs (visible for both HOTEL and RESTAURANT tenants)
               { id: 'EXPENSE_JOURNAL',      label: 'Expenses',              description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
               { id: 'PROCUREMENT',          label: 'Suppliers & Purchasing', description: 'Supplier master, purchase orders, supplier invoices, goods-received notes and the supplier league table.' },
@@ -28965,7 +28966,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', ACCOUNTS_MSME_43B: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
               CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
               LOYALTY: 'SALES', FEEDBACK: 'SALES', CHANNEL_MANAGER: 'SALES', PUBLIC_BOOKING_PAGE: 'SALES',
-              INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY',
+              INVENTORY: 'INVENTORY', HOTEL_INVENTORY: 'INVENTORY', SPA_INVENTORY: 'INVENTORY', INVENTORY_EVENTS: 'INVENTORY',
               ALL_REPORTS: 'REPORTS',
               STAFF: 'WORKFORCE', ROSTER: 'WORKFORCE', TIMESHEET: 'WORKFORCE', ATTENDANCE: 'WORKFORCE', HR_PAYROLL: 'WORKFORCE', HR_SENSITIVE: 'WORKFORCE', STAFF_PAYROLL: 'WORKFORCE',
               NOTIFICATIONS: 'ADMIN', PAYMENT_GATEWAYS: 'ADMIN', SUBSCRIPTION: 'ADMIN', SETTINGS: 'ADMIN',
@@ -57847,7 +57848,7 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
   const [openCount, setOpenCount] = useState<any>(null);
 
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-  const canWrite = canWriteTab('INVENTORY');
+  const canWrite = canWriteInventory(module);
 
   // include_shared=1 so property-wide consumables (cleaning chemicals, bin
   // liners) show here too instead of being invisible to every module.
@@ -58492,7 +58493,7 @@ function ItemDrawer({ restaurantId, token, item, onClose, onChanged }: {
           )}
 
           {tab === 'SUPPLIERS' && (
-            <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={item.id} />
+            <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={item.id} module={item.module} />
           )}
 
           {tab === 'HISTORY' && (
@@ -58579,8 +58580,8 @@ function ItemDrawer({ restaurantId, token, item, onClose, onChanged }: {
 // Rank 1 is the primary source: auto-PO buys from the lowest-ranked APPROVED
 // supplier, so un-approving a vendor here redirects replenishment to the next
 // one down without touching a single item or purchase order.
-function ApprovedSuppliersPanel({ restaurantId, token, ingredientId }: {
-  restaurantId: string; token: string; ingredientId: string;
+function ApprovedSuppliersPanel({ restaurantId, token, ingredientId, module }: {
+  restaurantId: string; token: string; ingredientId: string; module?: string;
 }) {
   const toast = useToast();
   const [links, setLinks] = useState<any[]>([]);
@@ -58588,7 +58589,7 @@ function ApprovedSuppliersPanel({ restaurantId, token, ingredientId }: {
   const [pick, setPick] = useState('');
   const [busy, setBusy] = useState(false);
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-  const canWrite = canWriteTab('INVENTORY');
+  const canWrite = canWriteInventory(module);
 
   const load = async () => {
     try {
@@ -58815,7 +58816,7 @@ function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSav
         </div>
 
         {isEdit && (
-          <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={ingredient.id} />
+          <ApprovedSuppliersPanel restaurantId={restaurantId} token={token} ingredientId={ingredient.id} module={ingredient.module || presetModule} />
         )}
 
         {!isEdit && (
@@ -67212,6 +67213,7 @@ function AccountDrawer({ restaurantId, token, accountId, onClose, onChanged }: {
 // components, and month end must not be a thing only three of the four modules
 // can do. One definition, mounted twice.
 function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: string; token: string; module: string }) {
+  const canWrite = canWriteInventory(module);
   const toast = useToast();
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
@@ -67313,10 +67315,10 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
               Closing stock {money(closed.closing_value)} · used {money(closed.actual_consumption_value)} · variance {money(closed.variance_value)}
             </span>
           </div>
-          <button onClick={() => runReopen(closed.id)} disabled={busy}
+          {canWrite && <button onClick={() => runReopen(closed.id)} disabled={busy}
             className="px-3 py-2 rounded-2xl border border-brand/25 text-brand text-xs font-bold hover:bg-white disabled:opacity-50">
             Reopen this month
-          </button>
+          </button>}
         </div>
       )}
 
@@ -67403,10 +67405,10 @@ function InventoryMonthEnd({ restaurantId, token, module }: { restaurantId: stri
               placeholder="Anything worth remembering about this month"
               className="w-full mt-1 px-3 py-2 rounded-xl border border-brand/15 text-sm bg-white" />
           </label>
-          <button onClick={runClose} disabled={busy}
+          {canWrite && <button onClick={runClose} disabled={busy}
             className="px-4 py-2 rounded-2xl bg-brand text-white text-xs font-bold hover:bg-[#b04e12] disabled:opacity-50">
             {busy ? 'Working…' : closed ? `Re-close ${period}` : `Close ${period}`}
-          </button>
+          </button>}
         </div>
         {closed && (
           <p className="text-xs text-[#9c8e85]">

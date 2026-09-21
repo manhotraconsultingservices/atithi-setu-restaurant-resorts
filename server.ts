@@ -8687,6 +8687,64 @@ const RESTAURANT_ADMIN_ROLES       = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 // /api/inventory/... routes that carry no :id tenant param).
 const RESTAURANT_TAB_IDS = ['MONITOR', 'ORDERS', 'MENU', 'INVOICES', 'INVENTORY', 'LOYALTY', 'QR', 'DELIVERY', 'BOOKINGS', 'FEEDBACK', 'RESTAURANT_REPORTS', 'HOTEL_INVENTORY', 'SETTINGS'];
 const restaurantStaff = requireModuleAccess(RESTAURANT_TAB_IDS, RESTAURANT_OPERATIONAL_ROLES, 'Restaurant');
+
+// ── Inventory write permission follows the MODULE the stock belongs to ──────
+// Hotel, Spa and Events run the same inventory screen and the same /inventory/*
+// routes as the kitchen, but every write was gated on the kitchen INVENTORY tab.
+// INVENTORY is restaurant-only, so a hotel- or events-scoped role could never be
+// granted it: "Hotel Inventory = Full" still showed no Add button and the API
+// refused the write (reported 21 Sep 2026). Each module now answers to its own
+// tab; INVENTORY keeps covering every module, so no existing grant loses access.
+const _INV_MODULE_TAB: Record<string, string> = {
+  RESTAURANT: 'INVENTORY', HOTEL: 'HOTEL_INVENTORY', SPA: 'SPA_INVENTORY', EVENTS: 'INVENTORY_EVENTS',
+};
+const _INV_MODULE_LABEL: Record<string, string> = {
+  RESTAURANT: 'Kitchen Inventory', HOTEL: 'Hotel Inventory', SPA: 'Spa Inventory', EVENTS: 'Events Inventory', SHARED: 'Inventory',
+};
+// Module gate for those routes: the restaurant tabs plus the two module
+// inventory tabs, so a spa- or events-only role reaches the route at all.
+const inventoryStaff = requireModuleAccess([...RESTAURANT_TAB_IDS, 'SPA_INVENTORY', 'INVENTORY_EVENTS'], RESTAURANT_OPERATIONAL_ROLES, 'Inventory');
+
+// Every module in `modules` must be writable at `minLevel` (Edit=2, Full=3):
+// by the kitchen INVENTORY grant, or by that module's own inventory tab. A
+// SHARED (property-wide) item needs INVENTORY. Sends 403 and returns false.
+async function _requireInvWrite(req: AuthRequest, res: Response, modules: any, minLevel: number): Promise<boolean> {
+  const role = String(req.user?.role || '').toUpperCase();
+  if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+  const list = [...new Set((Array.isArray(modules) ? modules : [modules]).map((m: any) => String(m || 'RESTAURANT').toUpperCase()))];
+  if (!list.length) list.push('RESTAURANT');
+  let perms: TabPerms | null = null;
+  try { perms = await getTabPermissionsForRole((req.user as any)?.restaurantId || req.params.id, role); } catch { perms = null; }
+  const lvl = (t: string) => Number((perms as any)?.[t] || 0);
+  const kitchen = lvl('INVENTORY');
+  const denied = list.find(m => !(kitchen >= minLevel || (_INV_MODULE_TAB[m] && lvl(_INV_MODULE_TAB[m]) >= minLevel)));
+  if (!denied) return true;
+  const tab = _INV_MODULE_TAB[denied] || 'INVENTORY';
+  res.status(403).json({
+    error: `Forbidden — ${_INV_MODULE_LABEL[denied] || 'Inventory'} ${minLevel >= 3 ? 'Full' : 'Edit'} access required. Ask the property owner to grant it in Staff Access.`,
+    required_tab: tab, required_level: minLevel,
+  });
+  return false;
+}
+
+// Modules of the given items (plus an optional target module, e.g. an item being
+// moved). Unknown ids fall back to RESTAURANT, so a missing row never widens access.
+async function _invModulesOf(req: AuthRequest, sql: string, params: any[], extra?: any): Promise<string[]> {
+  const out = new Set<string>();
+  try {
+    const db = await getTenantDb((req.user as any)?.restaurantId || req.params.id);
+    const rows: any[] = await db.query(sql, params).catch(() => []);
+    for (const r of rows) out.add(String(r.module || 'RESTAURANT').toUpperCase());
+  } catch { /* fall through */ }
+  if (extra !== undefined && extra !== null && String(extra).trim() !== '') out.add(_normaliseCostModule(extra));
+  if (!out.size) out.add('RESTAURANT');
+  return [...out];
+}
+const _invItemModules = (req: AuthRequest, ids: any[], extra?: any) => {
+  const clean = (ids || []).filter(Boolean).map(String);
+  if (!clean.length) return Promise.resolve(extra ? [_normaliseCostModule(extra)] : ['RESTAURANT']);
+  return _invModulesOf(req, `SELECT DISTINCT COALESCE(module, 'RESTAURANT') AS module FROM ingredients WHERE id IN (${clean.map(() => '?').join(',')})`, clean, extra);
+};
 const restaurantAdmin = requireModuleAccess(['SETTINGS'], RESTAURANT_ADMIN_ROLES, 'Settings & Admin');
 
 // Spa mutations: open to all operational roles from both modules PLUS any custom
@@ -8773,6 +8831,8 @@ const _RESTAURANT_ONLY_TABS = new Set(['ORDERS', 'MENU', 'INVENTORY', 'DELIVERY'
 function _tabExclusiveModule(tab: string): 'HOTEL' | 'RESTAURANT' | 'SPA' | 'EVENTS' | null {
   if (tab.startsWith('SPA_')) return 'SPA';
   if (tab.startsWith('EVENTS_')) return 'EVENTS';
+  // Not EVENTS_-prefixed on purpose (see _INV_MODULE_TAB), but Events-only.
+  if (tab === 'INVENTORY_EVENTS') return 'EVENTS';
   if (_HOTEL_ONLY_TABS.has(tab)) return 'HOTEL';
   if (_RESTAURANT_ONLY_TABS.has(tab)) return 'RESTAURANT';
   return null;
@@ -24303,7 +24363,7 @@ ${data.tenant.name}`;
   });
 
   // Ingredients: create
-  app.post("/api/restaurant/:id/inventory/ingredients", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/ingredients", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const {
         name, item_type, category, unit,
@@ -24343,6 +24403,7 @@ ${data.tenant.name}`;
         moduleRaw,
         (safeType === 'SPA_PRODUCT' || safeType === 'SPA_RETAIL') ? 'SPA' : 'RESTAURANT'
       );
+      if (!(await _requireInvWrite(req, res, safeModule, 2))) return;
 
       const db = await getTenantDb(req.params.id);
 
@@ -24409,8 +24470,9 @@ ${data.tenant.name}`;
   });
 
   // Ingredients: update
-  app.patch("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/ingredients/:id", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    // Moving an item to another module needs write access on both sides.
+    if (!(await _requireInvWrite(req, res, await _invItemModules(req, [req.params.id], req.body?.module), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -24444,8 +24506,8 @@ ${data.tenant.name}`;
 
   // Ingredients: soft-delete (sets is_active=0). Hard delete blocked because
   // recipes / movements / GRN line items reference this row.
-  app.delete("/api/inventory/ingredients/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+  app.delete("/api/inventory/ingredients/:id", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invItemModules(req, [req.params.id]), 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE ingredients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id]);
@@ -24687,10 +24749,11 @@ ${data.tenant.name}`;
   });
 
   // Close — compute and PERSIST, header plus every line.
-  app.post("/api/restaurant/:id/inventory/periods/close", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/periods/close", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
       const mod = _normaliseCostModule(req.body?.module, 'RESTAURANT');
+      if (!(await _requireInvWrite(req, res, mod, 2))) return;
       const { from, to, key } = _periodWindow(req.body?.period, req.body?.from, req.body?.to);
       if (!from || !to) return res.status(400).json({ error: 'period (YYYY-MM) or from/to (YYYY-MM-DD) is required' });
 
@@ -24834,7 +24897,8 @@ ${data.tenant.name}`;
   // anyway - capitalising the stock twice, with both journals individually
   // balanced so the trial balance would still tie and nothing would flag it.
   // That is the same trap the per-close journal ref above was written to avoid.
-  app.post("/api/restaurant/:id/inventory/periods/:pid/reopen", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/periods/:pid/reopen", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM inventory_periods WHERE id = ?", [req.params.pid]), 2))) return;
     try {
       const db = await getTenantDb(req.params.id);
       const reason = String(req.body?.reason || '').trim();
@@ -24992,11 +25056,12 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/item-categories", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/item-categories", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const name = String(req.body?.name || '').trim();
       if (!name) return res.status(400).json({ error: 'name is required' });
       const mod = _normaliseCostModule(req.body?.module, 'RESTAURANT');
+      if (!(await _requireInvWrite(req, res, mod, 2))) return;
       const db = await getTenantDb(req.params.id);
       // Re-adding a name that exists REVIVES it instead of failing: the common
       // case is un-retiring a category, and a 409 there leaves the user stuck
@@ -25017,8 +25082,8 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/inventory/item-categories/:catId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/item-categories/:catId", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM item_categories WHERE id = ?", [req.params.catId]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const sets: string[] = [];
@@ -25038,8 +25103,8 @@ ${data.tenant.name}`;
   // Retire, never delete. Items already filed under a category keep their label:
   // a hard delete would blank the category on historical stock and silently
   // change what past reports say.
-  app.delete("/api/inventory/item-categories/:catId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+  app.delete("/api/inventory/item-categories/:catId", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM item_categories WHERE id = ?", [req.params.catId]), 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const cat: any = await db.get("SELECT * FROM item_categories WHERE id = ?", [req.params.catId]).catch(() => null);
@@ -25077,7 +25142,8 @@ ${data.tenant.name}`;
   });
 
   // POST — approve a supplier for this item.
-  app.post("/api/restaurant/:id/inventory/ingredients/:ingredientId/suppliers", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/ingredients/:ingredientId/suppliers", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invItemModules(req, [req.params.ingredientId]), 2))) return;
     try {
       const { supplier_id, preference_rank, lead_time_days, moq, last_unit_price, supplier_sku, notes, is_approved } = req.body || {};
       if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
@@ -25137,8 +25203,8 @@ ${data.tenant.name}`;
   });
 
   // PATCH — change approval, preference, lead time, MOQ or price.
-  app.patch("/api/inventory/ingredient-suppliers/:linkId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/ingredient-suppliers/:linkId", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(i.module, 'RESTAURANT') AS module FROM ingredient_suppliers s JOIN ingredients i ON i.id = s.ingredient_id WHERE s.id = ?", [req.params.linkId]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = ['is_approved', 'preference_rank', 'lead_time_days', 'moq', 'last_unit_price', 'supplier_sku', 'notes', 'is_active'];
@@ -25160,8 +25226,8 @@ ${data.tenant.name}`;
 
   // DELETE — soft-remove the link. Soft, because purchase history and the
   // price observations reference this pairing.
-  app.delete("/api/inventory/ingredient-suppliers/:linkId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+  app.delete("/api/inventory/ingredient-suppliers/:linkId", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(i.module, 'RESTAURANT') AS module FROM ingredient_suppliers s JOIN ingredients i ON i.id = s.ingredient_id WHERE s.id = ?", [req.params.linkId]), 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE ingredient_suppliers SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.linkId]);
@@ -25173,8 +25239,8 @@ ${data.tenant.name}`;
 
   // Ingredients: bulk stock adjustment (manual override)
   // Used for ad-hoc corrections. Logs MANUAL movement with a "before/after" note.
-  app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invItemModules(req, [req.params.id]), 2))) return;
     try {
       const { new_qty, reason } = req.body;
       if (new_qty == null || isNaN(Number(new_qty))) {
@@ -25569,12 +25635,13 @@ ${data.tenant.name}`;
   // Create a PO (status starts as DRAFT). Body:
   //   { supplier_id, expected_delivery_date?, notes?,
   //     items: [{ ingredient_id, qty_ordered, unit, unit_price }, ...] }
-  app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { supplier_id, expected_delivery_date, notes, items } = req.body;
       // Which part of the business this PO is for. Unrecognised values coerce
       // to RESTAURANT, the same rule the expense and invoice routes use.
       const poModule = _normaliseCostModule(req.body?.module);
+      if (!(await _requireInvWrite(req, res, poModule, 2))) return;
       if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: "items array (with at least 1 line) is required" });
@@ -25655,8 +25722,8 @@ ${data.tenant.name}`;
   });
 
   // Update PO header (only DRAFT POs editable for header fields)
-  app.patch("/api/inventory/purchase-orders/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/purchase-orders/:id", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -25684,8 +25751,8 @@ ${data.tenant.name}`;
   });
 
   // Replace line items on a DRAFT PO. Recomputes totals.
-  app.put("/api/inventory/purchase-orders/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.put("/api/inventory/purchase-orders/:id/items", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array is required" });
@@ -25735,8 +25802,8 @@ ${data.tenant.name}`;
   });
 
   // Mark a PO as SENT (DRAFT → SENT). Optionally fires an email to the supplier later.
-  app.post("/api/inventory/purchase-orders/:id/send", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/purchase-orders/:id/send", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -25839,8 +25906,8 @@ ${data.tenant.name}`;
 
   // Email PO to supplier with PDF attachment
   // Body: { to?: string, cc?: string, message?: string }   // overrides supplier.email if 'to' is provided
-  app.post("/api/inventory/purchase-orders/:id/email", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/purchase-orders/:id/email", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
@@ -25879,8 +25946,8 @@ ${data.tenant.name}`;
   });
 
   // Cancel a PO (any non-terminal status → CANCELLED)
-  app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
@@ -25899,9 +25966,7 @@ ${data.tenant.name}`;
   app.delete("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const userRole = String(req.user?.role || '').toUpperCase();
-      if (!(await _roleHasTab(req, 'INVENTORY', 3))) {
-        return res.status(403).json({ error: 'You need Full access to Inventory to delete a purchase order.' });
-      }
+      if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [req.params.id]), 3))) return;
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
       if (!po) return res.status(404).json({ error: "PO not found" });
@@ -26004,7 +26069,7 @@ ${data.tenant.name}`;
   // After all line items: if linked to a PO, recompute PO status:
   //   • all items fully_received → 'RECEIVED'
   //   • any item received → 'PARTIAL'
-  app.post("/api/restaurant/:id/inventory/grn", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/grn", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { po_id, supplier_id, bill_number, notes, items } = req.body;
       if (!supplier_id && !po_id) {
@@ -26012,6 +26077,12 @@ ${data.tenant.name}`;
       }
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: "items array (with at least 1 line) is required" });
+      }
+      // Receiving touches the modules of the items received (and of the PO).
+      {
+        const recvMods = await _invItemModules(req, items.map((x: any) => x?.ingredient_id));
+        if (po_id) recvMods.push(...await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM purchase_orders WHERE id = ?", [po_id]));
+        if (!(await _requireInvWrite(req, res, recvMods, 2))) return;
       }
 
       const db = await getTenantDb(req.params.id);
@@ -26228,8 +26299,8 @@ ${data.tenant.name}`;
   });
 
   // Upload bill image for an existing GRN
-  app.post("/api/inventory/grn/:id/upload-bill", authenticate, restaurantStaff, upload.single('bill'), async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/grn/:id/upload-bill", authenticate, inventoryStaff, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT DISTINCT COALESCE(i.module, 'RESTAURANT') AS module FROM goods_receipt_items g JOIN ingredients i ON i.id = g.ingredient_id WHERE g.grn_id = ?", [req.params.id]), 2))) return;
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'bill')" });
       const db = await getTenantDb(req.user!.restaurantId);
@@ -27941,12 +28012,13 @@ ${data.tenant.name}`;
   });
 
   // Log wastage. Atomically: insert the log row, decrement stock, append audit.
-  app.post("/api/restaurant/:id/inventory/wastage", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/wastage", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { ingredient_id, qty, unit, reason, notes } = req.body;
       if (!ingredient_id || qty == null) {
         return res.status(400).json({ error: "ingredient_id and qty are required" });
       }
+      if (!(await _requireInvWrite(req, res, await _invItemModules(req, [ingredient_id]), 2))) return;
       const allowedReasons = new Set(['SPOILAGE', 'BURN', 'DROPPED', 'EXPIRY', 'OTHER']);
       const safeReason = allowedReasons.has(String(reason || '').toUpperCase())
         ? String(reason).toUpperCase()
@@ -28047,7 +28119,7 @@ ${data.tenant.name}`;
 
   // Start a new count. Snapshots current ingredient stock as expected_qty per
   // line — owner then walks the kitchen and fills in actual_qty as they count.
-  app.post("/api/restaurant/:id/inventory/counts", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/counts", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
     try {
       const { count_date, notes } = req.body;
       // A stock-take belongs to ONE part of the business. Counting the whole
@@ -28055,6 +28127,7 @@ ${data.tenant.name}`;
       // silo was folded in: a kitchen count would hand the chef 21 rows of
       // linen and toilet paper to weigh.
       const countModule = _normaliseCostModule(req.body?.module, 'RESTAURANT');
+      if (!(await _requireInvWrite(req, res, countModule, 2))) return;
       const db = await getTenantDb(req.params.id);
       // A count reconciles stock to what was physically found, so completing one
       // inside a closed month would move that month's closing figure after it
@@ -28109,8 +28182,8 @@ ${data.tenant.name}`;
 
   // Update one or more line items during the count.
   // Body: { items: [{ id, actual_qty }, ...] }
-  app.patch("/api/inventory/counts/:id/items", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/counts/:id/items", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM physical_counts WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const { items } = req.body;
       if (!Array.isArray(items)) return res.status(400).json({ error: "items array required" });
@@ -28144,8 +28217,8 @@ ${data.tenant.name}`;
   // Complete the count. Reconciles every line where actual_qty was filled —
   // for each non-zero variance, posts a COUNT_ADJUSTMENT movement and brings
   // ingredients.current_stock_qty in line with reality.
-  app.post("/api/inventory/counts/:id/complete", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.post("/api/inventory/counts/:id/complete", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT COALESCE(module, 'RESTAURANT') AS module FROM physical_counts WHERE id = ?", [req.params.id]), 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId!);
       const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
@@ -68322,8 +68395,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'admin-console-cto-cleanup',
+    commit_marker: 'inventory-module-permissions',
     code_features: [
+      'inventory-module-permissions  Hotel, Spa and Events share one inventory screen and the /inventory/* routes, which all required the kitchen INVENTORY tab (restaurant-only, so a hotel- or events-scoped role could never hold it): Hotel Inventory = Full showed no Add item and the API refused the write, and Events Inventory had no permission at all. New _requireInvWrite: each module answers to its own tab (HOTEL_INVENTORY, SPA_INVENTORY, new INVENTORY_EVENTS), INVENTORY still covers every module, and the module comes from the record touched (item, category, supplier link, PO, GRN items, count, period). inventoryStaff module gate admits the spa/events inventory tabs. Events Inventory is grantable in Staff Access (eventsOnly; Events-exclusive for role scope). Screen, supplier panel and month-end buttons use canWriteInventory(module).',
       'dates-ist-reversals  Four postings still took a UTC timestamp and cut it to a date, so they landed on the previous day in the early hours IST: the expense-claim cancel reversal, two hotel invoice dates and one settlement ledger date. All go through _glPostDate now.',
       'dates-ist-frontend  The app date pickers defaulted to the UTC date (yesterday between 00:00 and 05:30 IST), so an expense, payment or booking entered after midnight was dated the day before even after the server fix. New todayIST() in src/lib/utils.ts replaces all 121 toISOString today defaults in the frontend. Expense view drops orphan manual lines coming in.',
       'gl-dates-ist  Day Book showed postings on the previous day: every today in the server was new Date().toISOString().slice(0,10), the UTC date, which is yesterday between 00:00 and 05:30 IST; _glPostDate converted timestamps through UTC too; and _glEntryDate had lost the backslashes in its date pattern so it never matched. New _istDate/_todayIST (Asia/Kolkata); all server today defaults use it; timestamps become their IST calendar day. Existing mis-dated lines are not changed (repair is separate, dry run first).',

@@ -16,3 +16,17 @@ export function tabLevel(tab: string): number {
 }
 export const canWriteTab = (tab: string): boolean => tabLevel(tab) >= 2;  // create / update
 export const canDeleteTab = (tab: string): boolean => tabLevel(tab) >= 3; // delete (Full)
+
+// Inventory write access follows the module the stock belongs to, exactly as the
+// server's _requireInvWrite: the kitchen INVENTORY grant covers every module, and
+// each module's own tab covers that module. Hotel, Spa and Events share one
+// inventory screen, which used to check INVENTORY alone — so a role granted
+// "Hotel Inventory = Full" saw no Add button.
+export const INV_MODULE_TAB: Record<string, string> = {
+  RESTAURANT: 'INVENTORY', HOTEL: 'HOTEL_INVENTORY', SPA: 'SPA_INVENTORY', EVENTS: 'INVENTORY_EVENTS',
+};
+const invTab = (module?: string) => INV_MODULE_TAB[String(module || '').toUpperCase()];
+export const canWriteInventory = (module?: string): boolean =>
+  canWriteTab('INVENTORY') || (!!invTab(module) && canWriteTab(invTab(module)));
+export const canDeleteInventory = (module?: string): boolean =>
+  canDeleteTab('INVENTORY') || (!!invTab(module) && canDeleteTab(invTab(module)));
