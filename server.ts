@@ -51900,7 +51900,7 @@ ${data.tenant.name}`;
           COUNT(*) AS count,
           ROUND(AVG(lead_days), 1) AS avg_lead
         FROM (
-          SELECT GREATEST(0, EXTRACT(DAY FROM (check_in_date::date - created_at::date))::integer) AS lead_days
+          SELECT GREATEST(0, (check_in_date::date - created_at::date))::integer AS lead_days  -- date - date is already a whole number of days (EXTRACT over it errors)
           FROM room_bookings
           WHERE status <> 'CANCELLED'
             AND created_at >= NOW() - INTERVAL '365 days'
@@ -51910,7 +51910,7 @@ ${data.tenant.name}`;
       `);
       const total = buckets.reduce((s: number, r: any) => s + Number(r.count), 0);
       const avgRow: any[] = await db.query(`
-        SELECT ROUND(AVG(GREATEST(0, EXTRACT(DAY FROM (check_in_date::date - created_at::date))::integer))::numeric, 1) AS avg_days
+        SELECT ROUND(AVG(GREATEST(0, (check_in_date::date - created_at::date))::integer)::numeric, 1) AS avg_days
         FROM room_bookings WHERE status <> 'CANCELLED' AND created_at >= NOW() - INTERVAL '365 days'
       `);
       res.json({ total, avg_lead_days: avgRow[0]?.avg_days ?? 0, buckets });
@@ -68555,8 +68555,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-read-gates',
+    commit_marker: 'hotel-lead-time-500-fix',
     code_features: [
+      'hotel-lead-time-500-fix  GET /hotel/reports/booking-lead-time returned 500 for every role ("function pg_catalog.extract(unknown, integer) does not exist"): in Postgres date - date is already an integer number of days, so EXTRACT(DAY FROM …) over it errors. Found by the Hotel RBAC test opening Hotel Reports → Owner / Manager as a reports-only role; same class as the earlier /inventory/expiring fix.',
       'hotel-read-gates  Hotel / PMS RBAC test (22 Sep 2026). The probe found no write leaks, but hotelStaff ("holds SOME hotel page") was the only gate on ~70 hotel reads, so a role holding just Checklists, Service Catalogue or Concierge could read every booking and guest phone, folio and Form-C PDFs, police-enquiry and revenue reports, and the channel manager credentials, sync logs and partner invoices. requireHotelAny(pages) (mirror of requireEventsAny) now adds a page-family check: HOTEL_READ_GUESTS / DOCS / MONEY / ANALYTICS / CHANNEL / LOOKUP. Rooms, room types, availability, rates, services, settings and the public-page profile stay open to any hotel page (front-desk screens need them). UI: room status buttons, Guest Bills charge-to-room / guest-paid / mark-paid, Housekeeping start / tick / complete, Checklist Templates new / edit / activate (read-only editor) and the Direct Booking Page (read-only fieldset; saving needs Settings Edit) are hidden or disabled for a View role.',
       'xmodule-read-gates  Cross-module READ gates (docs/RBAC_HARDENING_PLAN.md RC-1). About 140 GET routes needed only a login: a role holding no page at all could read restaurant orders, invoices and revenue, the profit-and-loss, cash-flow, GST ledger and vendor ageing, every spa appointment and folio, all inventory and recipes, aggregator settlements, feedback, brand cross-location revenue, email server settings and message delivery logs. They now mirror their write routes with module-family gates: floorStaff (restaurant floor + hotel front desk), reportsStaff, inventoryReadStaff, spaStaff / spaFrontDeskStaff, voucherStaff, hotelStaff; finance statements use the finance read gate, notification config the Notifications read gate, brand admin data owner/manager/Settings-edit. Left open on purpose: my-permissions, me/*, billing-status, brand announcements banner, checklists/my, custom-roles (names only), tax-config, loyalty lookup, bill preview-totals, integrations/channels.',
       'events-settings-partial-update  PUT /events/venue-settings, /events/profile and /events/gst-settings rewrote every field they own from the body with a default for whatever was missing, so a partial or empty PUT reset the hall turnaround (to 120 min), the half-day windows and weekend days, blanked the public page title/tagline/description/contact/hero/gallery, and reset GST language mode. They now change only the fields sent; the UI always sends the whole form, so screens behave the same. Found when the Events RBAC probe sent empty PUTs as Edit-level roles on RESTO-1003.',
