@@ -19719,11 +19719,31 @@ async function startServer() {
       const tenantId = req.params.id;
       const row: any = await centralDb.get(
         `SELECT country, currency_code, currency_symbol, locale, tax_template_id,
-                service_charge_percent
+                service_charge_percent, is_gst_enabled, gst_percentage, gst_number
            FROM restaurants WHERE id = ?`, [tenantId]
       );
       if (!row) return res.status(404).json({ error: "Restaurant not found" });
       const configs = await _loadTaxConfig(tenantId, row.tax_template_id);
+      // BUG (reported live — On-Demand Invoice showed "Auto-applied taxes: GST
+      // 6.00%" while the invoice it actually generated correctly charged 5%):
+      // this endpoint was returning the raw tax_config GST row's rate_percent
+      // unmodified, but computeInvoiceTotals (the code that actually bills)
+      // has NEVER used that rate at face value since the GST single-source
+      // fix — Settings is authoritative when GST is enabled there, and a
+      // tax_config GST row's rate is only a FALLBACK for a tenant who never
+      // configured Settings GST (never a value display should show once
+      // Settings is on). Mirror computeInvoiceTotals's exact gstRate formula
+      // here so the preview and the real invoice can never disagree.
+      const _gstinTC = String(row.gst_number || '').trim();
+      const _hasGstinTC = !!_gstinTC && _gstinTC !== '0';
+      const _legacyGstOnTC = _hasGstinTC && Number(row.is_gst_enabled) === 1 && Number(row.gst_percentage || 0) > 0;
+      const _settingsGstPctTC = Math.max(0, Number(row.gst_percentage || 0));
+      const configsGstCorrected = (configs || []).map((c: any) => {
+        if (!isGstTaxRow(c) || isServiceChargeTaxRow(c)) return c;
+        const cfgGstRateTC = Math.max(0, Number(c.rate_percent || 0));
+        const gstRateTC = _legacyGstOnTC ? _settingsGstPctTC : (_hasGstinTC && cfgGstRateTC > 0 ? cfgGstRateTC : 0);
+        return { ...c, rate_percent: gstRateTC, enabled: gstRateTC > 0 ? c.enabled : 0 };
+      });
       const db = await getTenantDb(tenantId);
       const allRows: any[] = await db.query(
         "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config ORDER BY display_order ASC, id ASC"
@@ -19762,7 +19782,7 @@ async function startServer() {
         currency_symbol: row.currency_symbol || '₹',
         locale: row.locale || 'en-IN',
         tax_template_id: row.tax_template_id || 'IN_GST',
-        active_configs: (configs || []).filter(c => !isServiceChargeTaxRow(c)),
+        active_configs: configsGstCorrected.filter(c => !isServiceChargeTaxRow(c)),
         all_configs: allRows || [],              // full list (incl. disabled ST) for editor
         presets: Object.keys(TAX_PRESETS),
         country_defaults: COUNTRY_DEFAULTS,
@@ -68830,8 +68850,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'restaurant-daily-sales-chronological-order-fix',
+    commit_marker: 'tax-config-gst-badge-matches-settings',
     code_features: [
+      'tax-config-gst-badge-matches-settings  Found in the same Restaurant UI/UX sweep: the On-Demand Invoice and Edit Invoice modals Auto-applied taxes preview badge showed a stale GST rate (6.00%) while the invoice actually generated correctly charged the Settings rate (5.00%) - a recurrence of the exact field-shows-X-invoice-shows-Y bug class this codebase fixed once already for the printed invoice (gst-single-source-declutter, TC-GST-FIELD-EQUALS-PRINT). Root cause: that earlier fix only changed computeInvoiceTotals (the code that actually bills) to take the GST rate from restaurants.gst_percentage and reuse a tax_config GST row only for its CGST/SGST split - it never touched GET /tax-config, which is a SEPARATE endpoint that feeds this preview badge and was still returning the raw, unmodified tax_config row rate. The real invoice was never wrong; only this one display path was reading stale data nothing else consumed. Fixed by mirroring computeInvoiceTotals exact gstRate formula (Settings rate when GST is on there, falling back to the tax_config rows own rate only for a tenant who never configured Settings GST, zero otherwise) onto the active_configs GST row before the endpoint returns it - all_configs (the raw editor view) is untouched, since an owner editing Tax Lines should see what is really stored. TC-TAXCONFIG-GST-MATCHES-SETTINGS.',
       'restaurant-daily-sales-chronological-order-fix  Two bugs found in an end-to-end UI/UX sweep of the Restaurant module (owner-requested), both fixed. (1) Restaurant Reports Daily Sales table, and the Revenue Trend chart on the Full KPI Dashboard (same GET .../reports response feeds both), listed dates as "Fri Aug 28, Fri Sep 04, Fri Sep 11, ..., Mon Aug 24, ..." - alphabetically by weekday name, not chronologically - making a trend report unreadable. Root cause: Postgres returns a TIMESTAMP column (orders.created_at) as a JS Date object, not a string; the aggregation loop did String(o.created_at).slice(0, 10), and String() on a Date calls Date.prototype.toString() ("Fri Aug 28 2026 00:00:00 GMT+..."), so the slice grabbed a weekday+month+day fragment instead of an ISO date, and the later chronological .sort() then sorted that fragment alphabetically. The monthly bucket had the identical bug (String(...).slice(0,7) gave "Fri Aug" instead of "2026-08" - the Revenue Trend chart monthly view showed that raw garbled string as the bar label, unsliced). Fixed by reusing dt (a real Date already computed one line above for the weekly bucket, which was unaffected because it already correctly called .toISOString()) instead of re-stringifying the raw column. (2) The Orders tab Refresh button read "REFRESH ON DEMAND DATABASE QUERIES" - a stray technical phrase concatenated onto the label (the Hindi and Punjabi translations of the same key were already correctly just "Refresh", confirming the English source string itself was the bug) - changed to plain "Refresh". TC-REPT-DAILY-SALES-CHRONOLOGICAL (live, asserts every date/month is a real calendar value in ascending order).',
       'hotel-bookings-list-loading-flash-fix  CRITICAL BUG reported live (client screenshot): Hotel Bookings > Reservations briefly showed "No bookings yet. Create your first booking above." even though real bookings were on file and the API call underneath had returned them correctly - a client-only rendering bug, never a data or server problem. Root cause: hotelBookings starts as an empty array and fetchHotelBookings() is async, so the list is empty for however long the request takes on every tab open, tab switch back to Hotel Bookings, and Search click; the empty-state message was gated only on displayedBookings.length === 0 with no loading guard, so it could render during that window and read as "you have no bookings" instead of "still loading". A hotelLoading state already existed for exactly this but was dead code - declared, never set, never read. Wired it in: fetchHotelBookings() now sets it true before the request and false in a finally block (covering every call site - initial tab load, Search, after check-in/checkout/cancel/settle, etc., since they all go through this one function), and the bookings table now shows "Loading bookings..." while true, before falling through to the real empty-state or the results. TC-HOTEL-BOOKINGS-LOADING-GUARD.',
       'object-detail-documents-file-picker-fix  Client feedback on the new Documents node (screenshot, same day as object-detail-documents-node): the file picker rendered as the raw browser-default "Choose File / No file chosen" control - no button styling, no clear affordance to click. This is the exact bug GuestDocumentsWidget (hotel check-in ID-proof upload) already fixed once with a hidden input plus a styled clickable label - DocumentsView (src/components/ObjectDetail.tsx) reintroduced it with a plain unstyled input. Applied the same established fix: input hidden with sr-only, a styled dashed-border label with a paperclip icon and "Choose a file..." placeholder text is the actual click target, the picked filename mirrors into React state so the label updates. Also tidied the Documents table: the File column used to repeat the same filename already shown in the Document column whenever no custom label was set (redundant clutter visible in the screenshot); it now only shows a value when a label was given and differs from the filename, otherwise a dash.',
