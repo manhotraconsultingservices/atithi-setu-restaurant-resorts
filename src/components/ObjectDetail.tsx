@@ -266,6 +266,15 @@ function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // Same fix as GuestDocumentsWidget (client report: "Choose file is showing
+  // in normal text") — the native <input type="file"> renders the browser's
+  // default ugly "Choose File / No file chosen" text with no button styling
+  // and no clear affordance to pick a file. Hide the input and click-through
+  // a styled <label htmlFor>; mirror the picked filename into state so React
+  // re-renders the label text. useId() keeps the id collision-free if more
+  // than one DocumentsView is ever mounted on a page at once.
+  const fileInputId = React.useId();
+  const [pickedFileName, setPickedFileName] = useState('');
 
   const reload = () => { setRows(null); setErr(''); apiGet(url, token).then(r => setRows(Array.isArray(r) ? r : (r?.rows || []))).catch(e => setErr(e.message)); };
   useEffect(reload, [url, nonce]);
@@ -282,7 +291,7 @@ function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url
       const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
       const b = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(b?.error || `HTTP ${r.status}`);
-      setLabel(''); if (fileRef.current) fileRef.current.value = '';
+      setLabel(''); setPickedFileName(''); if (fileRef.current) fileRef.current.value = '';
       reload(); onChanged?.();
     } catch (e: any) { setUploadErr(e.message || 'Upload failed'); }
     finally { setUploading(false); }
@@ -306,7 +315,11 @@ function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url
         <Download size={12} className="shrink-0" />{r.label || r.file_name || 'Document'}
       </a>
     ) },
-    { key: 'file_name', label: 'File', searchable: true, getValue: r => r.file_name || '', render: r => <span className="text-[11px] text-[#6b5d52]">{r.file_name || '—'}</span> },
+    // Only shows a value when a custom label was given (so this adds real
+    // information — the actual filename behind the label). When no label was
+    // set, the Document column already shows the filename, so repeating it
+    // here would just be visual noise.
+    { key: 'file_name', label: 'File', searchable: true, getValue: r => r.file_name || '', render: r => (r.label && r.file_name && r.label !== r.file_name) ? <span className="text-[11px] text-[#6b5d52]">{r.file_name}</span> : <span className="text-[#c9bcae]">—</span> },
     { key: 'size_bytes', label: 'Size', sortable: true, align: 'right', getValue: r => Number(r.size_bytes || 0), render: r => <span className="text-[11px] text-[#6b5d52]">{humanFileSize(r.size_bytes)}</span> },
     { key: 'uploaded_by_name', label: 'Added by', sortable: true, filterable: true, filterType: 'text', getValue: r => r.uploaded_by_name || r.uploaded_by || '', render: r => <span className="text-[11px] text-[#6b5d52]">{r.uploaded_by_name || r.uploaded_by || '—'}</span> },
     { key: 'created_at', label: 'Added', sortable: true, getValue: r => r.created_at || '', render: r => <span className="text-[11px] text-[#6b5d52] whitespace-nowrap">{timeAgo(r.created_at)}</span> },
@@ -319,16 +332,26 @@ function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url
     <div className="space-y-3">
       {canManage && (
         <form onSubmit={upload} className={CARD + ' flex flex-wrap items-end gap-2'}>
-          <div className="flex-1 min-w-[160px]">
+          <div className="flex-1 min-w-[200px]">
             <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">File</label>
-            <input ref={fileRef} type="file" className="text-xs w-full" />
+            <input
+              ref={fileRef} id={fileInputId} type="file" className="sr-only"
+              onChange={e => setPickedFileName(e.target.files?.[0]?.name || '')}
+            />
+            <label
+              htmlFor={fileInputId}
+              className="cursor-pointer w-full flex items-center gap-2 px-3 py-2 rounded-xl border border-dashed border-brand/30 bg-[#faf7f2] text-xs font-semibold text-[#3d3128] hover:bg-[#f0e9df] hover:border-brand/50 transition-colors"
+            >
+              <Paperclip size={13} className="shrink-0 text-brand" />
+              <span className="truncate">{pickedFileName || 'Choose a file…'}</span>
+            </label>
           </div>
           <div className="flex-1 min-w-[160px]">
             <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Label (optional)</label>
             <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Signed contract"
               className="w-full text-xs border border-[#e8dccf] rounded-xl px-3 py-2 outline-none focus:ring-2 ring-brand/20" />
           </div>
-          <button type="submit" disabled={uploading} className="px-4 py-2 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50 inline-flex items-center gap-1.5">
+          <button type="submit" disabled={uploading} className="px-4 py-2 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50 inline-flex items-center gap-1.5 shrink-0">
             <Paperclip size={13} />{uploading ? 'Uploading…' : 'Attach document'}
           </button>
           {uploadErr && <p className="w-full text-[11px] text-rose-600">{uploadErr}</p>}
