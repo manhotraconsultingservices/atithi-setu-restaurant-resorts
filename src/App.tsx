@@ -22477,7 +22477,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               className="px-4 py-2 bg-white border border-brand/10 rounded-2xl text-[#1a1208] hover:bg-[#faf7f2] transition-all flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
             >
               <RefreshCw size={16} className={cn(loadingOrders && "animate-spin")} />
-              {tr('Refresh On demand database queries')}
+              {tr('Refresh')}
             </button>
           </div>
 
