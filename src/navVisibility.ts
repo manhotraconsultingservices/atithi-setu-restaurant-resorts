@@ -75,9 +75,6 @@ export const ACCOUNTS_MODULE_TABS = [
 /** Workforce tabs sold as the People module. Staff Directory stays outside it. */
 export const PEOPLE_MODULE_TABS = ['ATTENDANCE', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'HR_PAYROLL'] as const;
 
-/** Built-in ops roles that keep Status Board without an explicit grant. */
-const STATUS_BOARD_OPS_ROLES = ['FRONT_DESK', 'HOUSEKEEPING', 'CONCIERGE', 'MAINTENANCE', 'EVENTS_MANAGER'];
-
 /**
  * Decide whether a nav tab is visible for a role. This mirrors, branch for
  * branch, the isVisible() closure in App.tsx — keep the two in lockstep (the
@@ -116,11 +113,14 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   // Checklist Board — owner / MANAGER / explicit grant.
   if (id === 'CHECKLIST_BOARD') return isOwnerOrAdmin || currentRole === 'MANAGER' || strictGranted(id);
 
-  // Status Board — module-gated + owner/manager, built-in ops roles, or grant.
+  // Status Board — module-gated + owner/manager, or an explicit grant. Retired
+  // built-in ops roles (FRONT_DESK, HOUSEKEEPING, CONCIERGE, MAINTENANCE,
+  // EVENTS_MANAGER) used to see this without a grant (22 Sep 2026: every staff
+  // member is a custom role now, so the grant is what decides it, same as any
+  // other tab).
   if (id === 'STATUS_BOARD') {
     if (!(isHotelEnabled || isEventsEnabled)) return false;
     if (isOwnerOrAdmin || currentRole === 'MANAGER') return true;
-    if (STATUS_BOARD_OPS_ROLES.includes(currentRole || '')) return true;
     return strictGranted(id);
   }
 

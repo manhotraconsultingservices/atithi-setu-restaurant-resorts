@@ -8620,7 +8620,11 @@ const isPlatformStaff = (req: AuthRequest, res: Response, next: NextFunction) =>
 //
 // Per-endpoint overrides are easy: `requireRole(['SUPER_ADMIN', 'OWNER'])`
 // on truly admin-only routes (e.g. delete-credentials).
-const HOTEL_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE'];
+// FRONT_DESK / CONCIERGE dropped (22 Sep 2026): every hotel operator is a CUSTOM
+// role now, admitted below via its own tab grant (requireModuleAccess checks the
+// matrix for ANY role string, built-in or custom) — these built-in names carry no
+// special hotel access any more, matching "get rid of hardcoded roles".
+const HOTEL_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 
 function requireRole(allowedRoles: string[]) {
   const allowSet = new Set(allowedRoles.map(r => r.toUpperCase()));
@@ -8672,7 +8676,9 @@ function requireRole(allowedRoles: string[]) {
 //   integrity or system config — manual invoice creation, GST settings,
 //   loyalty config, payroll, brand-level templates. Excludes CHEF / WAITER
 //   / CASHIER because those are operator roles, not admin roles.
-const RESTAURANT_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'CASHIER', 'WAITER', 'CHEF'];
+// CASHIER / WAITER / CHEF dropped (22 Sep 2026): admitted below via their own
+// custom-role tab grant instead of an unconditional pass for the built-in name.
+const RESTAURANT_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 const RESTAURANT_ADMIN_ROLES       = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 
 // Restaurant-side grantable tabs. `restaurantStaff` / `restaurantAdmin` were plain
@@ -8751,13 +8757,17 @@ const restaurantAdmin = requireModuleAccess(['SETTINGS'], RESTAURANT_ADMIN_ROLES
 // role the owner granted a Spa tab. Hotel front-desk / concierge can book spa
 // appointments for hotel guests; restaurant cashiers handle spa checkout. Tab-level
 // permissions (SPA_*) do the fine-grained access control on top.
-const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST'];
+// FRONT_DESK / CONCIERGE / CASHIER / WAITER / CHEF / THERAPIST dropped (22 Sep
+// 2026): admitted below via their own custom-role Spa tab grant.
+const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 const SPA_TAB_IDS = ['SPA_CALENDAR', 'SPA_APPOINTMENTS', 'SPA_CATALOG', 'SPA_RESOURCES', 'SPA_CLIENTS', 'SPA_PACKAGES', 'SPA_REPORTS', 'SPA_BILLING', 'SPA_SETTINGS', 'SPA_INVENTORY', 'SPA_CLINICAL'];
 const spaStaff = requireModuleAccess(SPA_TAB_IDS, SPA_OPERATIONAL_ROLES, 'Spa & Wellness');
 
 // Events & Convention mutations: open to operational roles plus the dedicated
 // EVENTS_MANAGER role. Tab-level permissions (EVENTS_*) refine access on top.
-const EVENTS_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'EVENTS_MANAGER'];
+// FRONT_DESK / CONCIERGE / CASHIER / EVENTS_MANAGER dropped (22 Sep 2026):
+// admitted below via their own custom-role Events tab grant.
+const EVENTS_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 // eventsStaff is defined below as a permission-aware module gate (requireModuleAccess).
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -9268,11 +9278,16 @@ const _DENY_BY_DEFAULT_PERMS = { __complete__: 1 };
 
 // Built-in / system roles that must NEVER be auto-healed to a baseline — the
 // owner controls these explicitly, and an all-None here can be deliberate.
-const _SYSTEM_ROLE_SET = new Set([
-  'OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN', 'SALES_REP', 'MANAGER', 'GUEST', 'CUSTOMER',
-  'WAITER', 'CHEF', 'CASHIER', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'THERAPIST',
-  'EVENTS_MANAGER',
-]);
+// Retired the operational built-ins (WAITER, CHEF, CASHIER, FRONT_DESK,
+// HOUSEKEEPING, MAINTENANCE, CONCIERGE, THERAPIST, EVENTS_MANAGER) from this set
+// (22 Sep 2026) — every live account on one of those literal strings was migrated
+// to an equivalent CUSTOM role. What remains here are genuine non-permission
+// identities: the property owner, the platform roles, and the guest/partner
+// portals. If a stray account is ever found on one of the retired names again,
+// treating it as "not a system role" is the SAFE direction — it then goes
+// through the same deny-by-default self-heal as any other misconfigured custom
+// role instead of silently keeping whatever the old grandfather logic gave it.
+const _SYSTEM_ROLE_SET = new Set(['OWNER', 'SUPER_ADMIN', 'CTO', 'ADMIN', 'SALES_REP', 'MANAGER', 'GUEST', 'CUSTOMER']);
 
 // Look up a role in the tenant custom_roles table (by id OR name, case-insensitive).
 // Returns its scope if it IS a custom role, or null if it is not (so callers can
@@ -68605,9 +68620,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'admin-staff-role-reassign',
+    commit_marker: 'retire-builtin-operational-roles',
     code_features: [
-      'admin-staff-role-reassign  New platform-admin endpoint PATCH /api/admin/restaurants/:id/staff/:staffId/role: changes one staff member role at ANY tenant. The existing owner-side PATCH /api/owner/staff/:id only ever operates on the callers own tenant, so a platform admin had no way to move a staff account onto an equivalent custom role at a tenant they hold no owner credentials for. Added ahead of the hardcoded-operational-role retirement so the live accounts still on WAITER/CHEF/HOUSEKEEPING can be migrated to custom roles before that fallback is removed.',
+      'retire-builtin-operational-roles  Get rid of hardcoded roles (22 Sep 2026, explicit request): every staff member is now a CUSTOM role the owner creates and grants access to; the built-in operational role strings WAITER, CHEF, CASHIER, FRONT_DESK, HOUSEKEEPING, MAINTENANCE, CONCIERGE, THERAPIST and EVENTS_MANAGER carry no special access any more. OWNER and MANAGER stay the two owner-equivalent identities per documented product behaviour (unchanged). HOTEL_OPERATIONAL_ROLES / RESTAURANT_OPERATIONAL_ROLES / SPA_OPERATIONAL_ROLES / EVENTS_OPERATIONAL_ROLES shrunk to just SUPER_ADMIN/CTO/OWNER/MANAGER (a custom role still gets in via its own tab grant, checked independently); _SYSTEM_ROLE_SET dropped the same names so a stray account on one is treated as a misconfigured custom role (deny-by-default) instead of silently keeping the old grandfather; the frontend Home router picks ChefDashboard/WaiterDashboard/HotelStaffDashboard/TherapistDashboard purely from the assigned roles tab grants (a new kitchen-shaped rule added: Orders without Monitor/QR); STATUS_BOARD_OPS_ROLES removed from navVisibility.ts. Migrated ahead of this deploy: the 15 live accounts still on a literal built-in role string (11 non-Manager, across 3 tenants) were moved to an equivalent custom role reproducing their exact prior matrix (or, where none existed, a standard role default), using a new admin endpoint (marker admin-staff-role-reassign) built for exactly this because the owner-side staff PATCH cannot cross tenants. Verified live: 0 active accounts remain on a retired role string.',
       'staff-access-role-name-dedupe  Reported live: a client tenant had THREE custom roles all named PCC Manager, each with its own permission matrix. The owner edited one believing it was the only one (granting Full on Event Venues), while the staff account named PCC Manager was actually assigned a DIFFERENT role of the same name that still had only View, so the grant never took effect and looked broken. POST /custom-roles now refuses a second active role whose trimmed, case-insensitive name matches an existing one (409, names the existing role); a soft-deleted role frees its name. The create/edit form in Staff Access surfaces that error instead of silently closing. The Staff Access grid also shows each role columns staff count and flags any column whose name collides with another (with its id) so an existing ambiguous pair is visible without waiting for a support ticket. TC-RBAC-DUPE-ROLE-NAME.',
       'public-booking-page-own-permission  The Direct Booking Page save needed Edit on SETTINGS, a tab the page itself never renders — every field this route writes (hero, gallery, amenities, brand colours, date format, GST-inclusive toggle, occupancy policy, UPI payout) is edited ONLY inside the PUBLIC_BOOKING_PAGE tab (the old Settings panel is dead code, `{false && (...)}`, replaced by a redirect card). property-profile PATCH, property-gallery POST/DELETE, room-types/:id/gallery POST/DELETE and hotel/upload-image now require PUBLIC_BOOKING_PAGE Edit/Full instead of SETTINGS, so a role granted just that page can save it.',
       'roleless-allowlist-2-routes  Two routes still used a fixed requireRole allowlist (OWNER / MANAGER), which refuses every custom role even when the page is granted: PUT /spa/profile (the Spa Settings save, whose screen already gates on SPA_SETTINGS) and GET /hotel/channel-security-config (the Channel Manager screen). Now spaStaff + requireTabAction SPA_SETTINGS UPDATE and hotelStaff + requireTabAccess CHANNEL_MANAGER. Found by the Hotel RBAC test (a Channel Manager Edit role got a 403 opening its own page).',

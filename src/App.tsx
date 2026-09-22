@@ -2435,21 +2435,15 @@ export default function App() {
 
   // Roles with a special top-level dashboard that is NOT the permission-aware
   // OwnerDashboard: platform roles (SUPER_ADMIN/CTO/SALES_REP) and guest/partner
-  // roles (CUSTOMER/OTA/AGENT). Any authenticated role NOT in this set — an
-  // owner-created CUSTOM role (id `CUSTOM_*`) — falls through to OwnerDashboard.
-  const BUILTIN_DASHBOARD_ROLES = ['SUPER_ADMIN', 'CTO', 'SALES_REP', 'OWNER', 'MANAGER', 'CHEF', 'WAITER', 'CASHIER', 'THERAPIST', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'CUSTOMER', 'OTA', 'AGENT'];
+  // roles (CUSTOMER/OTA/AGENT). Every operational staff role (WAITER, CHEF,
+  // CASHIER, THERAPIST, FRONT_DESK, HOUSEKEEPING, MAINTENANCE, CONCIERGE) was
+  // retired as a built-in identity (22 Sep 2026) — access and dashboard choice
+  // now come entirely from the owner-created CUSTOM role's tab grants (id
+  // `CUSTOM_*`), so those names carry no special meaning here any more and fall
+  // through to OwnerDashboard like any other custom role.
+  const BUILTIN_DASHBOARD_ROLES = ['SUPER_ADMIN', 'CTO', 'SALES_REP', 'OWNER', 'MANAGER', 'CUSTOMER', 'OTA', 'AGENT'];
   const isCustomRoleUser = !!role && !BUILTIN_DASHBOARD_ROLES.includes(role);
-
-  // OOTB (out-of-the-box) OPERATIONAL staff roles. These used to render their
-  // own fixed dashboards (ChefDashboard / WaiterDashboard / TherapistDashboard /
-  // HotelStaffDashboard) that IGNORED the Staff-Access permission matrix — so
-  // granting/revoking tabs for these roles did nothing ("OOTB roles not
-  // working"). They now render the SAME permission-aware OwnerDashboard as every
-  // other operator, which filters the left nav by allowed_tabs. Each of these
-  // roles keeps its curated real-time board as its HOME landing (rendered inside
-  // OwnerDashboard's content), so no operational function is lost.
-  const OOTB_STAFF_DASHBOARD_ROLES = ['CHEF', 'WAITER', 'CASHIER', 'THERAPIST', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE'];
-  const usesOwnerDashboard = role === 'OWNER' || role === 'MANAGER' || isCustomRoleUser || OOTB_STAFF_DASHBOARD_ROLES.includes(role || '');
+  const usesOwnerDashboard = role === 'OWNER' || role === 'MANAGER' || isCustomRoleUser;
 
   return (
     <div className="min-h-screen bg-[#faf7f2]">
@@ -17410,32 +17404,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </p>
         </div>
       ) : activeTab === 'HOME' ? (
-        // OOTB operational staff roles keep their curated real-time board as
-        // their HOME landing — kitchen queue (CHEF), order/tables/waiter-calls
-        // board (WAITER/CASHIER), today's schedule (THERAPIST), arrivals /
-        // guest-requests worklist (FRONT_DESK/HOUSEKEEPING/MAINTENANCE/
-        // CONCIERGE). So routing them through this permission-aware shell (which
-        // fixes "OOTB roles not working" by making Staff Access drive their nav)
-        // costs them nothing operationally. Owner/Manager/custom get the launchpad.
-        currentRole === 'CHEF' ? (
+        // Every staff member is a CUSTOM role now (22 Sep 2026 — hardcoded operational
+        // role strings retired: WAITER / CHEF / CASHIER / THERAPIST / FRONT_DESK /
+        // HOUSEKEEPING / MAINTENANCE / CONCIERGE no longer carry any built-in meaning).
+        // The curated real-time board a role lands on — kitchen queue, order/tables
+        // board, today's schedule, arrivals/guest-requests worklist — is decided
+        // ENTIRELY by which tabs the owner granted, never by what the role is called.
+        // Owner / Manager (still owner-equivalent identities, not a permission level)
+        // and a custom role with no matching operational shape get the launchpad.
+        (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
+              && allowedTabs.includes('ORDERS') && !allowedTabs.includes('MONITOR') && !allowedTabs.includes('QR')
+              && !(allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
+          // Kitchen-shaped: Orders (which doubles as the KDS) without the table/QR
+          // signals of a front-of-house role — the kitchen ticket queue, not the
+          // order/tables board.
           <ChefDashboard restaurantId={restaurantId!} token={token!} />
-        ) : (currentRole === 'WAITER' || currentRole === 'CASHIER') ? (
-          <WaiterDashboard restaurantId={restaurantId!} token={token!} />
-        ) : currentRole === 'THERAPIST' ? (
-          <TherapistDashboard restaurantId={restaurantId!} token={token!} />
-        ) : (currentRole === 'FRONT_DESK' || currentRole === 'HOUSEKEEPING' || currentRole === 'MAINTENANCE' || currentRole === 'CONCIERGE') ? (
-          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
         ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
               && (allowedTabs.includes('MONITOR') || allowedTabs.includes('ORDERS') || allowedTabs.includes('QR'))
               && !(allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
           // A CUSTOM role granted the Command Centre / restaurant-ops tabs lands on the
-          // SAME live board a built-in Waiter does — so e.g. a custom "Captain" role sees
-          // its dashboard on Home instead of the generic launchpad. Leak-safe: it only
+          // same live board — so e.g. a custom "Captain" or "Waiter" role sees its
+          // dashboard on Home instead of the generic launchpad. Leak-safe: it only
           // renders a board whose data the role can already reach via its grants.
           <WaiterDashboard restaurantId={restaurantId!} token={token!} />
         ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
               && (allowedTabs.includes('HOTEL_BOOKINGS') || allowedTabs.includes('SERVICE_REQUESTS') || allowedTabs.includes('ROOMS') || allowedTabs.includes('FOLIOS'))) ? (
-          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} />
+          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={currentRole} canManageBookings={allowedTabs.includes('HOTEL_BOOKINGS')} />
         ) : (!!currentRole && currentRole.toUpperCase().startsWith('CUSTOM_') && Array.isArray(allowedTabs)
               && (allowedTabs.includes('SPA_CALENDAR') || allowedTabs.includes('SPA_APPOINTMENTS'))
               // …only when spa is the role's PRIMARY function. The therapist "My
@@ -49687,8 +49681,13 @@ const HsdBookingCard: React.FC<{ b: any }> = ({ b }) => {
 const HsdEmpty: React.FC<{ msg: string }> = ({ msg }) =>
   <div className="text-center py-12 text-gray-400 text-sm">{msg}</div>;
 
-function HotelStaffDashboard({ restaurantId, token, userRole }: {
+function HotelStaffDashboard({ restaurantId, token, userRole, canManageBookings }: {
   restaurantId: string; token: string; userRole: string;
+  // Whether the assigned role holds HOTEL_BOOKINGS — decides the fuller arrivals /
+  // departures / in-house board vs. the simpler service-requests-only board. Used
+  // to be a hardcoded FRONT_DESK-vs-everyone-else role check; every staff member
+  // is a custom role now, so the caller derives this from the actual grant.
+  canManageBookings: boolean;
 }) {
   // IST calendar date (en-CA → YYYY-MM-DD), matching the server's stats endpoint.
   // Was todayIST() — a UTC date that never === the
@@ -49696,17 +49695,11 @@ function HotelStaffDashboard({ restaurantId, token, userRole }: {
   // JS Date → ".....T00:00:00.000Z"), so Arrivals/Departures always read 0.
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
-  const ROLE_META: Record<string, { label: string; emoji: string; color: string }> = {
-    FRONT_DESK:   { label: 'Front Desk',   emoji: '🛎️',  color: 'amber' },
-    HOUSEKEEPING: { label: 'Housekeeping', emoji: '🛏️',  color: 'teal'  },
-    MAINTENANCE:  { label: 'Maintenance',  emoji: '🔧',   color: 'slate' },
-    CONCIERGE:    { label: 'Concierge',    emoji: '🎩',  color: 'rose'  },
-  };
-  // Custom roles (CUSTOM_<NAME>_<ts>) aren't in ROLE_META — never show the raw
-  // id ("CUSTOM_MANAGER_MTGS99CJ Dashboard"); prettyRoleLabel yields "Manager".
-  const meta = ROLE_META[userRole] || { label: prettyRoleLabel(userRole) || userRole, emoji: '👤', color: 'gray' };
+  // Never show the raw role id ("CUSTOM_MANAGER_MTGS99CJ Dashboard");
+  // prettyRoleLabel yields the owner-given name ("Manager").
+  const meta = { label: prettyRoleLabel(userRole) || userRole, emoji: '👤', color: 'gray' };
 
-  const isFrontDesk = userRole === 'FRONT_DESK';
+  const isFrontDesk = canManageBookings;
 
   type SrTab = 'OPEN' | 'IN_PROGRESS' | 'DONE';
   type BkTab = 'ARRIVALS' | 'DEPARTURES' | 'INHOUSE' | 'REQUESTS';
