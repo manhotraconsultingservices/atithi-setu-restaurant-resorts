@@ -33,6 +33,7 @@ export function StatusBoard({ restaurantId, token, isEventsEnabled, onOpenRoom }
   const api = useCallback(makeApi(restaurantId, token), [restaurantId, token]);
   const [rooms, setRooms] = useState<any[]>([]);
   const [venues, setVenues] = useState<any[]>([]);
+  const [roomTypeNames, setRoomTypeNames] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState('');
@@ -40,12 +41,23 @@ export function StatusBoard({ restaurantId, token, isEventsEnabled, onOpenRoom }
   const load = useCallback(async () => {
     setLoading(true); setErr('');
     try {
-      const [r, v] = await Promise.all([
+      const [r, v, rt] = await Promise.all([
         api('/hotel/rooms').catch(() => []),
         isEventsEnabled ? api('/events/venues').catch(() => []) : Promise.resolve([]),
+        api('/hotel/room-types').catch(() => []),
       ]);
       setRooms(Array.isArray(r) ? r : []);
       setVenues(Array.isArray(v) ? v.filter((x: any) => Number(x.is_active) !== 0) : []);
+      // Resolve a room's category via room_types by type_id ONLY — never the
+      // legacy room.type free-text column (holds a stale default for rooms
+      // recategorised after the Room Types master shipped; see the identical
+      // comment in App.tsx's computeOtaInventoryMatrix). Without this, a room
+      // whose type_id points at a newer auto-generated room type ("RTYPE-...")
+      // fell all the way through room.type || type_id || 'Room' and showed
+      // that raw internal id as its category — reported live on Room 101.
+      const names = new Map<string, string>();
+      for (const t of (Array.isArray(rt) ? rt : [])) names.set(String(t.id), t.name);
+      setRoomTypeNames(names);
     } catch (e: any) { setErr(e?.message || 'Failed to load'); }
     finally { setLoading(false); }
   }, [api, isEventsEnabled]);
@@ -125,7 +137,7 @@ export function StatusBoard({ restaurantId, token, isEventsEnabled, onOpenRoom }
             <div key={floor}>
               <h3 className="text-xs font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Floor {floor} <span className="text-[#c4b8ab]">· {list.length}</span></h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2.5">
-                {list.map(rm => <Tile key={rm.id} kind="room" item={rm} sub={`${rm.type || rm.type_id || 'Room'}`} />)}
+                {list.map(rm => <Tile key={rm.id} kind="room" item={rm} sub={roomTypeNames.get(String(rm.type_id)) || 'Room'} />)}
               </div>
             </div>
           ))}

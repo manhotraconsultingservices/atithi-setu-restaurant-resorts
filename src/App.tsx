@@ -28866,7 +28866,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     ['Booking ID', 'Guest', 'Nationality', 'ID Proof', 'Room', 'Check-in', 'Check-out', 'Phone', 'Form-C Status'],
                     complianceList.map((b: any) => [
                       b.id || '', b.guest_name || '', b.guest_nationality || '',
-                      b.guest_id_proof || '', b.room_name || b.room_id || '',
+                      b.guest_id_proof || '', b.room_name || '(room record removed)',
                       String(b.check_in_date || '').slice(0, 10),
                       String(b.check_out_date || '').slice(0, 10),
                       b.guest_phone || '',
@@ -28897,7 +28897,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <div className="text-[11px] text-[#9c8e85]">{b.guest_id_proof || 'ID not provided'}</div>
                       </td>
                       <td className="px-4 py-3 text-[#3d3128]">{b.guest_nationality}</td>
-                      <td className="px-4 py-3 text-[#3d3128]">{b.room_name || b.room_id}</td>
+                      {/* On this compliance/FRRO screen a raw internal room
+                          id must never reach staff — they could file it as
+                          the room number on an official Form-C. A booking's
+                          room can end up unresolvable if that room was later
+                          deleted (its LEFT JOIN comes back null); say so
+                          plainly instead of leaking the id (reported live). */}
+                      <td className="px-4 py-3 text-[#3d3128]">{b.room_name || '(room record removed)'}</td>
                       <td className="px-4 py-3 text-xs text-[#3d3128]">
                         {formatDateForTenant(b.check_in_date, restaurant?.date_format)} →<br />
                         {formatDateForTenant(b.check_out_date, restaurant?.date_format)}
@@ -40644,7 +40650,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {odChargeToRoom && (
                               <p className="text-[10px] text-[#1e3a5f] font-semibold pt-1 flex items-start gap-1 leading-snug">
                                 <BedDouble size={11} className="shrink-0 mt-0.5" />
-                                <span>Posts to {odCtrRoom ? `Room ${odCtrRoom.room_number || odCtrRoom.room_name || ''}${odCtrRoom.guest_name ? ` · ${odCtrRoom.guest_name}` : ''}` : 'a guest room'} — hotel F&amp;B tax is added on the folio.</span>
+                                <span>Posts to {odCtrRoom ? `${odCtrRoom.room_name || `Room ${odCtrRoom.room_number || ''}`}${odCtrRoom.guest_name ? ` · ${odCtrRoom.guest_name}` : ''}` : 'a guest room'} — hotel F&amp;B tax is added on the folio.</span>
                               </p>
                             )}
                             {!odChargeToRoom && p.usedLegacyGst && (
@@ -45525,7 +45531,14 @@ const PendingRoomOrdersAlert: React.FC<{
             <div key={o.id} className="bg-white rounded-2xl border border-amber-200 p-3 flex flex-wrap items-center gap-3">
               <div className="flex-1 min-w-[220px]">
                 <div className="text-sm font-semibold text-[#1a1208]">
-                  {o.room_name ? `Room ${o.room_name}` : (o.table_number ? `Table ${o.table_number}` : (o.room_id || '—'))}
+                  {/* room_name is the owner's own room name/number (already
+                      reads "Room 101" when that's how the property named it —
+                      see the identical convention at bd.room_name a few
+                      thousand lines up) — never prepend "Room " to it, or a
+                      property whose room names already say "Room" doubles up
+                      ("Room Room 101", reported live). Only a bare fallback
+                      (table number / raw id) needs a label prefix. */}
+                  {o.room_name || (o.table_number ? `Table ${o.table_number}` : (o.room_id || '—'))}
                   {o.current_guest_name && <span className="ml-2 text-[11px] font-normal text-[#6b5d52]">· {o.current_guest_name}</span>}
                 </div>
                 <div className="text-[11px] text-[#6b5d52] mt-0.5">{summarize(o.items)}</div>
@@ -49789,7 +49802,10 @@ const HsdSrCard: React.FC<{ sr: any; updatingId: string | null; onUpdate: (id: s
             {sr.priority && sr.priority !== 'NORMAL' && (
               <span className={`text-xs px-1.5 py-0.5 rounded ${HSD_PRIORITY_COLORS[sr.priority] || ''}`}>{sr.priority}</span>
             )}
-            <span className="text-xs text-gray-400">{sr.room_name ? `Room ${sr.room_name}` : 'No room'}</span>
+            {/* room_name is already the full owner-set room name/number
+                (e.g. "Room 101") — never re-prefix it with "Room ", or a
+                property whose room names already say "Room" doubles up. */}
+            <span className="text-xs text-gray-400">{sr.room_name || 'No room'}</span>
           </div>
           <p className="font-medium text-gray-800 mt-1 truncate">{sr.category || 'Request'}</p>
           {sr.description && <p className="text-gray-500 text-xs mt-0.5 line-clamp-2">{sr.description}</p>}
@@ -49816,7 +49832,7 @@ const HsdBookingCard: React.FC<{ b: any }> = ({ b }) => {
         <div className="flex-1 min-w-0">
           <p className="font-medium text-gray-800 truncate">{b.guest_name || 'Guest'}</p>
           <p className="text-xs text-gray-500 mt-0.5">
-            {b.room_name ? `Room ${b.room_name}` : 'Room TBD'}
+            {b.room_name || 'Room TBD'}
             {b.room_category ? ` · ${b.room_category}` : ''}
           </p>
           <p className="text-xs text-gray-400 mt-0.5">
@@ -52763,7 +52779,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         ...(paymentMethod === 'CHARGE_TO_ROOM' && roomInfo ? {
           room_id: roomInfo.room_id,
           booking_id: roomInfo.booking_id,
-          table_number: roomInfo.room_name ? `Room ${roomInfo.room_name}` : tableName,
+          table_number: roomInfo.room_name || tableName,
         } : {}),
       };
 
@@ -61903,7 +61919,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                   disabled={!selectedRoom || charging}
                   className="flex-1 py-3 rounded-xl bg-brand text-white text-xs font-bold uppercase tracking-widest hover:bg-brand-dark disabled:opacity-50 active:scale-[0.98] transition-all shadow-sm"
                 >
-                  {charging ? '…Charging' : selectedRoom ? `🏨 Charge Bill to Room ${selectedRoom.room_number || selectedRoom.room_name || ''}` : 'Select a room above'}
+                  {charging ? '…Charging' : selectedRoom ? `🏨 Charge Bill to ${selectedRoom.room_name || `Room ${selectedRoom.room_number || ''}`}` : 'Select a room above'}
                 </button>
               ) : !confirmClose ? (
                 <button
