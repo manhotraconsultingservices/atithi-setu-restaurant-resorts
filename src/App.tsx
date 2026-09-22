@@ -15971,6 +15971,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // ─── Phase 2 & 3: bookings, folios, compliance, analytics ────────────────
   const fetchHotelBookings = async (opts?: { search?: string; status?: string; from?: string; to?: string }) => {
     if (!isHotelEnabled) return;
+    // CRITICAL BUG FIX (reported live): hotelBookings starts as [] and this
+    // fetch is async, so "No bookings yet" (gated only on length === 0) could
+    // flash on every page load / search — even with real bookings on file —
+    // for however long the request takes. hotelLoading existed as dead state
+    // (declared, never set or read) instead of guarding that empty state.
+    setHotelLoading(true);
     try {
       const qs = new URLSearchParams();
       if (opts?.search) qs.set('search', opts.search);
@@ -15980,6 +15986,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const path = '/bookings' + (qs.toString() ? `?${qs}` : '');
       setHotelBookings(await hotelApi(path));
     } catch (err: any) { setHotelError(err.message); }
+    finally { setHotelLoading(false); }
   };
   const fetchBookingStats = async () => {
     if (!isHotelEnabled) return;
@@ -25152,7 +25159,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* All bookings list — overflow-x-auto so the wide table scrolls
               horizontally instead of clipping its right-hand columns. */}
           <div className="bg-white rounded-[32px] border border-brand/10 overflow-x-auto shadow-sm">
-            {displayedBookings.length === 0 ? (
+            {hotelLoading ? (
+              <div className="p-12 text-center text-sm text-[#9c8e85]">{tr('Loading bookings…')}</div>
+            ) : displayedBookings.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">
                 {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to || bookingHistoryFilter.source)
                   ? tr('No bookings match your filters. Try a wider date range or clear the search.')
