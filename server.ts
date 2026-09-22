@@ -42618,11 +42618,19 @@ ${data.tenant.name}`;
       const yieldRules: any[] = await tenantDb.query(
         "SELECT * FROM yield_rules WHERE is_enabled = 1 ORDER BY priority DESC"
       );
-      const bookings: any[] = await tenantDb.query(
+      const bookingsRaw: any[] = await tenantDb.query(
         `SELECT room_id, check_in_date, check_out_date, booking_type FROM room_bookings
          WHERE status IN ('BOOKED','CHECKED_IN') AND check_in_date <= ? AND check_out_date >= ?`,
         [toDate, fromDate]
       );
+      // pg returns a DATE column as a JS Date object, not a string. Comparing
+      // that Date to a 'YYYY-MM-DD' string with <=/>/=== below silently coerces
+      // to NaN and is ALWAYS false, so every booking was invisible to this
+      // occupancy count - Available Rooms always read the full room count and
+      // Occupancy always read 0%, on every date, regardless of real bookings
+      // (the exact "pg Date vs string" landmine already fixed once in the
+      // calendar endpoint's iso() helper - this sibling endpoint never got it).
+      const bookings = bookingsRaw.map(b => ({ ...b, check_in_date: normaliseDateIso(b.check_in_date), check_out_date: normaliseDateIso(b.check_out_date) }));
       const avgBaseRate = rooms.length > 0
         ? rooms.reduce((s: number, r: any) => s + Number(r.base_rate || 0), 0) / rooms.length : 0;
       const meta: Record<string, any> = {};
@@ -42850,7 +42858,7 @@ ${data.tenant.name}`;
       }
 
       // Active bookings per date range for occupancy calculation
-      const bookings: any[] = await tenantDb.query(
+      const bookingsRaw: any[] = await tenantDb.query(
         `SELECT rb.room_id, r.type_id, rb.check_in_date, rb.check_out_date, rb.booking_type
          FROM room_bookings rb
          JOIN rooms r ON r.id = rb.room_id
@@ -42858,6 +42866,11 @@ ${data.tenant.name}`;
            AND rb.check_in_date <= ? AND rb.check_out_date >= ?`,
         [toDate, from]
       );
+      // Same pg Date-vs-string landmine as the Rates & Inventory tab's rate-grid
+      // endpoint - normalise before the string comparisons below, or every
+      // booking is silently invisible and "auto" always reads the full room
+      // count.
+      const bookings = bookingsRaw.map(b => ({ ...b, check_in_date: normaliseDateIso(b.check_in_date), check_out_date: normaliseDateIso(b.check_out_date) }));
 
       // Compute occupied count per type per date
       const occupied: Record<string, Record<string, number>> = {};
@@ -45155,10 +45168,29 @@ ${data.tenant.name}`;
           ORDER BY revenue DESC`,
         [from, to]
       ).catch(() => []);
-      const result = rows.map((r: any) => ({
-        ...r,
-        adr: Number(r.room_nights) > 0 ? Math.round((Number(r.revenue) / Number(r.room_nights)) * 100) / 100 : 0,
-      }));
+      // Total rooms per type (same COALESCE-to-name grouping as the revenue
+      // query, since that's the only key the two can join on) and the number
+      // of calendar days in the window, so Occupancy % is real math and not
+      // just missing - the report card already promised this column, it just
+      // never had the room counts to compute it.
+      const roomCounts: any[] = await tenantDb.query(
+        `SELECT COALESCE(rt.name, r.type, 'Uncategorised') AS room_type, COUNT(*)::int AS total_rooms
+           FROM rooms r LEFT JOIN room_types rt ON rt.id = r.type_id
+          GROUP BY room_type`
+      ).catch(() => []);
+      const totalRoomsByType: Record<string, number> = {};
+      for (const rc of roomCounts) totalRoomsByType[rc.room_type] = Number(rc.total_rooms || 0);
+      const daysInRange = Math.max(1, Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000) + 1);
+      const result = rows.map((r: any) => {
+        const totalRooms = totalRoomsByType[r.room_type] || 0;
+        const availableNights = totalRooms * daysInRange;
+        return {
+          ...r,
+          total_rooms: totalRooms,
+          occupancy_pct: availableNights > 0 ? Math.round((Number(r.room_nights) / availableNights) * 10000) / 100 : 0,
+          adr: Number(r.room_nights) > 0 ? Math.round((Number(r.revenue) / Number(r.room_nights)) * 100) / 100 : 0,
+        };
+      });
       const totalRev = result.reduce((s: number, r: any) => s + Number(r.revenue || 0), 0);
       res.json({ from, to, rows: result, total_revenue: Math.round(totalRev * 100) / 100 });
     } catch (err: any) {
@@ -68853,8 +68885,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-uiux-sweep-upcoming-and-cancelled-payment',
+    commit_marker: 'pms-reports-uat-occupancy-and-field-name-fixes',
     code_features: [
+      'pms-reports-uat-occupancy-and-field-name-fixes  User-reported UAT sweep of every report across the Hotel/PMS module (Payment Report not populating, Room Status report wrong, Management Reports, Revenue by Room Type, Groups Group Sales Report). Two distinct bug classes found and fixed. (1) CRITICAL, live revenue/overbooking risk: the Channel Manager Rates and Inventory grid (rate-grid endpoint) and the Update Rooms grid (inventory-grid endpoint) always computed 0 percent occupancy and the full room count as available, on every date, no matter how many real bookings existed - confirmed live on a tenant showing 34/34 available and 0 percent occupied for the next two weeks while the dashboard correctly showed 11.8 percent occupied. Root cause: both endpoints fetched room_bookings check_in_date/check_out_date directly from Postgres (a DATE column comes back as a JS Date object, not a string) and then compared those Date objects to plain YYYY-MM-DD strings with less-than-or-equal/greater-than/equals - a Date-vs-string relational comparison coerces the string via ToNumber, which is NaN for a date-only string, so every comparison was silently false. This is the exact same pg-Date-object landmine already fixed once in the calendar endpoints own iso() helper and in GL dates and reports elsewhere in this codebase, just never applied to these two sibling endpoints. Fixed by normalising both dates through the existing normaliseDateIso helper immediately after the query, before any comparison runs. Real impact: this occupancy feeds the OTA availability push, so a real booking could have been telling every connected OTA channel that its room was still free. TC-HOTEL-RATEGRID-OCC and TC-HOTEL-INVGRID-OCC book a real room for today and assert both grids now see it as occupied. (2) In the PMS Reports > All Reports hub, six report cards column definitions read field names their own endpoint never returned, so those columns silently showed a dash or zero no matter the real underlying data: Room Status Report (room_name/guest_name/check_in/check_out versus the APIs actual name/occupied_by/occupied_check_in/occupied_check_out), Payments Report (assumed a flat per-payment list; the endpoint actually returns one row per period times payment method times source, period/method/source/amount/txns - rewrote the columns to match that real shape instead of inventing a list format the API never had), Revenue by Room Type (total_rooms and occupancy_pct did not exist on the endpoint at all - added them server-side from a real per-type room count and the date ranges day count, not just relabelled; occupied field was actually named room_nights), Night Audit Report (the endpoint returns as_of/summary/arrivals/departures/in_house with no top-level rows or data array at all, so this report showed zero rows on every run regardless of date - pointed the extraction at in_house and rebuilt the columns around what that list actually carries, replacing two money columns the API never computed per guest with the Booking Value it does return), Occupancy Trend (date and available read fields named night and derived-from-total-rooms-minus-occupied instead), and Group Sales Report plus Group P&L (name not group_name, num_rooms not rooms, advance_amount not advance_paid, and no status field at all - Outstanding was silently overstating every groups due amount by its full advance since advance_paid always read 0; status is now derived from the room-count and settled_at fields the API does return). TC-HOTEL-REVBYTYPE-SHAPE and TC-ALLREPORTS-FIELD-NAMES (source guard for the five display-only fixes) added.',
       'events-uiux-sweep-upcoming-and-cancelled-payment  End-to-end Events and Convention module UI/UX click-through (owner-requested), same method as the Restaurant, Hotel and Spa sweeps. Two real bugs found and fixed, both display-only, no money moved and no GL impact. (1) The Operations Dashboard Upcoming events widget (a to-prepare-for list) is fed by an upcoming filter that only excluded CANCELLED bookings, so a same-day event already marked COMPLETED still showed there, badge and all, directly under a heading that says the opposite of what it displays; on a busy tenant this consumed every one of the widgets 15 slots with already-finished events, hiding the real upcoming bookings entirely. Fixed by also excluding COMPLETED. (2) A CANCELLED event booking still showed Pending in the Bookings tab Payment column and counted toward the PENDING KPI tile and the per-row Outstanding amount, because evPayStatus/evOutstanding computed purely from total_amount vs advance_amount with no awareness of booking status at all - telling the owner there was money to chase for an event that will never happen. The tiles OUTSTANDING total already excluded CANCELLED correctly (rows.filter(status!==CANCELLED)), which made the inconsistency visible: the aggregate said one thing, the row said another. Both helpers now take the bookings status and return NONE/0 for CANCELLED; every call site (the KPI count, the DataTable filter, the Outstanding and Payment columns) passes it through. TC-EVT-UPCOMING-EXCL-DONE (live, asserts no COMPLETED/CANCELLED status in the upcoming list), TC-EVT-PAYSTATUS-EXCL-CANCELLED (source guard). DATA-HYGIENE NOTE (not a code bug, flagged to the owner, nothing deleted): this tenants Events data is heavily polluted by unremoved UAT/smoke-test runs - 224 of 227 catering packages are UAT F7 Pkg <timestamp> rows, 475 of 479 checklist templates are E2E/UAT/FC3/Ovr test templates (inactive, so harmless operationally), the majority of the 588 quotations and 105 bookings are Smoke/UAT records, and one leftover test venue (Smoke Account Hall 1789566943961, is_active=1) is reachable by real customers on the public Enquire Now page alongside the 3 real venues - all consistent with the already-documented "scripts must clean up after themselves" gap, just at a larger scale than previously logged; needs an owner/super-admin cleanup pass, not a code fix.',
       'hotel-uiux-sweep-room-name-fixes  End-to-end Hotel module UI/UX click-through (owner-requested), same method as the Restaurant sweep. Two real bugs, both display-only (no data or money impact), both fixed. (1) Status Board showed a raw internal room-type id ("RTYPE-1781031336479-LML") as a rooms category label, reported live on Room 101. room.type is a legacy free-text column that holds a stale default for any room recategorised after the Room Types master shipped (the identical landmine App.tsx computeOtaInventoryMatrix already documents: never trust room.type), so StatusBoard.tsx falling back through room.type then the raw type_id foreign key leaked that id whenever a rooms type_id pointed at a newer, auto-generated room type - true for roughly a fifth of this tenants rooms (28 of 34 accounted for across the six named room types in Room Setup). Fixed by fetching /hotel/room-types alongside rooms and resolving the category by id, matching the established App.tsx convention, with Room as the safe fallback instead of any raw id. (2) Guest Bills Unbilled room orders, and five other call sites across the app (a service-request room label, a booking summary line, a charge-to-room table_number assignment, and two Charge to Room button labels), rendered "Room Room 101" for any room whose owner-set name already reads "Room 101" - room.name is the complete, owner-styled display name and may or may not itself say Room, but all six sites unconditionally prepended "Room " to it. Fixed to show room_name verbatim (matching the one call site elsewhere that already did this correctly) and only prefix "Room " onto a bare room_number fallback. Also tightened Guest Compliance (Form-C / FRRO tracking): when a bookings room was later deleted (a genuine data-lifecycle edge case, not a query bug - the LEFT JOIN to rooms was already correct), the Room column and its CSV export fell back to a raw internal room id - on a screen whose whole purpose is generating a legal filing for police submission, that is worse than useless. Now shows "(room record removed)" instead. TC-HOTEL-STATUSBOARD-ROOMTYPE, TC-HOTEL-ROOM-NAME-NO-DOUBLE-PREFIX.',
       'tax-config-gst-badge-matches-settings  Found in the same Restaurant UI/UX sweep: the On-Demand Invoice and Edit Invoice modals Auto-applied taxes preview badge showed a stale GST rate (6.00%) while the invoice actually generated correctly charged the Settings rate (5.00%) - a recurrence of the exact field-shows-X-invoice-shows-Y bug class this codebase fixed once already for the printed invoice (gst-single-source-declutter, TC-GST-FIELD-EQUALS-PRINT). Root cause: that earlier fix only changed computeInvoiceTotals (the code that actually bills) to take the GST rate from restaurants.gst_percentage and reuse a tax_config GST row only for its CGST/SGST split - it never touched GET /tax-config, which is a SEPARATE endpoint that feeds this preview badge and was still returning the raw, unmodified tax_config row rate. The real invoice was never wrong; only this one display path was reading stale data nothing else consumed. Fixed by mirroring computeInvoiceTotals exact gstRate formula (Settings rate when GST is on there, falling back to the tax_config rows own rate only for a tenant who never configured Settings GST, zero otherwise) onto the active_configs GST row before the endpoint returns it - all_configs (the raw editor view) is untouched, since an owner editing Tax Lines should see what is really stored. TC-TAXCONFIG-GST-MATCHES-SETTINGS.',

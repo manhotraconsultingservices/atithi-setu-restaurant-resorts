@@ -41,6 +41,20 @@ const fmt = (n: any) =>
 
 const pct = (n: any) => `${Number(n || 0).toFixed(1)}%`;
 
+// GET .../group-revenue has no status column of its own - derive one from
+// the room counts and settled_at it does return, same lifecycle the group
+// itself goes through (booked → in house → checked out → settled), so the
+// Group Sales Report's Status column has something real to show instead of
+// reading a field that was never there.
+const groupStatus = (r: any): string => {
+  const numRooms = Number(r.num_rooms || 0);
+  if (r.settled_at) return 'SETTLED';
+  if (numRooms > 0 && Number(r.cancelled_rooms || 0) >= numRooms) return 'CANCELLED';
+  if (numRooms > 0 && Number(r.checked_out_rooms || 0) >= numRooms) return 'CHECKED_OUT';
+  if (Number(r.active_rooms || 0) > 0) return 'IN_HOUSE';
+  return 'BOOKED';
+};
+
 const idProof = (raw: any) => {
   try {
     const p = JSON.parse(raw || '{}');
@@ -93,18 +107,31 @@ const REPORTS: ReportDef[] = [
     description: 'End-of-day audit: in-house guests, room charges posted, payments received. Runs against the "To" date.',
     category: 'front-office',
     endpoint: '/hotel/reports/night-audit?date={to}',
+    // The endpoint's response has no top-level rows/data array (see the
+    // in_house fallback above) and no per-booking charges_today/folio_balance
+    // - those two columns guessed fields the API never computed per guest,
+    // so they always read (blank). Nights So Far is now computed from
+    // check_in_date instead of reading a field that didn't exist; Booking
+    // Value replaces the two unavailable money columns with one the API does
+    // return per booking.
     columns: [
       { key: 'room_name',     label: 'Room',       sortable: true, getValue: r => r.room_name || r.room_number || '—' },
       { key: 'guest_name',    label: 'Guest',      sortable: true },
-      { key: 'check_in_date', label: 'Check-in',  sortable: true },
-      { key: 'check_out_date',label: 'Check-out', sortable: true },
+      { key: 'check_in_date', label: 'Check-in',  sortable: true,
+        getValue: r => String(r.check_in_date || '').slice(0, 10) || '—' },
+      { key: 'check_out_date',label: 'Check-out', sortable: true,
+        getValue: r => String(r.check_out_date || '').slice(0, 10) || '—' },
       { key: 'room_rate',     label: 'Rate/Night', align: 'right',
         getValue: r => Number(r.room_rate || 0), render: r => fmt(r.room_rate) },
-      { key: 'nights_so_far', label: 'Nights',     align: 'right' },
-      { key: 'charges_today', label: 'Charged Today', align: 'right',
-        getValue: r => Number(r.charges_today || 0), render: r => fmt(r.charges_today) },
-      { key: 'folio_balance', label: 'Balance',    align: 'right',
-        getValue: r => Number(r.folio_balance || 0), render: r => fmt(r.folio_balance) },
+      { key: 'nights_so_far', label: 'Nights So Far', align: 'right',
+        getValue: r => {
+          const ci = String(r.check_in_date || '').slice(0, 10);
+          if (!ci) return 0;
+          const days = Math.floor((Date.now() - new Date(ci + 'T00:00:00Z').getTime()) / 86400000);
+          return Math.max(1, days + 1);
+        } },
+      { key: 'total_amount',  label: 'Booking Value', align: 'right',
+        getValue: r => Number(r.total_amount || 0), render: r => fmt(r.total_amount) },
     ],
   },
   {
@@ -154,16 +181,23 @@ const REPORTS: ReportDef[] = [
     noDateRange: true,
     columns: [
       { key: 'room_number',   label: 'Room No.',  sortable: true },
-      { key: 'room_name',     label: 'Room Name', sortable: true },
+      // GET /hotel/reports/room-status names its columns name/occupied_by/
+      // occupied_check_in/occupied_check_out (matches the working Hotel
+      // Reports > Room Status screen) - this table guessed different names
+      // (room_name/guest_name/check_in/check_out), so Room Name, Guest,
+      // Check-in and Check-out always fell through to '-' even for a room
+      // the API had a real guest and dates for.
+      { key: 'room_name',     label: 'Room Name', sortable: true,
+        getValue: r => r.name || r.room_name || '—' },
       { key: 'room_category', label: 'Category',  sortable: true,
         getValue: r => r.room_category || r.room_type || '—' },
       { key: 'status',        label: 'Status',    sortable: true },
       { key: 'guest',         label: 'Guest',
-        getValue: r => r.guest_name || r.current_guest || '—' },
+        getValue: r => r.occupied_by || r.guest_name || r.current_guest || '—' },
       { key: 'check_in',      label: 'Check-in',
-        getValue: r => r.check_in_date || r.check_in || '—' },
+        getValue: r => r.occupied_check_in ? String(r.occupied_check_in).slice(0, 10) : (r.check_in_date || r.check_in || '—') },
       { key: 'check_out',     label: 'Check-out',
-        getValue: r => r.check_out_date || r.check_out || '—' },
+        getValue: r => r.occupied_check_out ? String(r.occupied_check_out).slice(0, 10) : (r.check_out_date || r.check_out || '—') },
     ],
   },
   {
@@ -206,16 +240,22 @@ const REPORTS: ReportDef[] = [
     description: 'All payments received in the date range, broken down by method and booking source.',
     category: 'accounting',
     endpoint: '/hotel/reports/payment-received?from={from}&to={to}',
+    // GET .../payment-received returns one row per period x payment-method x
+    // source ({period, method, source, amount, txns}), same as the working
+    // Hotel Reports > Payment Received screen - it does NOT return a flat
+    // per-transaction list, so there is no guest_name/room_name/payment_date
+    // to read. This card guessed a per-payment shape that never existed on
+    // this endpoint, so every column but Amount always fell through to '—'.
     columns: [
-      { key: 'payment_date',   label: 'Date',    sortable: true,
-        getValue: r => r.payment_date || (r.created_at || '').slice(0, 10) || '—' },
-      { key: 'guest_name',     label: 'Guest',   sortable: true },
-      { key: 'room',           label: 'Room',     getValue: r => r.room_name || r.room_number || '—' },
-      { key: 'amount',         label: 'Amount',  sortable: true, align: 'right',
+      { key: 'period',   label: 'Period',  sortable: true },
+      { key: 'method',   label: 'Method',  sortable: true,
+        getValue: r => r.method || 'OTHER' },
+      { key: 'source',   label: 'Source',  sortable: true,
+        getValue: r => r.source || 'DIRECT' },
+      { key: 'amount',   label: 'Amount',  sortable: true, align: 'right',
         getValue: r => Number(r.amount || 0), render: r => fmt(r.amount) },
-      { key: 'payment_method', label: 'Method',  sortable: true },
-      { key: 'booking_source', label: 'Source',  sortable: true,
-        getValue: r => r.booking_source || 'DIRECT' },
+      { key: 'txns',     label: 'Payments', sortable: true, align: 'right',
+        getValue: r => Number(r.txns || 0) },
     ],
   },
   {
@@ -259,18 +299,25 @@ const REPORTS: ReportDef[] = [
     description: 'Bookings with unpaid or partially-paid folios — OTAs, corporate accounts, and walk-in dues.',
     category: 'accounting',
     endpoint: '/hotel/reports/outstanding-payments?from={from}&to={to}',
+    // This endpoint doesn't join rooms (there's no room_name/room_number to
+    // read) and names the money field outstanding_balance, not outstanding -
+    // Room always read '-' and Outstanding, the whole point of this report,
+    // always read 0. Paid is now derived (commission - what's still owed)
+    // since the API has no separate amount_paid field; Partner replaces the
+    // meaningless Room column with data the API actually returns.
     columns: [
       { key: 'guest_name',     label: 'Guest',       sortable: true },
-      { key: 'room',           label: 'Room',         getValue: r => r.room_name || r.room_number || '—' },
+      { key: 'partner_name',   label: 'Partner',      getValue: r => r.partner_name || r.booking_source || '—' },
       { key: 'check_in_date',  label: 'Check-in',   sortable: true },
       { key: 'check_out_date', label: 'Check-out',  sortable: true },
       { key: 'total_amount',   label: 'Total',      align: 'right',
         getValue: r => Number(r.total_amount || 0), render: r => fmt(r.total_amount) },
-      { key: 'amount_paid',    label: 'Paid',       align: 'right',
-        getValue: r => Number(r.amount_paid || 0), render: r => fmt(r.amount_paid) },
+      { key: 'amount_paid',    label: 'Settled',    align: 'right',
+        getValue: r => Math.max(0, Number(r.commission_amount || 0) - Number(r.outstanding_balance ?? r.outstanding ?? 0)),
+        render: r => fmt(Math.max(0, Number(r.commission_amount || 0) - Number(r.outstanding_balance ?? r.outstanding ?? 0))) },
       { key: 'outstanding',    label: 'Outstanding', sortable: true, align: 'right',
-        getValue: r => Number(r.outstanding || r.outstanding_amount || 0),
-        render: r => fmt(r.outstanding || r.outstanding_amount) },
+        getValue: r => Number(r.outstanding_balance ?? r.outstanding ?? r.outstanding_amount ?? 0),
+        render: r => fmt(r.outstanding_balance ?? r.outstanding ?? r.outstanding_amount) },
       { key: 'booking_source', label: 'Source',     sortable: true,
         getValue: r => r.booking_source || 'DIRECT' },
     ],
@@ -304,10 +351,15 @@ const REPORTS: ReportDef[] = [
     description: 'Revenue contribution per room category — compare ADR and occupancy across room types.',
     category: 'management',
     endpoint: '/hotel/reports/revenue-by-room-type?from={from}&to={to}',
+    // The API names the occupied-nights column room_nights, not 'occupied' -
+    // that one guessed name meant this column (and, before the endpoint was
+    // fixed, Total Rooms + Occupancy % too, since the API never computed
+    // them) always fell through to 0.
     columns: [
       { key: 'room_type',     label: 'Room Type',      sortable: true },
       { key: 'total_rooms',   label: 'Total Rooms',    align: 'right' },
-      { key: 'occupied',      label: 'Occupied Nights',sortable: true, align: 'right' },
+      { key: 'room_nights',   label: 'Occupied Nights',sortable: true, align: 'right',
+        getValue: r => Number(r.room_nights || 0) },
       { key: 'occupancy_pct', label: 'Occupancy %',   sortable: true, align: 'right',
         getValue: r => Number(r.occupancy_pct || 0), render: r => pct(r.occupancy_pct) },
       { key: 'adr',           label: 'ADR',            sortable: true, align: 'right',
@@ -322,9 +374,14 @@ const REPORTS: ReportDef[] = [
     description: 'Daily occupancy rate trend — spot seasonal peaks, pricing opportunities, and demand patterns.',
     category: 'management',
     endpoint: '/hotel/reports/occupancy-trend?from={from}&to={to}',
+    // The API names the date column 'night' (not 'date') and has no
+    // 'available' field of its own - it's total_rooms minus occupied - so
+    // both columns always read blank.
     columns: [
-      { key: 'date',          label: 'Date',        sortable: true },
-      { key: 'available',     label: 'Avail. Rooms', align: 'right' },
+      { key: 'date',          label: 'Date',        sortable: true,
+        getValue: r => r.night || r.date || '—' },
+      { key: 'available',     label: 'Avail. Rooms', align: 'right',
+        getValue: r => Math.max(0, Number(r.total_rooms || 0) - Number(r.occupied || 0)) },
       { key: 'occupied',      label: 'Occupied',    sortable: true, align: 'right' },
       { key: 'occupancy_pct', label: 'Occupancy %', sortable: true, align: 'right',
         getValue: r => Number(r.occupancy_pct || r.occupancy || 0),
@@ -385,6 +442,14 @@ const REPORTS: ReportDef[] = [
   },
 
   // ── GROUPS ─────────────────────────────────────────────────────────────────
+  // GET .../group-revenue returns room_booking_groups rows named name (not
+  // group_name), num_rooms (not rooms/room_count), advance_amount (not
+  // advance_paid), and no status column at all - group-revenue and group-pnl
+  // both guessed different names, so Group Name/Company/Rooms/Advance/Status
+  // always fell through to '-' or 0 (Outstanding, being Total - Advance,
+  // silently overstated every group's due amount by its full advance paid).
+  // Status is derived here from the room counts + settled_at the API does
+  // return, since the query itself has no status field to rename to.
   {
     key: 'group-revenue',
     label: 'Group Sales Report',
@@ -392,19 +457,22 @@ const REPORTS: ReportDef[] = [
     category: 'groups',
     endpoint: '/hotel/reports/group-revenue?from={from}&to={to}',
     columns: [
-      { key: 'group_name',    label: 'Group Name', sortable: true },
-      { key: 'company_name',  label: 'Company',    sortable: true,
-        getValue: r => r.company_name || r.group_name || '—' },
+      { key: 'group_name',    label: 'Group Name', sortable: true,
+        getValue: r => r.name || r.group_name || '—' },
+      { key: 'company_name',  label: 'Contact',    sortable: true,
+        getValue: r => r.contact_name || r.company_name || r.name || '—' },
       { key: 'rooms',         label: 'Rooms',      sortable: true, align: 'right',
-        getValue: r => r.rooms || r.room_count || r.bookings_count || '—' },
+        getValue: r => Number(r.num_rooms || r.rooms || r.room_count || r.bookings_count || 0) },
       { key: 'check_in_date', label: 'Check-in',  sortable: true },
       { key: 'check_out_date',label: 'Check-out', sortable: true },
       { key: 'total_revenue', label: 'Total Revenue', sortable: true, align: 'right',
         getValue: r => Number(r.total_revenue || r.total_amount || 0),
         render: r => fmt(r.total_revenue || r.total_amount) },
       { key: 'advance_paid',  label: 'Advance',   align: 'right',
-        getValue: r => Number(r.advance_paid || 0), render: r => fmt(r.advance_paid) },
-      { key: 'status',        label: 'Status',    sortable: true },
+        getValue: r => Number(r.advance_paid || r.advance_amount || 0),
+        render: r => fmt(r.advance_paid || r.advance_amount) },
+      { key: 'status',        label: 'Status',    sortable: true,
+        getValue: r => groupStatus(r) },
     ],
   },
   {
@@ -414,15 +482,17 @@ const REPORTS: ReportDef[] = [
     category: 'groups',
     endpoint: '/hotel/reports/group-revenue?from={from}&to={to}',
     columns: [
-      { key: 'group_name',    label: 'Group',       sortable: true },
+      { key: 'group_name',    label: 'Group',       sortable: true,
+        getValue: r => r.name || r.group_name || '—' },
       { key: 'total_revenue', label: 'Total Billed',sortable: true, align: 'right',
         getValue: r => Number(r.total_revenue || r.total_amount || 0),
         render: r => fmt(r.total_revenue || r.total_amount) },
       { key: 'advance_paid',  label: 'Advance',    align: 'right',
-        getValue: r => Number(r.advance_paid || 0), render: r => fmt(r.advance_paid) },
+        getValue: r => Number(r.advance_paid || r.advance_amount || 0),
+        render: r => fmt(r.advance_paid || r.advance_amount) },
       { key: 'outstanding',   label: 'Outstanding', sortable: true, align: 'right',
-        getValue: r => Number(r.total_revenue || r.total_amount || 0) - Number(r.advance_paid || 0),
-        render: r => fmt(Number(r.total_revenue || r.total_amount || 0) - Number(r.advance_paid || 0)) },
+        getValue: r => Math.max(0, Number(r.total_revenue || r.total_amount || 0) - Number(r.advance_paid || r.advance_amount || 0)),
+        render: r => fmt(Math.max(0, Number(r.total_revenue || r.total_amount || 0) - Number(r.advance_paid || r.advance_amount || 0))) },
       { key: 'status',        label: 'Status',     sortable: true },
       { key: 'check_in_date', label: 'Check-in',  sortable: true },
       { key: 'check_out_date',label: 'Check-out', sortable: true },
@@ -505,7 +575,12 @@ export function AllReportsHub({ restaurantId, token }: Props) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      const rows = Array.isArray(data) ? data : (data.rows || data.data || []);
+      // Night Audit's endpoint returns { as_of, summary, arrivals, departures,
+      // in_house } - no top-level rows/data key - so this report's table
+      // showed zero rows no matter the date, until in_house was added as a
+      // fallback (the "who's in the hotel right now" list the report card
+      // itself is about).
+      const rows = Array.isArray(data) ? data : (data.rows || data.data || data.in_house || []);
       setReportState({ loading: false, rows });
     } catch (e: any) {
       setReportState({ loading: false, rows: [], error: e.message });
