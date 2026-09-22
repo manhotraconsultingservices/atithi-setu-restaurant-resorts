@@ -37186,6 +37186,28 @@ ${data.tenant.name}`;
              categories: r.categories, rateSummary: r.rateSummary };
   };
 
+  // All quotations across every booking, one query. Reported live (Ankur Cafe,
+  // 22 Sep 2026): the Quotations tab was loading `/events/bookings` and then
+  // sequentially fetching `/events/bookings/:id` PER BOOKING just to read that
+  // booking's `quotations` array — an N+1 that scales with total booking count,
+  // not quotation count, and serialises hundreds of round-trips before the tab
+  // renders. One JOIN replaces all of it.
+  app.get("/api/restaurant/:id/events/quotations", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT q.*, b.customer_name, b.customer_email
+           FROM event_quotations q JOIN event_bookings b ON b.id = q.booking_id
+           ORDER BY q.created_at DESC`, []);
+      res.json(rows);
+    } catch (err: any) {
+      console.error("/events quotations list error:", err);
+      res.status(500).json({ error: "Failed to load quotations" });
+    }
+  });
+
   app.post("/api/restaurant/:id/events/bookings/:bid/quotations", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -68620,8 +68642,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'restaurant-hotel-write-ui-gate',
+    commit_marker: 'events-checklist-nav-and-quotations-perf',
     code_features: [
+      'events-checklist-nav-and-quotations-perf  Two client-reported bugs on Ankur Cafe, root-caused live (22 Sep 2026). (1) An Event Manager granted Full on EVENTS_CHECKLISTS (confirmed via the tenants role-permissions matrix - level 3, correctly in-scope, correctly not stripped) saw only My Checklist under the Checklists nav group. Root cause was NOT a permission bug: EVENTS_CHECKLISTS has server routes, a Staff Access grid entry, and its own content renderer (ChecklistTemplates facilityScope=EVENT), but was never added to the Events and Convention nav groups tabs array or the module-agnostic Checklists group - there was no menu item to click it from, on any tenant, for any role including the owner. Added { id: EVENTS_CHECKLISTS, label: Checklist Templates } to the Events and Convention group next to Cleaning Checklist. (2) Quotations tab reported slow to load. Root cause: EventQuotations.load() fetched /events/bookings then sequentially awaited /events/bookings/:id for EVERY booking just to read that ones quotations array - an N+1 that scales with total booking count, not quotation count, serialising hundreds of round-trips before the tab rendered on a tenant with a large booking history. Replaced with one new endpoint GET .../events/quotations doing the join (event_quotations JOIN event_bookings) server-side in a single query; the tab now makes exactly one request. TC-EVT-CHECKLISTS-NAV, TC-EVT-QUOTATIONS-SINGLE-QUERY.',
       'restaurant-hotel-write-ui-gate  Browser RBAC verification of Restaurant and Hotel (22 Sep 2026, requested), same method as Accounts/Inventory/Spa/Events: found and fixed 5 UI gaps, all confirmed server-correct. Menu CSV import (both menu-item and recipe file pickers) had no gate at all - POST /menu requires MENU Edit; now canWriteTab(MENU) on both. QR tab table-count save requires SETTINGS Edit (a different tab than the QR screen it lives on, same as the earlier Direct Booking Page finding), now gated on that with a banner; per-table rename requires QR Edit, now disabled without it. Command Centre bulk waiter assign (Assign all tables to) was gated on a hardcoded role name check (owner/manager only), leaving out any custom role granted QR Full for exactly the endpoint it calls - added canWriteTab(QR) alongside the owner/manager fast path, consistent with this session earlier retiring hardcoded operational roles. Auto-generate OTA invoices (Channel Manager and Receivables screens, two occurrences) requires SETTINGS Create, not the tab either screen lives on - gated both on canWriteTab(SETTINGS). Confirmed clean by the same audit: Restaurant Orders/Invoices/QR-remainder, Hotel Bookings/Services/Compliance/Concierge FAQ (all already comprehensively gated with hidden: !canWriteTab(...) per action).',
       'inventory-settings-panel-gates  Follow-up to inventory-write-ui-gate: the Inventory Settings sub-tab was left ungated because its four panels write through THREE different tabs (server: an inline _requireTabWrite check per route, not one shared gate) - Seasonality and Storage Locations need Kitchen Inventory Edit, Notification Templates needs Settings Edit, and the Hotel Inventory panel needs Hotel Inventory Edit. Each panel now has its own fieldset and banner on the exact tab its route requires, instead of one shared gate that would have over- or under-blocked at least one of them. Server side was already correct for all four - confirmed by reading every route inline before touching the UI. TC-RBAC-INVENTORY-SETTINGS-PANELS.',
       'inventory-write-ui-gate  Browser RBAC verification (22 Sep 2026, requested), same finding as accounting-write-ui-gate: the Kitchen Inventory screen (Dashboard through Physical Counts and CSV import - ingredients, suppliers, purchase orders, goods receipts, wastage, counts) had no UI permission gate at all - a View-only role saw fully live Add/Edit/Delete buttons the server correctly refused. One fieldset disabled by canWriteTab(INVENTORY) now wraps that region. Settings (Seasonality, Templates, Hotel Inventory, Locations) is left as a follow-up: its Hotel Inventory panel posts to a different tab (HOTEL_INVENTORY) and would be wrongly blocked by the same fieldset for a role holding that but not Kitchen Inventory Edit. TC-RBAC-INVENTORY-FIELDSET.',

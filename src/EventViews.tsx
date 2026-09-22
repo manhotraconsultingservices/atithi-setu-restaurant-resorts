@@ -2529,20 +2529,19 @@ function EventQuotations({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [rows, setRows] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);   // gate the empty-state so it doesn't flash during the N+1 load
+  const [loading, setLoading] = useState(true);   // gate the empty-state so it doesn't flash while loading
   const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const bookings = await api('/events/bookings');
-      const all: any[] = [];
-      for (const b of bookings) {
-        const full = await api(`/events/bookings/${b.id}`);
-        for (const q of (full.quotations || [])) all.push({ ...q, customer_name: b.customer_name, customer_email: b.customer_email });
-      }
-      all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-      setRows(all);
+      // One joined query server-side (server.ts: GET .../events/quotations) —
+      // used to be a per-booking N+1 (fetch every booking's full detail just to
+      // read its `quotations` array), which serialised hundreds of round-trips
+      // on a tenant with a large booking history before this tab rendered
+      // anything (reported live, Ankur Cafe, 22 Sep 2026).
+      const all = await api('/events/quotations');
+      setRows(Array.isArray(all) ? all : []);
     } catch { /* */ }
     finally { setLoading(false); }
   };

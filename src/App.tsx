@@ -17071,6 +17071,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_CATERING',   label: 'Catering Menus' },
               { id: 'EVENTS_QUOTATIONS', label: 'Quotations' },
               { id: 'EVENTS_HOUSEKEEPING', label: 'Cleaning Checklist' },
+              // Event-hall checklist templates (setup/daily/post-event config) —
+              // has full server permission plumbing, a Staff Access grid entry,
+              // and its own content renderer (facilityScope="EVENT"), but was
+              // never added as a clickable nav item anywhere: not here, and not
+              // in the module-agnostic "Checklists" group either (that one only
+              // lists the PMS-wide `CHECKLISTS` tab). Reported live (Ankur Cafe,
+              // 22 Sep 2026): an Event Manager granted Full on this tab saw only
+              // "My Checklist" — there was simply no menu entry to click.
+              { id: 'EVENTS_CHECKLISTS', label: 'Checklist Templates' },
               { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
               ...(isPlatformAdmin ? [{ id: 'EVENTS_MIGRATION', label: 'Data Migration' } as NavTab] : []),
               { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
