@@ -291,6 +291,57 @@ function getR2Client(): S3Client {
 
 const useR2ForMenuImages = () => process.env.UPLOAD_BACKEND === "r2";
 
+// ── Generic booking documents (PMS / Events / Spa "Documents" tree node) ─────
+// Staff can attach any file (photo, PDF, contract, ID scan, ...) to a Hotel
+// room booking, an Event booking, or a Spa appointment from that object's
+// ObjectDetail tree menu — not just the ID-proof-specific flow the hotel
+// check-in wizard already had (guest_documents, kept as-is: compliance-
+// sensitive, auto-locks at check-in). Same storage convention (R2 under
+// documents/ or local disk uploads/documents) as the existing hotel route,
+// factored out so Events and Spa don't duplicate it. One shared table across
+// all three object types (mirrors how object_audit_log is one shared table
+// read through different per-module routes) — object-scoped, not booking-
+// table-scoped, so it needs no per-module migration.
+async function persistObjectDocumentFile(tenantId: string, objectType: string, objectId: string, file: Express.Multer.File): Promise<string> {
+  if (useR2ForMenuImages()) {
+    const bucket = process.env.R2_BUCKET;
+    const baseUrl = process.env.R2_PUBLIC_BASE_URL;
+    if (!bucket || !baseUrl) throw new Error("R2 misconfigured (R2_BUCKET / R2_PUBLIC_BASE_URL)");
+    const ext = (file.originalname.match(/\.[a-zA-Z0-9]+$/)?.[0] || '').toLowerCase();
+    const key = `documents/${tenantId}/${objectType}/${objectId}/${randomUUID()}${ext}`;
+    await getR2Client().send(new PutObjectCommand({
+      Bucket: bucket, Key: key, Body: file.buffer,
+      ContentType: file.mimetype || 'application/octet-stream',
+      CacheControl: 'private, max-age=3600',
+    }));
+    return `${baseUrl.replace(/\/$/, '')}/${key}`;
+  }
+  const uploadDir = path.join(process.cwd(), "public", "uploads", "documents");
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+  const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
+  const filename = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
+  fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
+  return `/uploads/documents/${filename}`;
+}
+async function ensureObjectDocumentsTable(tenantDb: DbInterface): Promise<void> {
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS object_documents (
+      id           TEXT PRIMARY KEY,
+      object_type  TEXT NOT NULL,
+      object_id    TEXT NOT NULL,
+      file_url     TEXT NOT NULL,
+      file_name    TEXT,
+      mime_type    TEXT,
+      size_bytes   INTEGER,
+      label        TEXT,
+      uploaded_by       TEXT,
+      uploaded_by_name  TEXT,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_object_documents ON object_documents(object_type, object_id, created_at DESC);
+  `);
+}
+
 // ── Private HR files (HRMS-R1C) ──────────────────────────────────────────────
 // Employee documents are encrypted before they are stored (encryptFileBuffer)
 // and read back only through the signed-in HR document route. On R2 they go
@@ -37700,6 +37751,64 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
 
+  // ── Documents — staff can attach any file to an event booking ────────────
+  // (object_documents is the shared table — see persistObjectDocumentFile).
+  app.get("/api/restaurant/:id/events/bookings/:bid/documents", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureObjectDocumentsTable(db);
+      const rows = await db.query(
+        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at
+           FROM object_documents WHERE object_type = 'EVENT_BOOKING' AND object_id = ? ORDER BY created_at DESC`,
+        [req.params.bid]
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch documents" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/documents", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT id, customer_name FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      if (!req.file) return res.status(400).json({ error: "No file uploaded (field name 'file' expected)" });
+      await ensureObjectDocumentsTable(db);
+      const fileUrl = await persistObjectDocumentFile(req.params.id, 'EVENT_BOOKING', req.params.bid, req.file);
+      const docId = mkEventId('DOC');
+      const uploaderName = req.user?.id ? (await db.get("SELECT name FROM attendance_staff WHERE id = ?", [req.user.id]).catch(() => null))?.name : null;
+      await db.run(
+        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name)
+         VALUES (?, 'EVENT_BOOKING', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [docId, req.params.bid, fileUrl, req.file.originalname || null, req.file.mimetype || null, req.file.size || null,
+         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null]
+      );
+      const summary = `Added document "${req.body?.label || req.file.originalname || docId}"`;
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'DOCUMENT_ADDED', summary, after: { file_name: req.file.originalname, label: req.body?.label || null } });
+      const row = await db.get(`SELECT * FROM object_documents WHERE id = ?`, [docId]);
+      res.status(201).json(row);
+    } catch (err: any) {
+      console.error('Event document upload failed:', err);
+      res.status(500).json({ error: err?.message || "Failed to upload document" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/events/bookings/:bid/documents/:docId", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const doc: any = await db.get("SELECT id, file_name, label FROM object_documents WHERE id = ? AND object_type = 'EVENT_BOOKING' AND object_id = ?", [req.params.docId, req.params.bid]);
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      await db.run("DELETE FROM object_documents WHERE id = ?", [req.params.docId]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'DOCUMENT_REMOVED', summary: `Removed document "${doc.label || doc.file_name || doc.id}"` });
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete document" }); }
+  });
+
   // ── EVENT QUOTATION ────────────────────────────────────────────────────────
   app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, eventsStaff, requireTabAction('EVENTS_QUOTATIONS', 'READ'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -39317,6 +39426,64 @@ ${data.tenant.name}`;
       }
       res.json({ groups });
     } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  // ── Documents — staff can attach any file to a spa appointment ───────────
+  // (object_documents is the shared table — see persistObjectDocumentFile).
+  app.get("/api/restaurant/:id/spa/appointments/:aid/documents", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureObjectDocumentsTable(db);
+      const rows = await db.query(
+        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at
+           FROM object_documents WHERE object_type = 'SPA_APPOINTMENT' AND object_id = ? ORDER BY created_at DESC`,
+        [req.params.aid]
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch documents" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/appointments/:aid/documents", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const a: any = await db.get("SELECT id FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!a) return res.status(404).json({ error: "Appointment not found" });
+      if (!req.file) return res.status(400).json({ error: "No file uploaded (field name 'file' expected)" });
+      await ensureObjectDocumentsTable(db);
+      const fileUrl = await persistObjectDocumentFile(req.params.id, 'SPA_APPOINTMENT', req.params.aid, req.file);
+      const docId = mkEventId('DOC');
+      const uploaderName = req.user?.id ? (await db.get("SELECT name FROM attendance_staff WHERE id = ?", [req.user.id]).catch(() => null))?.name : null;
+      await db.run(
+        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name)
+         VALUES (?, 'SPA_APPOINTMENT', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [docId, req.params.aid, fileUrl, req.file.originalname || null, req.file.mimetype || null, req.file.size || null,
+         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null]
+      );
+      const summary = `Added document "${req.body?.label || req.file.originalname || docId}"`;
+      await writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'DOCUMENT_ADDED', summary, after: { file_name: req.file.originalname, label: req.body?.label || null } });
+      const row = await db.get(`SELECT * FROM object_documents WHERE id = ?`, [docId]);
+      res.status(201).json(row);
+    } catch (err: any) {
+      console.error('Spa document upload failed:', err);
+      res.status(500).json({ error: err?.message || "Failed to upload document" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/spa/appointments/:aid/documents/:docId", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const doc: any = await db.get("SELECT id, file_name, label FROM object_documents WHERE id = ? AND object_type = 'SPA_APPOINTMENT' AND object_id = ?", [req.params.docId, req.params.aid]);
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      await db.run("DELETE FROM object_documents WHERE id = ?", [req.params.docId]);
+      await writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'DOCUMENT_REMOVED', summary: `Removed document "${doc.label || doc.file_name || doc.id}"` });
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete document" }); }
   });
 
   app.get("/api/restaurant/:id/spa/folios/:fid/audit", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
@@ -54850,6 +55017,14 @@ ${data.tenant.name}`;
            lockedAt]
         );
         const row = await tenantDb.get(`SELECT * FROM guest_documents WHERE id = ?`, [docId]);
+        // Booking-level audit — "who added the document, and when" (the
+        // ObjectDetail Audit log node on the room booking). Reported gap:
+        // this route never wrote to object_audit_log at all.
+        await writeObjectAudit(tenantDb, req, {
+          objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'DOCUMENT_ADDED',
+          summary: `Added document "${req.body?.label || req.file.originalname || docId}"`,
+          after: { file_name: req.file.originalname, label: req.body?.label || null, doc_type: req.body?.doc_type || null },
+        });
         res.status(201).json(row);
       } catch (err: any) {
         console.error('Document upload failed:', err);
@@ -54864,7 +55039,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const doc: any = await tenantDb.get(
-        `SELECT g.id, g.locked_at, b.status AS booking_status
+        `SELECT g.id, g.locked_at, g.file_name, g.label, b.status AS booking_status
            FROM guest_documents g
            JOIN room_bookings b ON b.id = g.booking_id
           WHERE g.id = ? AND g.booking_id = ?`,
@@ -54887,6 +55062,10 @@ ${data.tenant.name}`;
       // here. Even though the row is gone, the file may be referenced by
       // an audit log or operator export. A periodic janitor job can
       // sweep orphaned files separately if storage cost becomes an issue.
+      await writeObjectAudit(tenantDb, req, {
+        objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'DOCUMENT_REMOVED',
+        summary: `Removed document "${doc.label || doc.file_name || doc.id}"`,
+      });
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete document" });
@@ -68642,8 +68821,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'restaurant-rbac-zero-grant-failopen-fix',
+    commit_marker: 'object-detail-documents-node',
     code_features: [
+      'object-detail-documents-node  New Documents tree node (owner-requested) on the ObjectDetail shell (src/components/ObjectDetail.tsx) for Hotel room bookings, Event bookings, and Spa appointments - staff can attach any file to a booking, next to Overview / Audit log / Where Used. Hotel already had a document upload mechanism (guest_documents, for ID-proof at check-in) but it never wrote to the audit log at all - added writeObjectAudit(DOCUMENT_ADDED/DOCUMENT_REMOVED) to its existing POST/DELETE routes so who added a document and when now shows in the bookings own Audit log tab, per the request. Events and Spa had no document mechanism at all - built one new shared table (object_documents, object_type + object_id, mirrors how object_audit_log is one shared table read through different per-module routes) plus a persistObjectDocumentFile() helper (same R2/disk storage convention as the existing hotel route, factored out so the two new modules do not duplicate it) and three new endpoints per module (GET list, POST upload multipart, DELETE remove) at .../events/bookings/:bid/documents and .../spa/appointments/:aid/documents, gated the same way as each objects existing audit/where-used siblings. Every upload and delete calls writeObjectAudit with a DOCUMENT_ADDED/DOCUMENT_REMOVED action, which auto-captures actor_email/actor_role/actor_name and created_at - exactly who added it and when, the explicit ask. Frontend: ObjectDetail.tsx gained a DocumentsView (list + free-label upload form + delete, respecting a canManageDocuments prop so a View-only role sees the list but not the write controls) and a documentsUrl prop enabling the rail item; wired into all three bookings own detail view (App.tsx booking-detail modal, EventViews.tsx event-booking detail, SpaViews.tsx appointment history overlay) AND into buildObjectResolver so a booking opened via drill-in from another objects Where-Used list also shows Documents. TC-DOC-HOTEL-UPLOAD/-AUDIT-ADD/-AUDIT-REMOVE, TC-DOC-EVENT-*, TC-DOC-SPA-* (live E2E, self-contained fixtures).',
       'restaurant-rbac-zero-grant-failopen-fix  Restaurant RBAC checked the thorough way (22 Sep 2026, requested): created a real custom role via the actual owner API (not a matrix overwrite on an existing throwaway role), created a real staff LOGIN account assigned to it, and logged into the browser through the real login form. Found the most serious RBAC gap of this whole session. Root cause: perm.ts tabLevel() treats an EMPTY tab_permissions object as no restrictions configured, dont hide (meant for a legacy role whose matrix was simply never saved) but the server also emits an empty object for an AUTHORITATIVE zero-grant custom role (a brand-new role before the owner grants anything, or one set to None) - the __complete__ sentinel that means deny-all is stripped before the object reaches the client. So a just-created custom role with zero grants resolved to Full(3) on every canWriteTab()/canSeeTab() check app-wide - the Home launchpad showed all four module tiles (Hotel/Restaurant/Spa/Events) regardless of the tenant is actually enabling them for this role, and every standalone component gated only through perm.ts (not also behind the tab-level nav gate) would have rendered fully live. The nav content-gate itself was NOT affected (isContentAccessible uses the allowed_tabs array with the sentinel correctly, so opening a real tab still correctly showed Access Restricted) - this is why the hole was narrow enough to not have surfaced as a data breach, but it is a real defect for any component that checks canWriteTab/canSeeTab without an outer nav gate protecting it, and it directly contradicts the intended deny-by-default design for a new custom role. Fixed by mirroring whether this is an authoritative deny-all into a second localStorage flag (tab_perms_deny_all) alongside tab_perms, set from the __perm_complete__ marker on every /my-permissions fetch; tabLevel() now returns 0 instead of 3 when that flag is set. Also found and fixed two real UI write-gaps while doing the real-login sweep, same pattern as every other fix this session (server always correct, UI never gated): Delivery Partners channel pricing card (markup/commission/prep-time/active-toggle inputs and the Save button) plus its Configure Credentials modal (API key/secret inputs, Test connection, Save credentials) had zero client gate though the server requires DELIVERY Edit on all three routes; Table Bookings Availability tab (the per-date slot editor and the Bulk Apply range tool) had zero client gate though the server requires BOOKINGS Edit/Full. All three now wrapped in canWriteTab fieldsets with the same pattern as every earlier fix this session. TC-RBAC-DENY-ALL-NO-FAILOPEN, TC-RBAC-DELIVERY-CREDENTIALS-GATE, TC-RBAC-BOOKINGS-AVAILABILITY-GATE.',
       'events-checklist-nav-and-quotations-perf  Two client-reported bugs on Ankur Cafe, root-caused live (22 Sep 2026). (1) An Event Manager granted Full on EVENTS_CHECKLISTS (confirmed via the tenants role-permissions matrix - level 3, correctly in-scope, correctly not stripped) saw only My Checklist under the Checklists nav group. Root cause was NOT a permission bug: EVENTS_CHECKLISTS has server routes, a Staff Access grid entry, and its own content renderer (ChecklistTemplates facilityScope=EVENT), but was never added to the Events and Convention nav groups tabs array or the module-agnostic Checklists group - there was no menu item to click it from, on any tenant, for any role including the owner. Added { id: EVENTS_CHECKLISTS, label: Checklist Templates } to the Events and Convention group next to Cleaning Checklist. (2) Quotations tab reported slow to load. Root cause: EventQuotations.load() fetched /events/bookings then sequentially awaited /events/bookings/:id for EVERY booking just to read that ones quotations array - an N+1 that scales with total booking count, not quotation count, serialising hundreds of round-trips before the tab rendered on a tenant with a large booking history. Replaced with one new endpoint GET .../events/quotations doing the join (event_quotations JOIN event_bookings) server-side in a single query; the tab now makes exactly one request. TC-EVT-CHECKLISTS-NAV, TC-EVT-QUOTATIONS-SINGLE-QUERY.',
       'restaurant-hotel-write-ui-gate  Browser RBAC verification of Restaurant and Hotel (22 Sep 2026, requested), same method as Accounts/Inventory/Spa/Events: found and fixed 5 UI gaps, all confirmed server-correct. Menu CSV import (both menu-item and recipe file pickers) had no gate at all - POST /menu requires MENU Edit; now canWriteTab(MENU) on both. QR tab table-count save requires SETTINGS Edit (a different tab than the QR screen it lives on, same as the earlier Direct Booking Page finding), now gated on that with a banner; per-table rename requires QR Edit, now disabled without it. Command Centre bulk waiter assign (Assign all tables to) was gated on a hardcoded role name check (owner/manager only), leaving out any custom role granted QR Full for exactly the endpoint it calls - added canWriteTab(QR) alongside the owner/manager fast path, consistent with this session earlier retiring hardcoded operational roles. Auto-generate OTA invoices (Channel Manager and Receivables screens, two occurrences) requires SETTINGS Create, not the tab either screen lives on - gated both on canWriteTab(SETTINGS). Confirmed clean by the same audit: Restaurant Orders/Invoices/QR-remainder, Hotel Bookings/Services/Compliance/Concierge FAQ (all already comprehensively gated with hidden: !canWriteTab(...) per action).',

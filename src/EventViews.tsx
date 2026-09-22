@@ -1652,6 +1652,8 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       token={token}
       auditUrl={`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/audit`}
       whereUsedUrl={`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/where-used`}
+      documentsUrl={`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/documents`}
+      canManageDocuments={evCanEdit('EVENTS_BOOKINGS')}
       onOpenObject={onOpenObject}
       refreshNonce={nonce}
       overview={

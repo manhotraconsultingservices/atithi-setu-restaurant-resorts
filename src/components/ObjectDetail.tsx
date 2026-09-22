@@ -18,11 +18,14 @@
 //
 // This component is intentionally module-agnostic — do NOT fork it per module.
 // ════════════════════════════════════════════════════════════════════════
-import React, { useState, useEffect } from 'react';
-import { FileText, History, Link2, ListChecks, ChevronRight, ArrowLeft } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { FileText, History, Link2, ListChecks, Paperclip, ChevronRight, ArrowLeft, Download, Trash2 } from 'lucide-react';
 import { DataTable, type ColDef } from './DataTable';
+// Pure localStorage read, no React context needed — safe to call from the
+// resolver factory below (which builds props outside any component render).
+import { canWriteTab } from '../perm';
 
-type Node = 'OVERVIEW' | 'AUDIT' | 'CHECKLIST' | 'WHERE_USED';
+type Node = 'OVERVIEW' | 'AUDIT' | 'CHECKLIST' | 'WHERE_USED' | 'DOCUMENTS';
 
 /** Hint carried from a Where-Used row into the resolver so a drilled object can
  *  show a sensible title/subtitle even before (or without) a fetch. */
@@ -44,6 +47,17 @@ export interface ObjectDetailProps {
   whereUsedUrl?: string;
   /** Optional: full API path returning { jobs: [...] } — enables the Checklist node. */
   checklistUrl?: string;
+  /** Optional: full API path enabling the Documents node — staff can attach
+   *  any file to this object. GET lists, POST (multipart: file + label)
+   *  uploads, DELETE `${documentsUrl}/${docId}` removes. Every write is
+   *  recorded in the object's own Audit log (server-side, action
+   *  DOCUMENT_ADDED / DOCUMENT_REMOVED) — that is the audit trail; this node
+   *  does not duplicate it. */
+  documentsUrl?: string;
+  /** Whether the current viewer may upload/delete documents (the upload form
+   *  and delete buttons hide when false — the server is the real gate, this
+   *  only avoids leading a View-only user into a 403). Defaults to true. */
+  canManageDocuments?: boolean;
   /** Legacy: called when a Where-Used item with a link is clicked and no `resolveLink` is set. */
   onOpenObject?: (objectType: string, objectId: string) => void;
   /** Preferred: resolve a Where-Used link into a child detail rendered in the same frame. */
@@ -232,6 +246,103 @@ function WhereUsedView({ url, token, onOpen, nonce }: { url: string; token: stri
   );
 }
 
+// ── Documents node (smart table + upload form) ───────────────────────────────
+// Staff can attach any file to the object from here; every add/remove is
+// recorded in the object's own Audit log server-side (who + when), so this
+// view itself stays a plain list — it does not need its own actor/timestamp
+// columns beyond what's useful at a glance.
+function humanFileSize(n?: number | null): string {
+  const bytes = Number(n || 0);
+  if (!bytes) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url: string; token: string; canManage?: boolean; nonce?: number; onChanged?: () => void }) {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [err, setErr] = useState('');
+  const [label, setLabel] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadErr, setUploadErr] = useState('');
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const reload = () => { setRows(null); setErr(''); apiGet(url, token).then(r => setRows(Array.isArray(r) ? r : (r?.rows || []))).catch(e => setErr(e.message)); };
+  useEffect(reload, [url, nonce]);
+
+  const upload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const f = fileRef.current?.files?.[0];
+    if (!f) { setUploadErr('Choose a file first.'); return; }
+    setUploading(true); setUploadErr('');
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      if (label.trim()) fd.append('label', label.trim());
+      const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(b?.error || `HTTP ${r.status}`);
+      setLabel(''); if (fileRef.current) fileRef.current.value = '';
+      reload(); onChanged?.();
+    } catch (e: any) { setUploadErr(e.message || 'Upload failed'); }
+    finally { setUploading(false); }
+  };
+
+  const remove = async (docId: string) => {
+    if (!window.confirm('Delete this document? This cannot be undone.')) return;
+    try {
+      const r = await fetch(`${url}/${docId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(b?.error || `HTTP ${r.status}`);
+      reload(); onChanged?.();
+    } catch (e: any) { setErr(e.message || 'Delete failed'); }
+  };
+
+  if (err) return <div className={CARD}><p className="text-sm text-rose-600">{err}</p></div>;
+
+  const columns: ColDef<any>[] = [
+    { key: 'label', label: 'Document', sortable: true, searchable: true, getValue: r => r.label || r.file_name || '', render: r => (
+      <a href={r.file_url} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1">
+        <Download size={12} className="shrink-0" />{r.label || r.file_name || 'Document'}
+      </a>
+    ) },
+    { key: 'file_name', label: 'File', searchable: true, getValue: r => r.file_name || '', render: r => <span className="text-[11px] text-[#6b5d52]">{r.file_name || '—'}</span> },
+    { key: 'size_bytes', label: 'Size', sortable: true, align: 'right', getValue: r => Number(r.size_bytes || 0), render: r => <span className="text-[11px] text-[#6b5d52]">{humanFileSize(r.size_bytes)}</span> },
+    { key: 'uploaded_by_name', label: 'Added by', sortable: true, filterable: true, filterType: 'text', getValue: r => r.uploaded_by_name || r.uploaded_by || '', render: r => <span className="text-[11px] text-[#6b5d52]">{r.uploaded_by_name || r.uploaded_by || '—'}</span> },
+    { key: 'created_at', label: 'Added', sortable: true, getValue: r => r.created_at || '', render: r => <span className="text-[11px] text-[#6b5d52] whitespace-nowrap">{timeAgo(r.created_at)}</span> },
+    ...(canManage ? [{ key: '_del', label: '', hideable: false, noExport: true, render: (r: any) => (
+      <button onClick={() => remove(r.id)} title="Delete" className="text-rose-400 hover:text-rose-600"><Trash2 size={14} /></button>
+    ) } as ColDef<any>] : []),
+  ];
+
+  return (
+    <div className="space-y-3">
+      {canManage && (
+        <form onSubmit={upload} className={CARD + ' flex flex-wrap items-end gap-2'}>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">File</label>
+            <input ref={fileRef} type="file" className="text-xs w-full" />
+          </div>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Label (optional)</label>
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Signed contract"
+              className="w-full text-xs border border-[#e8dccf] rounded-xl px-3 py-2 outline-none focus:ring-2 ring-brand/20" />
+          </div>
+          <button type="submit" disabled={uploading} className="px-4 py-2 rounded-xl bg-brand text-white text-xs font-bold disabled:opacity-50 inline-flex items-center gap-1.5">
+            <Paperclip size={13} />{uploading ? 'Uploading…' : 'Attach document'}
+          </button>
+          {uploadErr && <p className="w-full text-[11px] text-rose-600">{uploadErr}</p>}
+        </form>
+      )}
+      <DataTable
+        data={rows || []} columns={columns} rowKey={(r, i) => r.id || i} loading={rows === null}
+        compact columnChooser columnFilters tableId="od-documents"
+        searchPlaceholder="Search documents…" exportFilename="documents" emptyMessage="No documents attached yet."
+      />
+    </div>
+  );
+}
+
 // ── Shared link resolver factory ─────────────────────────────────────────────
 // Builds a `resolveLink` for the hotel/events object graph so Where-Used links
 // drill in the same frame. Reused by App.tsx (room/booking) and the checklist
@@ -249,7 +360,7 @@ export function buildObjectResolver(restaurantId: string, token: string) {
       </div>
     </div>
   );
-  const mk = (o: { title: string; subtitle?: string; auditUrl: string; whereUsedUrl: string; checklistUrl?: string; overview: React.ReactNode }): ObjectDetailProps => ({ token, backLabel: 'Back', ...o });
+  const mk = (o: { title: string; subtitle?: string; auditUrl: string; whereUsedUrl: string; checklistUrl?: string; documentsUrl?: string; canManageDocuments?: boolean; overview: React.ReactNode }): ObjectDetailProps => ({ token, backLabel: 'Back', ...o });
 
   return async (objectType: string, objectId: string, hint?: LinkHint): Promise<ObjectDetailProps | null> => {
     switch (objectType) {
@@ -262,6 +373,8 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           auditUrl: `${base}/hotel/bookings/${objectId}/audit`,
           whereUsedUrl: `${base}/hotel/bookings/${objectId}/where-used`,
           checklistUrl: `${base}/hotel/bookings/${objectId}/checklist`,
+          documentsUrl: `${base}/hotel/bookings/${objectId}/documents`,
+          canManageDocuments: canWriteTab('HOTEL_BOOKINGS'),
           overview: facts('Room booking', objectId, [
             ['Guest', b.guest_name], ['Status', b.status], ['Room', b.room_name || b.room_id],
             ['Check-in', String(b.check_in_date || '').slice(0, 10)], ['Check-out', String(b.check_out_date || '').slice(0, 10)],
@@ -282,6 +395,8 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           title: hint?.label || objectId, subtitle: hint?.subtitle || 'Event booking',
           auditUrl: `${base}/events/bookings/${objectId}/audit`,
           whereUsedUrl: `${base}/events/bookings/${objectId}/where-used`,
+          documentsUrl: `${base}/events/bookings/${objectId}/documents`,
+          canManageDocuments: canWriteTab('EVENTS_BOOKINGS'),
           overview: facts('Event booking', objectId),
         });
       case 'EVENT_QUOTATION':
@@ -314,6 +429,8 @@ export function buildObjectResolver(restaurantId: string, token: string) {
           subtitle: hint?.subtitle || [a.status, a.client_name].filter(Boolean).join(' · ') || 'Spa appointment',
           auditUrl: `${base}/spa/appointments/${objectId}/audit`,
           whereUsedUrl: `${base}/spa/appointments/${objectId}/where-used`,
+          documentsUrl: `${base}/spa/appointments/${objectId}/documents`,
+          canManageDocuments: canWriteTab('SPA_APPOINTMENTS'),
           overview: facts('Spa appointment', objectId, [
             ['Service', a.service_name], ['Status', a.status], ['Client', a.client_name],
             ['Start', String(a.start_at || '').slice(0, 16)], ['Price', a.price_snapshot != null ? `₹${Number(a.price_snapshot).toLocaleString('en-IN')}` : null],
@@ -426,6 +543,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
           {railItem('OVERVIEW', <FileText size={15} />, cur.overviewLabel || 'Overview')}
           {railItem('AUDIT', <History size={15} />, 'Audit log')}
           {cur.checklistUrl && railItem('CHECKLIST', <ListChecks size={15} />, 'Checklist')}
+          {cur.documentsUrl && railItem('DOCUMENTS', <Paperclip size={15} />, 'Documents')}
           {cur.whereUsedUrl && railItem('WHERE_USED', <Link2 size={15} />, 'Where Used')}
         </nav>
 
@@ -434,6 +552,7 @@ export function ObjectDetail(rootProps: ObjectDetailProps) {
           {node === 'OVERVIEW' && cur.overview}
           {node === 'AUDIT' && <AuditView url={cur.auditUrl} token={cur.token} nonce={cur.refreshNonce} />}
           {node === 'CHECKLIST' && cur.checklistUrl && <ChecklistView url={cur.checklistUrl} token={cur.token} nonce={cur.refreshNonce} />}
+          {node === 'DOCUMENTS' && cur.documentsUrl && <DocumentsView url={cur.documentsUrl} token={cur.token} canManage={cur.canManageDocuments !== false} nonce={cur.refreshNonce} />}
           {node === 'WHERE_USED' && cur.whereUsedUrl && <WhereUsedView url={cur.whereUsedUrl} token={cur.token} onOpen={openLink} nonce={cur.refreshNonce} />}
         </div>
       </div>

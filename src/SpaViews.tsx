@@ -49,6 +49,10 @@ function SpaHistoryOverlay({ kind, id, meta, onClose, restaurantId, token }: {
           backLabel="Close"
           auditUrl={recordLabel ? `/api/restaurant/${restaurantId}/spa/records/${kind}/${id}/audit` : `/api/restaurant/${restaurantId}/spa/${isAppt ? 'appointments' : 'folios'}/${id}/audit`}
           whereUsedUrl={recordLabel ? `/api/restaurant/${restaurantId}/spa/records/${kind}/${id}/where-used` : isAppt ? `/api/restaurant/${restaurantId}/spa/appointments/${id}/where-used` : undefined}
+          // Documents apply only to the appointment itself — a booking — not
+          // to a master record (Treatment/Therapist/Cabin/Skill) or a folio.
+          documentsUrl={isAppt ? `/api/restaurant/${restaurantId}/spa/appointments/${id}/documents` : undefined}
+          canManageDocuments={canWriteTab('SPA_APPOINTMENTS')}
           resolveLink={buildObjectResolver(restaurantId, token)}
           overview={
             <div className="bg-white rounded-2xl border border-[#e8dccf] p-5">

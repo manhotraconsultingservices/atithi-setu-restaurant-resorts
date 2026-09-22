@@ -36823,6 +36823,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   auditUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/audit`}
                   whereUsedUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/where-used`}
                   checklistUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/checklist`}
+                  documentsUrl={`/api/restaurant/${restaurantId}/hotel/bookings/${bd.id}/documents`}
+                  canManageDocuments={canWriteTab('HOTEL_BOOKINGS')}
                   resolveLink={buildObjectResolver(restaurantId, token!)}
                   onOpenObject={(type, oid) => { if (type === 'FOLIO') { setBookingDetailTarget(null); loadFolio(oid).catch(() => {}); } }}
                   overview={
