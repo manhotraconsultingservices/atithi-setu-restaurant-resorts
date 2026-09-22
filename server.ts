@@ -11985,6 +11985,39 @@ async function startServer() {
     }
   });
 
+  // Admin: reassign one staff member's role at ANY tenant (22 Sep 2026 — added for
+  // the hardcoded-role retirement migration: PATCH /api/owner/staff/:id only ever
+  // operates on the CALLER's own restaurantId, so a platform admin has no way to
+  // move a staff account onto an equivalent custom role at a tenant they don't
+  // hold owner credentials for. Single-purpose and narrow on intent: it changes
+  // ONLY the role column, never name/login/password, and is audited like any
+  // other staff change. Reusable beyond this migration for the same reason the
+  // owner-side PATCH exists — an owner reorganizing roles shouldn't need a
+  // support ticket, and neither should an admin fixing one on their behalf.
+  app.patch("/api/admin/restaurants/:id/staff/:staffId/role", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { role } = req.body || {};
+      if (!role || typeof role !== 'string' || !role.trim()) return res.status(400).json({ error: 'role is required' });
+      const tenantId = req.params.id;
+      const rest: any = await centralDb.get("SELECT id, name FROM restaurants WHERE id = ?", [tenantId]);
+      if (!rest) return res.status(404).json({ error: 'Tenant not found' });
+      const db = await getTenantDb(tenantId);
+      const before: any = await db.get("SELECT id, name, role FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      if (!before) return res.status(404).json({ error: 'Staff member not found' });
+      const newRole = role.trim();
+      await db.run("UPDATE attendance_staff SET role = ? WHERE id = ?", [newRole, req.params.staffId]);
+      await writeObjectAudit(db, req, {
+        objectType: 'EMPLOYEE', objectId: req.params.staffId, action: 'UPDATED',
+        summary: `Role changed ${before.role} → ${newRole} (platform admin)`,
+        before: { role: before.role }, after: { role: newRole },
+      }).catch(() => {});
+      res.json({ success: true, id: req.params.staffId, name: before.name, previous_role: before.role, role: newRole });
+    } catch (err: any) {
+      console.error("/api/admin/restaurants/:id/staff/:staffId/role error:", err);
+      res.status(500).json({ error: "Failed to update staff role" });
+    }
+  });
+
   // Admin: Toggle Restaurant Status
   app.post("/api/admin/restaurants/:id/toggle-status", authenticate, async (req: AuthRequest, res: Response) => {
     const { is_active } = req.body;
@@ -68572,8 +68605,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-access-role-name-dedupe',
+    commit_marker: 'admin-staff-role-reassign',
     code_features: [
+      'admin-staff-role-reassign  New platform-admin endpoint PATCH /api/admin/restaurants/:id/staff/:staffId/role: changes one staff member role at ANY tenant. The existing owner-side PATCH /api/owner/staff/:id only ever operates on the callers own tenant, so a platform admin had no way to move a staff account onto an equivalent custom role at a tenant they hold no owner credentials for. Added ahead of the hardcoded-operational-role retirement so the live accounts still on WAITER/CHEF/HOUSEKEEPING can be migrated to custom roles before that fallback is removed.',
       'staff-access-role-name-dedupe  Reported live: a client tenant had THREE custom roles all named PCC Manager, each with its own permission matrix. The owner edited one believing it was the only one (granting Full on Event Venues), while the staff account named PCC Manager was actually assigned a DIFFERENT role of the same name that still had only View, so the grant never took effect and looked broken. POST /custom-roles now refuses a second active role whose trimmed, case-insensitive name matches an existing one (409, names the existing role); a soft-deleted role frees its name. The create/edit form in Staff Access surfaces that error instead of silently closing. The Staff Access grid also shows each role columns staff count and flags any column whose name collides with another (with its id) so an existing ambiguous pair is visible without waiting for a support ticket. TC-RBAC-DUPE-ROLE-NAME.',
       'public-booking-page-own-permission  The Direct Booking Page save needed Edit on SETTINGS, a tab the page itself never renders — every field this route writes (hero, gallery, amenities, brand colours, date format, GST-inclusive toggle, occupancy policy, UPI payout) is edited ONLY inside the PUBLIC_BOOKING_PAGE tab (the old Settings panel is dead code, `{false && (...)}`, replaced by a redirect card). property-profile PATCH, property-gallery POST/DELETE, room-types/:id/gallery POST/DELETE and hotel/upload-image now require PUBLIC_BOOKING_PAGE Edit/Full instead of SETTINGS, so a role granted just that page can save it.',
       'roleless-allowlist-2-routes  Two routes still used a fixed requireRole allowlist (OWNER / MANAGER), which refuses every custom role even when the page is granted: PUT /spa/profile (the Spa Settings save, whose screen already gates on SPA_SETTINGS) and GET /hotel/channel-security-config (the Channel Manager screen). Now spaStaff + requireTabAction SPA_SETTINGS UPDATE and hotelStaff + requireTabAccess CHANNEL_MANAGER. Found by the Hotel RBAC test (a Channel Manager Edit role got a 403 opening its own page).',
