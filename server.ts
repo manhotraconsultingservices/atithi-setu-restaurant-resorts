@@ -45442,6 +45442,23 @@ ${data.tenant.name}`;
       if (!name?.trim()) return res.status(400).json({ error: 'Role name is required.' });
       const db = await getTenantDb(req.params.id);
       await _ensureCustomRoles(db);
+      // Duplicate-name guard (22 Sep 2026, reported live: 3 different "PCC Manager" roles
+      // on one tenant, each with its own permission matrix — an owner editing the role by
+      // NAME in Staff Access was silently editing a different physical role than the one
+      // actually assigned to the staff account, so a grant that looked applied never took
+      // effect for that user). Compare trimmed, case-insensitive, against ACTIVE roles only
+      // — a soft-deleted role's old name is free to reuse.
+      const trimmedName = name.trim();
+      const dupe: any = await db.get(
+        "SELECT id, name FROM custom_roles WHERE is_active = 1 AND UPPER(TRIM(name)) = UPPER(?) LIMIT 1",
+        [trimmedName]
+      );
+      if (dupe) {
+        return res.status(409).json({
+          error: `A role named "${dupe.name}" already exists. Rename the new role, or open the existing one in Staff Access instead of creating a duplicate — two roles with the same name are easy to mix up when assigning a grant.`,
+          existing_id: dupe.id,
+        });
+      }
       const slug = name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
       const id = `CUSTOM_${slug}_${Date.now().toString(36).toUpperCase()}`;
       await db.run(
@@ -68555,8 +68572,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-page-own-permission',
+    commit_marker: 'staff-access-role-name-dedupe',
     code_features: [
+      'staff-access-role-name-dedupe  Reported live: a client tenant had THREE custom roles all named PCC Manager, each with its own permission matrix. The owner edited one believing it was the only one (granting Full on Event Venues), while the staff account named PCC Manager was actually assigned a DIFFERENT role of the same name that still had only View, so the grant never took effect and looked broken. POST /custom-roles now refuses a second active role whose trimmed, case-insensitive name matches an existing one (409, names the existing role); a soft-deleted role frees its name. The create/edit form in Staff Access surfaces that error instead of silently closing. The Staff Access grid also shows each role columns staff count and flags any column whose name collides with another (with its id) so an existing ambiguous pair is visible without waiting for a support ticket. TC-RBAC-DUPE-ROLE-NAME.',
       'public-booking-page-own-permission  The Direct Booking Page save needed Edit on SETTINGS, a tab the page itself never renders — every field this route writes (hero, gallery, amenities, brand colours, date format, GST-inclusive toggle, occupancy policy, UPI payout) is edited ONLY inside the PUBLIC_BOOKING_PAGE tab (the old Settings panel is dead code, `{false && (...)}`, replaced by a redirect card). property-profile PATCH, property-gallery POST/DELETE, room-types/:id/gallery POST/DELETE and hotel/upload-image now require PUBLIC_BOOKING_PAGE Edit/Full instead of SETTINGS, so a role granted just that page can save it.',
       'roleless-allowlist-2-routes  Two routes still used a fixed requireRole allowlist (OWNER / MANAGER), which refuses every custom role even when the page is granted: PUT /spa/profile (the Spa Settings save, whose screen already gates on SPA_SETTINGS) and GET /hotel/channel-security-config (the Channel Manager screen). Now spaStaff + requireTabAction SPA_SETTINGS UPDATE and hotelStaff + requireTabAccess CHANNEL_MANAGER. Found by the Hotel RBAC test (a Channel Manager Edit role got a 403 opening its own page).',
       'hotel-lead-time-500-fix  GET /hotel/reports/booking-lead-time returned 500 for every role ("function pg_catalog.extract(unknown, integer) does not exist"): in Postgres date - date is already an integer number of days, so EXTRACT(DAY FROM …) over it errors. Found by the Hotel RBAC test opening Hotel Reports → Owner / Manager as a reports-only role; same class as the earlier /inventory/expiring fix.',

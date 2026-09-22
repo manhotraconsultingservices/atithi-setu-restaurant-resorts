@@ -21594,18 +21594,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onSubmit={async (e) => {
                     e.preventDefault();
                     if (!customRoleForm.name.trim()) return;
+                    // A name collision (409) is reported, not swallowed — two roles sharing a
+                    // name is exactly what let an owner edit the WRONG "PCC Manager" and see the
+                    // grant never take effect for the staff account actually holding the other one.
+                    let res: Response;
                     if (editingCustomRole) {
-                      await fetch(`/api/restaurant/${restaurantId}/custom-roles/${editingCustomRole.id}`, {
+                      res = await fetch(`/api/restaurant/${restaurantId}/custom-roles/${editingCustomRole.id}`, {
                         method: 'PATCH',
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                         body: JSON.stringify(customRoleForm),
                       });
                     } else {
-                      await fetch(`/api/restaurant/${restaurantId}/custom-roles`, {
+                      res = await fetch(`/api/restaurant/${restaurantId}/custom-roles`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                         body: JSON.stringify(customRoleForm),
                       });
+                    }
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => ({}));
+                      toast.error(err?.error || 'Failed to save the role.');
+                      return;   // keep the form open so the owner can rename it
                     }
                     setShowCustomRoleForm(false);
                     setEditingCustomRole(null);
@@ -29030,7 +29039,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             for (const cr of customRoles) {
               const id = String(cr.id).toUpperCase();
               if (PRIVILEGED_ROLES.has(id)) continue;
-              roleMap.set(id, { id, label: `${cr.emoji || '👤'} ${cr.name}`, hint: 'Custom role', kind: 'custom', affinity: 'CUSTOM', scope: String(cr.scope || 'BOTH').toUpperCase() });
+              const staffCount = rolesInUse.find(x => String(x.role).toUpperCase() === id)?.count ?? 0;
+              roleMap.set(id, { id, label: `${cr.emoji || '👤'} ${cr.name}`, hint: 'Custom role', kind: 'custom', affinity: 'CUSTOM', scope: String(cr.scope || 'BOTH').toUpperCase(), count: staffCount });
             }
             // ── Custom-role-only model (owner directive 2026-08-28) ──────────────
             // Staff Access shows ONLY the Business Owner (added below, locked) and the
@@ -29044,13 +29054,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // working via their seeded matrix; reassign that staff to a custom role to
             // manage them here.) `rolesInUse` / `BUILTIN_ROLE_META` / `prettifyRole`
             // remain wired for the role-count chips + built-in metadata used elsewhere.
-            void rolesInUse; void BUILTIN_ROLE_META; void prettifyRole;
+            void BUILTIN_ROLE_META; void prettifyRole;
             const allVisibleRoles = Array.from(roleMap.values()).sort((a, b) => {
               const ia = ROLE_ORDER.indexOf(a.id), ib = ROLE_ORDER.indexOf(b.id);
               if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
               if (a.kind !== b.kind) return a.kind === 'builtin' ? -1 : 1;
               return a.label.localeCompare(b.label);
             });
+            // Two roles with the same display name are the exact confusion behind a
+            // real reported bug (22 Sep 2026): the owner edited "PCC Manager" believing
+            // it was the one role, when in fact THREE roles shared that name, each with
+            // its own permission matrix — the grant landed on the wrong one and the
+            // staff account assigned to a different "PCC Manager" never saw it. Flag
+            // every column whose label collides (case/space-insensitive) with another.
+            const labelCounts = new Map<string, number>();
+            for (const r of allVisibleRoles) { const k = r.label.trim().toUpperCase(); labelCounts.set(k, (labelCounts.get(k) || 0) + 1); }
+            const isDuplicateName = (r: RoleDesc) => (labelCounts.get(r.label.trim().toUpperCase()) || 0) > 1;
 
             // Modules that actually have a visible page for this tenant.
             const availableModules = MODULE_DEFS
@@ -29281,6 +29300,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
                                 {r.kind === 'custom' && (
                                   <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 leading-none">Custom</span>
+                                )}
+                                {typeof r.count === 'number' && (
+                                  <span className="text-[8px] text-[#9c8e85] leading-none">{r.count} staff</span>
+                                )}
+                                {isDuplicateName(r) && (
+                                  <span
+                                    className="inline-flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 leading-none whitespace-nowrap"
+                                    title={`Another role is also named "${r.label.replace(/^S+s/, '')}" — a grant made on the wrong one silently does not apply. This one's id ends …${r.id.slice(-8)}. Rename one of them to tell them apart.`}
+                                  >⚠ Same name — id …{r.id.slice(-8)}</span>
                                 )}
                                 {noRestriction ? (
                                   <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
