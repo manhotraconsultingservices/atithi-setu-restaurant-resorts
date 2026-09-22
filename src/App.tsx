@@ -18112,6 +18112,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ))}
           </div>
 
+          {/* Every write control below (add/edit/delete ingredients, suppliers, POs, GRNs,
+              wastage, counts, CSV import, seasonality) needs Edit on Kitchen Inventory
+              (server: requireTabAction('INVENTORY', ...)) — a View grant reads every
+              sub-tab but cannot act. One fieldset covers them all so a control can't be
+              missed as they're added; `contents` keeps it invisible in the layout, and
+              the sub-tab switcher above lives outside it, so navigation stays live either
+              way. EXCEPTION: the Settings → Hotel Inventory panel posts to a DIFFERENT
+              tab (HOTEL_INVENTORY) and is intentionally left OUTSIDE this fieldset —
+              wrapping it here would block a role holding Hotel Inventory Edit but only
+              Kitchen Inventory View (a real, if narrow, combination) from a screen the
+              server would actually let them use; that panel does not yet have its own
+              gate, tracked as a follow-up. */}
+          {!canWriteTab('INVENTORY') && (
+            <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              View access — you can see every sub-tab below, but adding, editing or removing anything needs Edit access. Ask the owner to grant it in Staff Access.
+            </p>
+          )}
+          <fieldset disabled={!canWriteTab('INVENTORY')} className="contents">
           {/* ── DASHBOARD sub-view — KPIs · forecast · trend · top consumers · stock status ── */}
           {inventorySubTab === 'DASHBOARD' && (
             <div className="space-y-5">
@@ -20235,7 +20253,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {inventorySubTab === 'ANALYTICS' && (
             <InventoryAnalyticsView restaurantId={restaurantId} token={token!} module="RESTAURANT" includeShared />
           )}
+          </fieldset>
 
+          {/* Settings mixes Kitchen-Inventory-gated writes (Seasonality, Templates,
+              Locations) with a Hotel Inventory panel gated on ITS OWN tab — left outside
+              the fieldset above for that reason (see the note there). Follow-up: split
+              this sub-tab the same way Guest Bills / Cash Drawer already are, instead of
+              leaving the whole panel ungated in the UI meanwhile. */}
           {/* ── SETTINGS sub-tab — Seasonality · Notification Templates · Hotel Inventory · Storage Locations ── */}
           {inventorySubTab === 'SETTINGS' && (
             <div className="space-y-4">
