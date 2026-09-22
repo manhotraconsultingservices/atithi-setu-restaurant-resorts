@@ -224,15 +224,25 @@ function Pill({ status }: { status: string }) {
 // event_payments). Drives the Paid / Partially paid / Pending pill on the
 // bookings (invoice) table and the Outstanding-by-Invoice report.
 type PayStatus = 'PAID' | 'PARTIAL' | 'PENDING' | 'NONE';
-function evPayStatus(total: any, paid: any): PayStatus {
+function evPayStatus(total: any, paid: any, status?: string): PayStatus {
+  // A cancelled booking owes nothing — showing it as "Pending" tells the owner
+  // there is money to chase for an event that is never going to happen.
+  if (status === 'CANCELLED') return 'NONE';
   const tot = Number(total || 0), p = Number(paid || 0);
   if (tot <= 0) return 'NONE';            // nothing billed yet
   if (p >= tot - 0.01) return 'PAID';     // penny tolerance for rounding
   if (p > 0) return 'PARTIAL';
   return 'PENDING';
 }
-function evPayLabel(t: any, total: any, paid: any): string {
-  const s = evPayStatus(total, paid);
+// A cancelled booking's contract amount is moot — nothing is still due on it,
+// so the Outstanding column (and anything that sums it) must read 0, matching
+// the "OUTSTANDING" KPI tile which already excludes CANCELLED rows this way.
+function evOutstanding(r: any): number {
+  if (r?.status === 'CANCELLED') return 0;
+  return Math.max(0, Number(r?.total_amount || 0) - Number(r?.advance_amount || 0));
+}
+function evPayLabel(t: any, total: any, paid: any, status?: string): string {
+  const s = evPayStatus(total, paid, status);
   return s === 'PAID' ? t('events.pay.paid') : s === 'PARTIAL' ? t('events.pay.partial') : s === 'PENDING' ? t('events.pay.pending') : '—';
 }
 const PAY_COLOR: Record<PayStatus, string> = {
@@ -241,10 +251,10 @@ const PAY_COLOR: Record<PayStatus, string> = {
   PENDING: 'bg-rose-50 text-rose-700 border-rose-200',
   NONE:    'bg-gray-100 text-gray-500 border-gray-200',
 };
-function PaymentPill({ total, paid }: { total: any; paid: any }) {
+function PaymentPill({ total, paid, status }: { total: any; paid: any; status?: string }) {
   const { t } = useT();
-  const s = evPayStatus(total, paid);
-  const label = s === 'NONE' ? '—' : evPayLabel(t, total, paid);
+  const s = evPayStatus(total, paid, status);
+  const label = s === 'NONE' ? '—' : evPayLabel(t, total, paid, status);
   return <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${PAY_COLOR[s]}`}>{label}</span>;
 }
 
@@ -865,7 +875,7 @@ function EventBookings({ restaurantId, token }: Props) {
       <div className="space-y-3 mb-3">
         <DateRangeBar value={dateRange} onChange={r => { setDateRange(r); load(0, undefined, r); }} label={t('listFilter.eventDate')} />
         {(() => {
-          const count = (st: string) => rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === st).length;
+          const count = (st: string) => rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount, r.status) === st).length;
           const due = rows.filter((r: any) => r.status !== 'CANCELLED').reduce((sum: number, r: any) => sum + Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), 0);
           return (
             <StatusTiles active={payFilter} onSelect={f => {
@@ -896,7 +906,7 @@ function EventBookings({ restaurantId, token }: Props) {
       )}
 
       <DataTable
-        data={payFilter === 'ALL' ? rows : payFilter === 'NEEDS_CLOSING' ? rows.filter(evNeedsClosing) : rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount) === payFilter)}
+        data={payFilter === 'ALL' ? rows : payFilter === 'NEEDS_CLOSING' ? rows.filter(evNeedsClosing) : rows.filter((r: any) => evPayStatus(r.total_amount, r.advance_amount, r.status) === payFilter)}
         rowKey={(r: any) => r.id}
         onSearch={runBookingSearch}
         searchPlaceholder="Search all bookings — name, phone, email, booking ID, venue"
@@ -919,8 +929,8 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'guest_count', label: t('events.bookings.guests'), sortable: true, align: 'right' },
           { key: 'total_amount', label: t('common.total'), sortable: true, align: 'right', getValue: (r: any) => Number(r.total_amount || 0), render: (r: any) => money(r.total_amount), exportValue: (r: any) => String(r.total_amount ?? '') },
           { key: 'advance_amount', label: t('events.bookings.advance'), sortable: true, align: 'right', getValue: (r: any) => Number(r.advance_amount || 0), render: (r: any) => money(r.advance_amount), exportValue: (r: any) => String(r.advance_amount ?? '') },
-          { key: 'outstanding', label: t('events.dash.outstanding'), sortable: true, align: 'right', getValue: (r: any) => Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0)), render: (r: any) => money(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))), exportValue: (r: any) => String(Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0))) },
-          { key: 'pay_status', label: t('events.bookings.payment'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount), render: (r: any) => <PaymentPill total={r.total_amount} paid={r.advance_amount} />, exportValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount) },
+          { key: 'outstanding', label: t('events.dash.outstanding'), sortable: true, align: 'right', getValue: (r: any) => evOutstanding(r), render: (r: any) => money(evOutstanding(r)), exportValue: (r: any) => String(evOutstanding(r)) },
+          { key: 'pay_status', label: t('events.bookings.payment'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount, r.status), render: (r: any) => <PaymentPill total={r.total_amount} paid={r.advance_amount} status={r.status} />, exportValue: (r: any) => evPayLabel(t, r.total_amount, r.advance_amount, r.status) },
           { key: 'status', label: t('common.status'), sortable: true, filterable: true, filterType: 'select', getValue: (r: any) => r.status, render: (r: any) => <Pill status={r.status} /> },
           { key: '_a', label: t('common.actions'), noExport: true, render: (r: any) => {
             const due = Math.max(0, Number(r.total_amount || 0) - Number(r.advance_amount || 0));
