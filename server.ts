@@ -56629,7 +56629,7 @@ ${data.tenant.name}`;
 
   // PATCH the property profile. Slug uniqueness is enforced via the
   // partial unique index; we surface a friendly 409 when it trips.
-  app.patch("/api/restaurant/:id/hotel/property-profile", authenticate, hotelStaff, requireTabAction('SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/property-profile", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'UPDATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     if (req.user?.restaurantId !== req.params.id
@@ -56789,7 +56789,7 @@ ${data.tenant.name}`;
     const rows = await db.query("SELECT * FROM property_gallery_images WHERE is_active = 1 ORDER BY display_order, created_at").catch(() => []);
     res.json(rows);
   });
-  app.post("/api/restaurant/:id/hotel/property-gallery", authenticate, hotelStaff, requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/property-gallery", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const b = req.body || {};
@@ -56802,7 +56802,7 @@ ${data.tenant.name}`;
     );
     res.json({ ok: true, id });
   });
-  app.delete("/api/restaurant/:id/hotel/property-gallery/:imageId", authenticate, hotelStaff, requireTabAction('SETTINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/property-gallery/:imageId", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const db = await getTenantDb(req.params.id);
@@ -56821,7 +56821,7 @@ ${data.tenant.name}`;
     ).catch(() => []);
     res.json(rows);
   });
-  app.post("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, hotelStaff, requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const b = req.body || {};
@@ -56834,7 +56834,7 @@ ${data.tenant.name}`;
     );
     res.json({ ok: true, id });
   });
-  app.delete("/api/restaurant/:id/hotel/room-types/:typeId/gallery/:imageId", authenticate, hotelStaff, requireTabAction('SETTINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/room-types/:typeId/gallery/:imageId", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'DELETE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const db = await getTenantDb(req.params.id);
@@ -64929,7 +64929,7 @@ ${data.tenant.name}`;
   // returns the public /uploads/<filename> URL that the property-profile
   // PATCH or gallery POST will persist. SETTINGS-tab-access enforced so
   // marketing-team staff (not just full admins) can upload photos.
-  app.post("/api/restaurant/:id/hotel/upload-image", authenticate, hotelStaff, requireTabAction('SETTINGS', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/upload-image", authenticate, hotelStaff, requireTabAction('PUBLIC_BOOKING_PAGE', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'no file provided' });
       res.json({ success: true, url: `/uploads/${req.file.filename}` });
@@ -68555,8 +68555,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'roleless-allowlist-2-routes',
+    commit_marker: 'public-booking-page-own-permission',
     code_features: [
+      'public-booking-page-own-permission  The Direct Booking Page save needed Edit on SETTINGS, a tab the page itself never renders — every field this route writes (hero, gallery, amenities, brand colours, date format, GST-inclusive toggle, occupancy policy, UPI payout) is edited ONLY inside the PUBLIC_BOOKING_PAGE tab (the old Settings panel is dead code, `{false && (...)}`, replaced by a redirect card). property-profile PATCH, property-gallery POST/DELETE, room-types/:id/gallery POST/DELETE and hotel/upload-image now require PUBLIC_BOOKING_PAGE Edit/Full instead of SETTINGS, so a role granted just that page can save it.',
       'roleless-allowlist-2-routes  Two routes still used a fixed requireRole allowlist (OWNER / MANAGER), which refuses every custom role even when the page is granted: PUT /spa/profile (the Spa Settings save, whose screen already gates on SPA_SETTINGS) and GET /hotel/channel-security-config (the Channel Manager screen). Now spaStaff + requireTabAction SPA_SETTINGS UPDATE and hotelStaff + requireTabAccess CHANNEL_MANAGER. Found by the Hotel RBAC test (a Channel Manager Edit role got a 403 opening its own page).',
       'hotel-lead-time-500-fix  GET /hotel/reports/booking-lead-time returned 500 for every role ("function pg_catalog.extract(unknown, integer) does not exist"): in Postgres date - date is already an integer number of days, so EXTRACT(DAY FROM …) over it errors. Found by the Hotel RBAC test opening Hotel Reports → Owner / Manager as a reports-only role; same class as the earlier /inventory/expiring fix.',
       'hotel-read-gates  Hotel / PMS RBAC test (22 Sep 2026). The probe found no write leaks, but hotelStaff ("holds SOME hotel page") was the only gate on ~70 hotel reads, so a role holding just Checklists, Service Catalogue or Concierge could read every booking and guest phone, folio and Form-C PDFs, police-enquiry and revenue reports, and the channel manager credentials, sync logs and partner invoices. requireHotelAny(pages) (mirror of requireEventsAny) now adds a page-family check: HOTEL_READ_GUESTS / DOCS / MONEY / ANALYTICS / CHANNEL / LOOKUP. Rooms, room types, availability, rates, services, settings and the public-page profile stay open to any hotel page (front-desk screens need them). UI: room status buttons, Guest Bills charge-to-room / guest-paid / mark-paid, Housekeeping start / tick / complete, Checklist Templates new / edit / activate (read-only editor) and the Direct Booking Page (read-only fieldset; saving needs Settings Edit) are hidden or disabled for a View role.',

@@ -29460,10 +29460,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
            addPropertyGalleryImage, deletePropertyGalleryImage,
            addRoomTypeGalleryImage, deleteRoomTypeGalleryImage,
            fetchRoomTypeGallery — same ones SETTINGS previously used). */
-        /* Saving the public page writes the property profile, gallery and images, which the server gates on
-           Settings (Edit) — a role that only holds Direct Booking Page sees it read-only. */
-        <fieldset disabled={!canWriteTab('SETTINGS')} className="max-w-4xl space-y-5 min-w-0 border-0 p-0 m-0">
-          {!canWriteTab('SETTINGS') && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-800">View only — changing the public page needs Edit access to Settings.</div>}
+        /* Saving the public page writes the property profile, gallery and images — every field this
+           tab renders (hero, gallery, amenities, brand colours, date format, GST-inclusive toggle,
+           occupancy policy, UPI payout) lives ONLY here, so the server gates it on this tab's own
+           Edit permission — a role granted View-only sees it read-only. */
+        <fieldset disabled={!canWriteTab('PUBLIC_BOOKING_PAGE')} className="max-w-4xl space-y-5 min-w-0 border-0 p-0 m-0">
+          {!canWriteTab('PUBLIC_BOOKING_PAGE') && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-800">View only — changing the public page needs Edit access to Direct Booking Page.</div>}
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🌐 Public Booking Page</h2>
@@ -30229,7 +30231,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                 {/* Save */}
                 <div className="flex items-center gap-3 pt-2">
-                  {canWriteTab('SETTINGS') && <button
+                  {canWriteTab('PUBLIC_BOOKING_PAGE') && <button
                     onClick={savePropertyProfile}
                     disabled={propertyProfileSaving}
                     className="px-5 py-2.5 rounded-2xl bg-brand text-white text-sm font-bold hover:bg-brand-dark disabled:opacity-50"
