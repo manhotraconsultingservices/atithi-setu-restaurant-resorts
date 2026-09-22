@@ -10,7 +10,20 @@ export function tabLevel(tab: string): number {
     const role = (localStorage.getItem('role') || '').toUpperCase();
     if (role === 'OWNER' || role === 'SUPER_ADMIN' || role === 'CTO') return 3;
     const perms = JSON.parse(localStorage.getItem('tab_perms') || '{}');
-    if (!perms || Object.keys(perms).length === 0) return 3; // no restrictions configured → don't hide
+    if (!perms || Object.keys(perms).length === 0) {
+      // An empty map means one of two very different things, and only one of
+      // them should fail open: a LEGACY role whose matrix was simply never
+      // saved (safe to not restrict — the historical behavior here), or an
+      // AUTHORITATIVE custom role the server resolved to zero grants (a
+      // brand-new role before the owner grants anything, or one explicitly set
+      // to None) — that case is deny-by-default and must return 0, never 3.
+      // App.tsx sets this flag from the '__perm_complete__' marker on every
+      // /my-permissions fetch. Reported live (22 Sep 2026): without this check,
+      // every canWriteTab()/canSeeTab() call — including the Home module tiles
+      // and every standalone component's write controls — treated a zero-grant
+      // custom role as fully unrestricted.
+      return localStorage.getItem('tab_perms_deny_all') === '1' ? 0 : 3;
+    }
     return Number(perms[tab] || 0);
   } catch { return 3; } // fail-open (backend still enforces) — never hide controls on a storage glitch
 }

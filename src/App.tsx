@@ -7697,12 +7697,14 @@ function ChannelSettingsCard({
             {draft.is_active ? '● Active' : '○ Inactive'}
           </div>
         </div>
-        {/* Active toggle */}
-        <label className="inline-flex items-center cursor-pointer select-none">
+        {/* Active toggle — same DELIVERY-Edit gate as the fields below (this one
+            sits in the header strip, outside that fieldset, so it needs its own). */}
+        <label className={cn("inline-flex items-center select-none", canWriteTab('DELIVERY') ? "cursor-pointer" : "cursor-not-allowed opacity-60")}>
           <input
             type="checkbox"
             className="sr-only peer"
             checked={draft.is_active}
+            disabled={!canWriteTab('DELIVERY')}
             onChange={e => setDraft({ ...draft, is_active: e.target.checked })}
           />
           <div
@@ -7713,6 +7715,13 @@ function ChannelSettingsCard({
       </div>
 
       <div className="p-5 space-y-3">
+        {/* Every field + both actions below write through requireTabAction('DELIVERY',
+            'UPDATE'/'CREATE') server-side — none of it had a client gate at all before
+            this fix (22 Sep 2026 Restaurant RBAC sweep: a View-only role saw fully live
+            markup/commission/prep-time inputs, an enabled Active toggle, and an enabled
+            Save button, only finding out it was refused after clicking it). The Active
+            toggle sits in the header strip above and is gated separately there. */}
+        <fieldset disabled={!canWriteTab('DELIVERY')} className="contents">
         {/* Default markup % */}
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">
@@ -7798,7 +7807,11 @@ function ChannelSettingsCard({
             </button>
           )}
         </div>
+        </fieldset>
 
+        {!canWriteTab('DELIVERY') && (
+          <p className="text-[10px] text-amber-700 text-center">View access — changing channel pricing or credentials needs Edit on Delivery Partners.</p>
+        )}
         <p className="text-[10px] text-[#9c8e85] text-center pt-1">
           Per-item overrides: Menu Management → edit item → Channel Pricing
         </p>
@@ -7962,7 +7975,10 @@ function ChannelCredentialsModal({
                 ))}
               </div>
 
-              {/* Inputs — secrets are write-only */}
+              {/* Inputs — secrets are write-only. Same DELIVERY-Edit gate as
+                  ChannelSettingsCard (PUT .../credentials requires UPDATE server-side;
+                  this form had no client gate at all before the 22 Sep RBAC sweep). */}
+              <fieldset disabled={!canWriteTab('DELIVERY')} className="contents">
               {[
                 { key: 'API_KEY', label: 'API Key', placeholder: '(secret) — leave blank to keep existing' },
                 { key: 'HMAC_SECRET', label: 'HMAC Secret', placeholder: '(secret) — used to verify inbound webhooks' },
@@ -7980,6 +7996,10 @@ function ChannelCredentialsModal({
                   />
                 </div>
               ))}
+              </fieldset>
+              {!canWriteTab('DELIVERY') && (
+                <p className="text-[10px] text-amber-700">View access — saving or testing credentials needs Edit on Delivery Partners.</p>
+              )}
 
               {testResult && (
                 <div className={cn(
@@ -7996,15 +8016,16 @@ function ChannelCredentialsModal({
         <div className="px-6 py-4 border-t border-brand/10 flex items-center justify-between gap-3 bg-[#faf7f2]/50">
           <button
             onClick={handleTest}
-            disabled={testing || saving || !meta?.configured}
+            disabled={testing || saving || !meta?.configured || !canWriteTab('DELIVERY')}
             className="px-4 py-2 text-sm font-bold rounded-xl border border-brand/20 text-brand hover:bg-brand/5 disabled:opacity-40"
-            title={!meta?.configured ? 'Save credentials first' : 'Run an open+close cycle through the adapter'}
+            title={!canWriteTab('DELIVERY') ? 'Needs Edit on Delivery Partners' : !meta?.configured ? 'Save credentials first' : 'Run an open+close cycle through the adapter'}
           >{testing ? 'Testing…' : '🧪 Test connection'}</button>
           <div className="flex gap-2">
             <button onClick={onClose} className="px-4 py-2 text-sm font-bold rounded-xl border border-brand/15 text-[#6b5d52]">Close</button>
             <button
               onClick={handleSave}
-              disabled={saving || testing}
+              disabled={saving || testing || !canWriteTab('DELIVERY')}
+              title={!canWriteTab('DELIVERY') ? 'Needs Edit on Delivery Partners' : undefined}
               className="px-5 py-2 text-sm font-bold rounded-xl bg-brand text-white hover:bg-brand-dark disabled:opacity-50"
             >{saving ? 'Saving…' : 'Save credentials'}</button>
           </div>
@@ -13622,7 +13643,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           setTabPermissions(data.tab_permissions);
           // Mirror to localStorage so detached module components (e.g. EventViews)
           // can gate high-privilege controls on tab LEVEL without prop-drilling.
-          try { localStorage.setItem('tab_perms', JSON.stringify(data.tab_permissions)); } catch { /* storage may be unavailable */ }
+          //
+          // Also mirror whether this is an AUTHORITATIVE deny-all (a brand-new
+          // custom role before the owner grants anything, or a role explicitly
+          // set to None) — perm.ts's tabLevel() must NOT fail-open on an empty
+          // tab_permissions object in that case. Reported live (22 Sep 2026
+          // Restaurant RBAC sweep): a just-created custom role with zero grants
+          // resolves server-side to tab_permissions={} (the '__complete__'
+          // sentinel is stripped before it reaches the client), and tabLevel()'s
+          // "empty object → no restrictions configured, don't hide" rule — meant
+          // for a LEGACY role whose matrix was simply never saved — read that
+          // deny-all state as "unrestricted" and granted Full(3) on every tab to
+          // every canWriteTab()/canSeeTab() check in the app (module tiles on
+          // Home, and every standalone component's write controls), even though
+          // the nav itself correctly still refused to open any of those tabs.
+          const isAuthoritativeDenyAll = Array.isArray(data.allowed_tabs) && data.allowed_tabs.includes('__perm_complete__')
+            && Object.keys(data.tab_permissions).length === 0;
+          try {
+            localStorage.setItem('tab_perms', JSON.stringify(data.tab_permissions));
+            localStorage.setItem('tab_perms_deny_all', isAuthoritativeDenyAll ? '1' : '0');
+          } catch { /* storage may be unavailable */ }
         }
       })
       .catch(() => {});
@@ -73315,6 +73355,12 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                   />
                 </div>
 
+                {/* Everything below writes through PUT/DELETE .../reservation-config,
+                    gated server-side on BOOKINGS Edit(2)/Full(3) — this whole editor had
+                    no client gate at all before the 22 Sep Restaurant RBAC sweep (a
+                    View-only role saw a fully live slot editor, Save and Remove Config
+                    buttons). "Jump to Date" above is pure navigation and stays outside. */}
+                <fieldset disabled={!canWriteTab('BOOKINGS')} className="contents">
                 {/* Open toggle */}
                 <div className={cn(
                   "flex items-center justify-between rounded-2xl px-4 py-3 transition-colors",
@@ -73434,6 +73480,10 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                     <Trash2 size={16} /> {deletingConfig ? 'Removing…' : 'Remove Config'}
                   </button>
                 )}
+                </fieldset>
+                {!canWriteTab('BOOKINGS') && (
+                  <p className="text-[11px] text-amber-700 text-center">View access — changing a date's availability needs Edit on Table Bookings.</p>
+                )}
                 </div>{/* /p-5 space-y-4 */}
               </div>
             </div>
@@ -73446,6 +73496,9 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
               <p className="text-xs text-white/70 mt-0.5">Apply the same availability settings to a range of dates at once.</p>
             </div>
             <div className="p-6 space-y-5">
+            {/* POST .../reservation-config/bulk requires BOOKINGS Edit(2) server-side —
+                same gap as the single-date editor above. */}
+            <fieldset disabled={!canWriteTab('BOOKINGS')} className="contents">
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* From date */}
@@ -73569,6 +73622,10 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                 </span>
               )}
             </div>
+            </fieldset>
+            {!canWriteTab('BOOKINGS') && (
+              <p className="text-[11px] text-amber-700 text-center">View access — bulk-applying availability needs Edit on Table Bookings.</p>
+            )}
             </div>{/* /p-6 space-y-5 */}
           </div>
         </div>
