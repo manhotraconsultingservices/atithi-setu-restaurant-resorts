@@ -20255,11 +20255,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
           </fieldset>
 
-          {/* Settings mixes Kitchen-Inventory-gated writes (Seasonality, Templates,
-              Locations) with a Hotel Inventory panel gated on ITS OWN tab — left outside
-              the fieldset above for that reason (see the note there). Follow-up: split
-              this sub-tab the same way Guest Bills / Cash Drawer already are, instead of
-              leaving the whole panel ungated in the UI meanwhile. */}
+          {/* Settings sits outside the fieldset above because its four panels write
+              through THREE different tabs (INVENTORY, SETTINGS, HOTEL_INVENTORY) — each
+              panel below carries its own fieldset + banner instead of one shared gate. */}
           {/* ── SETTINGS sub-tab — Seasonality · Notification Templates · Hotel Inventory · Storage Locations ── */}
           {inventorySubTab === 'SETTINGS' && (
             <div className="space-y-4">
@@ -20289,9 +20287,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 ))}
               </div>
 
+              {/* Each Settings panel writes through a DIFFERENT tab (server: an inline
+                  _requireTabWrite check per route, not the outer Kitchen Inventory gate) —
+                  Seasonality/Locations need INVENTORY, Templates needs SETTINGS, Hotel
+                  Inventory needs HOTEL_INVENTORY — so each gets its own fieldset instead
+                  of one shared gate, or a role holding one but not the others would be
+                  wrongly blocked (or wrongly let through) on the rest. */}
               {/* — Seasonality Factors — */}
               {settingsPanel === 'SEASONALITY' && (
                 <div className="space-y-3">
+                  {!canWriteTab('INVENTORY') && (
+                    <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      View access — adding or removing a seasonality factor needs Edit on Kitchen Inventory.
+                    </p>
+                  )}
+                  <fieldset disabled={!canWriteTab('INVENTORY')} className="contents">
                   <div className="bg-white rounded-2xl border border-brand/10 p-4">
                     <h3 className="text-sm font-bold mb-3">Add Seasonality Factor</h3>
                     <p className="text-xs text-[#9c8e85] mb-4">Multipliers are applied to the day-of-week rolling-average forecast. Use 1.5 to boost paneer 50% on Diwali; 0.7 to discount Mondays.</p>
@@ -20341,12 +20351,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </tbody>
                     </table>
                   </div>
+                  </fieldset>
                 </div>
               )}
 
               {/* — Notification Templates — */}
               {settingsPanel === 'TEMPLATES' && (
                 <div className="space-y-3">
+                  {!canWriteTab('SETTINGS') && (
+                    <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      View access — saving a notification template needs Edit on Settings.
+                    </p>
+                  )}
+                  <fieldset disabled={!canWriteTab('SETTINGS')} className="contents">
                   <div className="bg-white rounded-2xl border border-brand/10 p-4 text-xs text-[#6b5d52]">
                     Override the default text for any notification. Use <code className="bg-[#faf7f2] px-1">{`{{variable}}`}</code> placeholders (e.g. <code className="bg-[#faf7f2] px-1">{`{{ingredient}}`}</code>, <code className="bg-[#faf7f2] px-1">{`{{balance}}`}</code>, <code className="bg-[#faf7f2] px-1">{`{{restaurantName}}`}</code>). Leave a row blank to fall back to the built-in template.
                   </div>
@@ -20361,15 +20378,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       fetchNotifTemplates();
                     }}
                   />
+                  </fieldset>
                 </div>
               )}
 
               {/* — Hotel Inventory — */}
               {settingsPanel === 'HOTEL_INV' && (
                 <div className="space-y-3">
+                  {!canWriteTab('HOTEL_INVENTORY') && (
+                    <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      View access — adding or removing a hotel inventory item needs Edit on Hotel Inventory.
+                    </p>
+                  )}
                   <div className="bg-white rounded-2xl border border-brand/10 p-4 text-xs text-[#6b5d52]">
                     Track linens, mini-bar items, amenity restocking. Movements log to the same audit trail as food ingredients.
                   </div>
+                  <fieldset disabled={!canWriteTab('HOTEL_INVENTORY')} className="contents">
                   <HotelInventoryPanel
                     items={hotelInventory}
                     restaurantId={restaurantId}
@@ -20389,15 +20413,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     }}
                     onRefresh={fetchHotelInventory}
                   />
+                  </fieldset>
                 </div>
               )}
 
               {/* — Storage Locations — */}
               {settingsPanel === 'LOCATIONS' && (
                 <div className="space-y-3">
+                  {!canWriteTab('INVENTORY') && (
+                    <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      View access — adding or removing a storage location needs Edit on Kitchen Inventory.
+                    </p>
+                  )}
                   <div className="bg-white rounded-2xl border border-brand/10 p-4 text-xs text-[#6b5d52]">
                     Multi-location stock — split your pantry into kitchen, walk-in cooler, bar storage, etc. Default <strong>Main Storage</strong> location is always present.
                   </div>
+                  <fieldset disabled={!canWriteTab('INVENTORY')} className="contents">
                   <LocationsPanel
                     locations={storageLocations}
                     onCreate={async (name, kind) => {
@@ -20415,6 +20446,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       fetchStorageLocations();
                     }}
                   />
+                  </fieldset>
                 </div>
               )}
             </div>
