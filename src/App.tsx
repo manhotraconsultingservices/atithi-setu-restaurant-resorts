@@ -9028,6 +9028,18 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
 
       {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
 
+      {/* Every write control below (save/post/close/reverse/record/add/remove) needs Edit
+          on Ledger & Books (server: `Ledger & Books (Accounting) Edit access required`,
+          confirmed on POST /accounting/journal-entries) — a View grant reads every screen
+          but cannot act. One fieldset covers all 20 sub-tabs so a control can't be missed
+          as they're added; `contents` keeps it invisible in the layout (no border/padding),
+          and the tab switcher above lives outside it, so navigation stays live either way. */}
+      {!canWriteTab('ACCOUNTING') && (
+        <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          View access — you can see every book below, but saving, posting or reversing an entry needs Edit access. Ask the owner to grant it in Staff Access.
+        </p>
+      )}
+      <fieldset disabled={!canWriteTab('ACCOUNTING')} className="contents">
       {acctTab === 'BANK_ACCOUNTS' && (
         <div className="space-y-5">
           <p className="text-sm text-[#6b5d52]">Every bank account the business uses. Each is wired to its own ledger account, so its balance flows to the Balance Sheet and every owner payout / contribution posts against the right account.</p>
@@ -10468,7 +10480,13 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           </div>
         </div>
       )}
+      </fieldset>
 
+      {/* Cash Count + Cash Drawer are gated on their OWN tab (CASH_DRAWER), not
+          Accounting — every control in these two blocks already checks
+          canWriteTab('CASH_DRAWER') individually, so they sit OUTSIDE the
+          Accounting fieldset above (a disabled ancestor fieldset can't be
+          re-enabled by a nested one — this region must not be wrapped in it). */}
       {acctTab === 'CASHCOUNT' && (
         <div className="space-y-4">
           <div className="flex items-center gap-2 flex-wrap">
@@ -10703,6 +10721,8 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
         </div>
       )}
 
+      {/* Back to the Accounting-gated fieldset for the remaining sub-tabs. */}
+      <fieldset disabled={!canWriteTab('ACCOUNTING')} className="contents">
       {acctTab === 'EXPENSES' && (
         <div className="space-y-4">
           <div className="rounded-lg border border-[#e8ded0] bg-white p-4 space-y-3">
@@ -11100,6 +11120,7 @@ function AccountingView({ restaurantId, token, initialTab, cashierMode }: { rest
           </button>
         </div>
       )}
+      </fieldset>
     </div>
   );
 }
