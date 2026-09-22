@@ -17506,10 +17506,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-brand/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all">
                   <Download size={13}/> {tr('Export')}
                 </button>
-                <label className="px-3 py-2 rounded-xl text-xs font-bold border border-brand/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all cursor-pointer">
+                {canWriteTab('MENU') && <label className="px-3 py-2 rounded-xl text-xs font-bold border border-brand/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all cursor-pointer">
                   <Upload size={13}/> {tr('Import')}
                   <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
-                </label>
+                </label>}
                 {canWriteTab('MENU') && <button onClick={() => setIsAddingItem(true)}
                   className="bg-brand text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-brand-dark transition-all">
                   <Plus size={14}/> {tr('Add Item')}
@@ -17526,10 +17526,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all">
                   <Download size={13}/> {tr('Export')}
                 </button>
-                <label className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all cursor-pointer">
+                {canWriteTab('MENU') && <label className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all cursor-pointer">
                   <Upload size={13}/> {tr('Import')}
                   <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleRecipeCsvFile(e.target.files[0]); e.target.value=''; }} />
-                </label>
+                </label>}
               </div>
             </div>
           </div>
@@ -20957,12 +20957,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <p className="text-sm text-[#6b5d52] mt-1">Outstanding amounts owed by OTAs and travel agents, aged by collection bucket.</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <button
+              {/* The server gates this on SETTINGS (Create), not RECEIVABLES — a role
+                  granted only this tab, however broadly, cannot use it. */}
+              {canWriteTab('SETTINGS') && <button
                 onClick={autoGenerateInvoices}
                 disabled={autoGeneratingInvoices}
                 className="px-3 py-1.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 disabled:opacity-50"
                 title="Aggregate last month's checked-out OTA bookings into one invoice per channel. Idempotent."
-              >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
+              >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>}
               <button
                 onClick={() => {
                   if (!receivablesAging?.partners?.length) { toast.info('Nothing to export yet.'); return; }
@@ -22911,24 +22913,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
 
           <div className="bg-white p-5 sm:p-8 rounded-[32px] border border-brand/10 shadow-sm space-y-8">
+            {/* "Number of Tables" saves through the whole-restaurant PATCH, which the
+                server gates on SETTINGS Edit, not QR — a role granted only QR (however
+                broadly) cannot use it, so it is disabled on that permission, not this
+                tab's own. */}
             <div className="max-w-md space-y-4">
               <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Number of Tables</label>
+              <fieldset disabled={!canWriteTab('SETTINGS')} className="contents">
               <div className="flex gap-2">
-                <input 
+                <input
                   type="number"
                   min="0"
                   className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-brand/20 outline-none"
                   value={restaurant?.table_count || 0}
                   onChange={e => setRestaurant(prev => prev ? { ...prev, table_count: parseInt(e.target.value) || 0 } : null)}
                 />
-                <button 
+                <button
                   type="button"
                   onClick={updateRestaurant}
-                  className="px-6 py-3 bg-brand text-white rounded-2xl font-bold hover:bg-brand-dark transition-all"
+                  className="px-6 py-3 bg-brand text-white rounded-2xl font-bold hover:bg-brand-dark transition-all disabled:opacity-50"
                 >
                   Update Tables
                 </button>
               </div>
+              </fieldset>
+              {!canWriteTab('SETTINGS') && (
+                <p className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Changing the table count needs Edit access to Settings.
+                </p>
+              )}
               <p className="text-[11px] text-[#6b5d52]">Update the table count to generate new QR codes for your restaurant.</p>
             </div>
 
@@ -22958,9 +22971,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <QRCodeCanvas id={`qr-table-${table.id}`} value={`${window.location.origin}?r=${restaurantId}&table=${table.id}`} size={100} />
                   </div>
                   <div className="space-y-2">
-                    <input 
+                    <input
                       type="text"
-                      className="w-full text-center text-sm font-bold text-[#1a1a1a] bg-transparent border-b border-dashed border-brand/20 focus:border-brand outline-none"
+                      disabled={!canWriteTab('QR')}
+                      title={!canWriteTab('QR') ? 'Renaming a table needs Edit access to QR / Table Management.' : undefined}
+                      className="w-full text-center text-sm font-bold text-[#1a1a1a] bg-transparent border-b border-dashed border-brand/20 focus:border-brand outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                       value={table.name}
                       onChange={(e) => {
                         const newName = e.target.value;
@@ -27519,12 +27534,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <button
+                {/* The server gates this on SETTINGS (Create), not CHANNEL_MANAGER — a
+                    role granted only this tab, however broadly, cannot use it. */}
+                {canWriteTab('SETTINGS') && <button
                   onClick={autoGenerateInvoices}
                   disabled={autoGeneratingInvoices}
                   className="px-3 py-1.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 disabled:opacity-50"
                   title="Aggregate last month's checked-out OTA bookings into one invoice per channel. Idempotent."
-                >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
+                >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>}
                 {/* CSV export — pure client-side from the already-fetched
                     aging payload. Owner downloads to share with accountant. */}
                 <button
@@ -31892,11 +31909,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
-          {/* ── BULK WAITER ASSIGN ── owner/manager: assign one waiter to every
-               table at once (or clear all). Handy for handing a single waiter the
-               whole floor when shared-floor mode is off. Non-managers never see
-               it; the endpoint 403s them anyway. */}
-          {(isOwnerOrAdmin || currentRole === 'MANAGER') && staff.some((s: any) => isAssignableFloorStaff(s.role)) && (
+          {/* ── BULK WAITER ASSIGN ── assign one waiter to every table at once (or clear
+               all). Handy for handing a single waiter the whole floor when shared-floor
+               mode is off. The server gates this on QR (Create) — was owner/manager-only
+               by role name, which left out any custom role granted QR Full for exactly
+               this (22 Sep 2026 hardcoded-role sweep). Non-eligible roles never see it;
+               the endpoint 403s them anyway. */}
+          {(isOwnerOrAdmin || currentRole === 'MANAGER' || canWriteTab('QR')) && staff.some((s: any) => isAssignableFloorStaff(s.role)) && (
             <div className="flex items-center gap-2 flex-wrap px-4 py-3 rounded-2xl backdrop-blur-md bg-white/5 border border-white/10">
               <span className="text-[11px] font-bold uppercase tracking-widest text-[#f0ede8]/70">Assign all tables to</span>
               <select
