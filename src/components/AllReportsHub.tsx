@@ -41,6 +41,14 @@ const fmt = (n: any) =>
 
 const pct = (n: any) => `${Number(n || 0).toFixed(1)}%`;
 
+// Every date-only field on these report endpoints reaches the browser as a
+// JSON-serialised ISO string ("2026-09-04T00:00:00.000Z") because it started
+// life as a Postgres DATE column with no getValue to slice it - a bare column
+// def just prints that whole string. Safe to String().slice(0,10) HERE
+// (unlike on the server) because by this point it is already a string, never
+// a live Date object.
+const dateOnly = (v: any) => v ? String(v).slice(0, 10) : '—';
+
 // GET .../group-revenue has no status column of its own - derive one from
 // the room counts and settled_at it does return, same lifecycle the group
 // itself goes through (booked → in house → checked out → settled), so the
@@ -73,7 +81,7 @@ const REPORTS: ReportDef[] = [
     category: 'front-office',
     endpoint: '/hotel/reports/arrivals?from={from}&to={to}',
     columns: [
-      { key: 'check_in_date',  label: 'Check-in',  sortable: true },
+      { key: 'check_in_date',  label: 'Check-in',  sortable: true, getValue: r => dateOnly(r.check_in_date) },
       { key: 'guest_name',     label: 'Guest',      sortable: true },
       { key: 'guest_phone',    label: 'Phone' },
       { key: 'room',           label: 'Room',        getValue: r => r.room_name || r.room_number || '—' },
@@ -90,11 +98,11 @@ const REPORTS: ReportDef[] = [
     category: 'front-office',
     endpoint: '/hotel/reports/departures?from={from}&to={to}',
     columns: [
-      { key: 'check_out_date', label: 'Check-out',  sortable: true },
+      { key: 'check_out_date', label: 'Check-out',  sortable: true, getValue: r => dateOnly(r.check_out_date) },
       { key: 'guest_name',     label: 'Guest',       sortable: true },
       { key: 'guest_phone',    label: 'Phone' },
       { key: 'room',           label: 'Room',         getValue: r => r.room_name || r.room_number || '—' },
-      { key: 'check_in_date',  label: 'Check-in',   sortable: true },
+      { key: 'check_in_date',  label: 'Check-in',   sortable: true, getValue: r => dateOnly(r.check_in_date) },
       { key: 'folio_total',    label: 'Folio Total', sortable: true, align: 'right',
         getValue: r => Number(r.folio_total || r.total_amount || 0),
         render: r => fmt(r.folio_total || r.total_amount) },
@@ -141,14 +149,14 @@ const REPORTS: ReportDef[] = [
     category: 'front-office',
     endpoint: '/hotel/reports/police-enquiry?from={from}&to={to}',
     columns: [
-      { key: 'check_in_date',  label: 'Check-in',    sortable: true },
+      { key: 'check_in_date',  label: 'Check-in',    sortable: true, getValue: r => dateOnly(r.check_in_date) },
       { key: 'guest_name',     label: 'Guest Name',  sortable: true },
       { key: 'guest_phone',    label: 'Phone' },
       { key: 'nationality',    label: 'Nationality',  sortable: true },
       { key: 'id_proof',       label: 'ID Proof',    getValue: r => idProof(r.guest_id_proof) },
       { key: 'num_guests',     label: 'Pax',          align: 'right' },
       { key: 'room',           label: 'Room',          getValue: r => r.room_name || r.room_number || '—' },
-      { key: 'check_out_date', label: 'Check-out',   sortable: true },
+      { key: 'check_out_date', label: 'Check-out',   sortable: true, getValue: r => dateOnly(r.check_out_date) },
       { key: 'status',         label: 'Status',      sortable: true },
     ],
   },
@@ -159,7 +167,7 @@ const REPORTS: ReportDef[] = [
     category: 'front-office',
     endpoint: '/hotel/reports/no-shows?from={from}&to={to}',
     columns: [
-      { key: 'check_in_date',  label: 'Expected Arrival', sortable: true },
+      { key: 'check_in_date',  label: 'Expected Arrival', sortable: true, getValue: r => dateOnly(r.check_in_date) },
       { key: 'guest_name',     label: 'Guest',             sortable: true },
       { key: 'guest_phone',    label: 'Phone' },
       { key: 'room',           label: 'Room',               getValue: r => r.room_name || r.room_number || '—' },
@@ -395,7 +403,7 @@ const REPORTS: ReportDef[] = [
     category: 'management',
     endpoint: '/hotel/reports/daily-forecast?from={from}&to={to}',
     columns: [
-      { key: 'forecast_date',     label: 'Date',             sortable: true },
+      { key: 'forecast_date',     label: 'Date',             sortable: true, getValue: r => dateOnly(r.forecast_date) },
       { key: 'expected_arrivals', label: 'Exp. Arrivals',    sortable: true, align: 'right' },
       { key: 'expected_guests',   label: 'Exp. Guests',      sortable: true, align: 'right' },
       { key: 'day_use_count',     label: 'Day-use',          align: 'right' },

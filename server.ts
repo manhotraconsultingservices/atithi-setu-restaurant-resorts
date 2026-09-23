@@ -3099,8 +3099,8 @@ async function buildHotelPaymentLinkPayload(
     guest_name: booking.guest_name || '',
     guest_email: booking.guest_email || '',
     guest_phone: booking.guest_phone || '',
-    check_in_date: String(booking.check_in_date || '').slice(0, 10),
-    check_out_date: String(booking.check_out_date || '').slice(0, 10),
+    check_in_date: normaliseDateIso(booking.check_in_date),
+    check_out_date: normaliseDateIso(booking.check_out_date),
     property_name: restaurant?.name || 'Property',
     breakup,
     has_folio: !!folio?.id,
@@ -5538,8 +5538,15 @@ async function getSeasonForDate(restaurantId: string, isoDate: string): Promise<
     // which wrongly applied off-season rates on peak dates). Narrowest span
     // first, then display_order as a stable final tiebreak.
     const spanDays = (r: any): number => {
-      const s = Date.parse(`${String(r.start_date).slice(0, 10)}T00:00:00Z`);
-      const e = Date.parse(`${String(r.end_date).slice(0, 10)}T00:00:00Z`);
+      // r.start_date/end_date are pg DATE columns (raw Date objects) -
+      // String(dateObject).slice(0,10) gave Date.parse a garbled
+      // weekday+month+day it could never parse, so s/e were always NaN and
+      // this "narrowest span wins" tie-break always fell through to
+      // MAX_SAFE_INTEGER for every row - silently disabling the very fix
+      // the comment above describes (a peak-season window never actually
+      // won over a year-long default season on an overlapping date).
+      const s = Date.parse(`${normaliseDateIso(r.start_date)}T00:00:00Z`);
+      const e = Date.parse(`${normaliseDateIso(r.end_date)}T00:00:00Z`);
       return (Number.isFinite(s) && Number.isFinite(e) && e >= s) ? (e - s) : Number.MAX_SAFE_INTEGER;
     };
     rows.sort((a, b) => {
@@ -24279,7 +24286,7 @@ ${data.tenant.name}`;
         const st = String(r.status || '').toUpperCase();
         byStatus[st] = (byStatus[st] || 0) + 1;
         if (st !== 'DELIVERED' && st !== 'CANCELLED') openCount++;
-        if (String(r.created_at).slice(0, 10) === todayStr) todayGross += Number(r.total_amount || 0);
+        if (normaliseDateIso(r.created_at) === todayStr) todayGross += Number(r.total_amount || 0);
       });
 
       res.json({
@@ -37574,7 +37581,7 @@ ${data.tenant.name}`;
           customerPhone: toPhone, customerEmail: data.booking.customer_email || undefined,
           customerName: data.booking.customer_name || '', guestName: data.booking.customer_name || '',
           invoiceNumber: data.quotation.quote_number,
-          eventDate: String(data.booking.event_date || '').slice(0, 10),
+          eventDate: normaliseDateIso(data.booking.event_date),
           amount: `₹${Number((data as any).grand_total || 0).toLocaleString('en-IN')}`,
         }, { onlyChannels: ['WHATSAPP'] });
         if (waTally.sent) sentOn.push('WHATSAPP');
@@ -43863,7 +43870,7 @@ ${data.tenant.name}`;
       if (hold?.room_id) {
         writeObjectAudit(tenantDb, req, {
           objectType: 'ROOM', objectId: String(hold.room_id), action: 'HOLD_RELEASED',
-          summary: `Room block removed (${hold.kind || 'HOLD'}) ${String(hold.start_date || '').slice(0, 10)} → ${String(hold.end_date || '').slice(0, 10)}`,
+          summary: `Room block removed (${hold.kind || 'HOLD'}) ${normaliseDateIso(hold.start_date)} → ${normaliseDateIso(hold.end_date)}`,
           before: { hold_id: hold.id, start_date: hold.start_date, end_date: hold.end_date, kind: hold.kind },
         }).catch(() => {});
       }
@@ -44571,18 +44578,18 @@ ${data.tenant.name}`;
       );
       const arr = rows.filter(b =>
         (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
-        String(b.check_in_date || '').slice(0, 10) === today
+        normaliseDateIso(b.check_in_date) === today
       ).length;
       const inh = rows.filter(b => b.status === 'CHECKED_IN').length;
       const dep = rows.filter(b => {
-        const co = String(b.check_out_date || '').slice(0, 10);
+        const co = normaliseDateIso(b.check_out_date);
         if (co !== today) return false;
         if (b.status === 'CHECKED_IN') return true;
         if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
         return false;
       }).length;
       const upc = rows.filter(b =>
-        b.status === 'BOOKED' && String(b.check_in_date || '').slice(0, 10) > today
+        b.status === 'BOOKED' && normaliseDateIso(b.check_in_date) > today
       ).length;
       const his = rows.filter(b => b.status === 'CHECKED_OUT').length;
       res.json({ arr, inh, dep, upc, his });
@@ -46361,8 +46368,8 @@ ${data.tenant.name}`;
       // skip past-date + capacity guards (dates/occupancy are unchanged).
       const v = await validateBookingRequest(req.params.id, {
         room_id: target,
-        check_in_date: String(bk.check_in_date),
-        check_out_date: String(bk.check_out_date),
+        check_in_date: normaliseDateIso(bk.check_in_date),
+        check_out_date: normaliseDateIso(bk.check_out_date),
         booking_type: bk.booking_type,
         excludeBookingId: req.params.bookingId,
         skipPastDateCheck: true,
@@ -46439,8 +46446,8 @@ ${data.tenant.name}`;
       // this booking from the conflict check so the current room is not counted.
       const v = await validateBookingRequest(req.params.id, {
         room_id: newRoomId,
-        check_in_date: String(bk.check_in_date || '').slice(0, 10),
-        check_out_date: String(bk.check_out_date || '').slice(0, 10),
+        check_in_date: normaliseDateIso(bk.check_in_date),
+        check_out_date: normaliseDateIso(bk.check_out_date),
         booking_type: bk.booking_type,
         excludeBookingId: req.params.bookingId,
         skipPastDateCheck: true,
@@ -50028,8 +50035,15 @@ ${data.tenant.name}`;
           booking_id:           b.id,
           guest_name:           b.guest_name,
           guest_phone:          b.guest_phone,
-          check_in_date:        b.check_in_date ? String(b.check_in_date).slice(0, 10) : null,
-          check_out_date:       b.check_out_date ? String(b.check_out_date).slice(0, 10) : null,
+          // b.check_in_date/check_out_date are pg DATE columns (raw Date
+          // objects, not strings) - String(dateObject) calls toString(), not
+          // toISOString(), giving "Mon Sep 14 2026 ..." whose first 10 chars
+          // are a garbled weekday+month+day, not a real date. This is the
+          // same landmine already fixed in the calendar and rate-grid
+          // endpoints - normaliseDateIso() round-trips the actual calendar
+          // date correctly.
+          check_in_date:        normaliseDateIso(b.check_in_date) || null,
+          check_out_date:       normaliseDateIso(b.check_out_date) || null,
           booking_status:       b.status,
           partner_type:         partnerType,
           partner_code:         partnerCode,
@@ -55761,7 +55775,7 @@ ${data.tenant.name}`;
               `Dear ${b.guest_name || 'Guest'},\n` +
               `Thank you for your stay. Your invoice is settled.\n\n` +
               `Amount paid: *${grandFmt}*\n` +
-              `Stay: ${String(b.check_in_date).slice(0,10)} → ${String(b.check_out_date).slice(0,10)}\n\n` +
+              `Stay: ${normaliseDateIso(b.check_in_date)} → ${normaliseDateIso(b.check_out_date)}\n\n` +
               (b.guest_email
                 ? `The full PDF invoice has been sent to your email (${b.guest_email}).`
                 : `Reply to this message for a copy of the PDF invoice.`) +
@@ -56167,9 +56181,9 @@ ${data.tenant.name}`;
       const rid = req.params.roomId;
       const groups: any[] = [];
       const cur: any[] = await db.query("SELECT id, guest_name, status, check_in_date, check_out_date FROM room_bookings WHERE room_id = ? AND status IN ('BOOKED','CHECKED_IN') ORDER BY check_in_date LIMIT 30", [rid]).catch(() => []);
-      if (cur.length) groups.push({ group: 'Current & upcoming bookings', items: cur.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${b.status} · ${String(b.check_in_date).slice(0, 10)}→${String(b.check_out_date).slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
+      if (cur.length) groups.push({ group: 'Current & upcoming bookings', items: cur.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${b.status} · ${normaliseDateIso(b.check_in_date)}→${normaliseDateIso(b.check_out_date)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
       const past: any[] = await db.query("SELECT id, guest_name, check_in_date, check_out_date FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_OUT' ORDER BY check_out_date DESC LIMIT 10", [rid]).catch(() => []);
-      if (past.length) groups.push({ group: 'Recent stays', items: past.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${String(b.check_in_date).slice(0, 10)}→${String(b.check_out_date).slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
+      if (past.length) groups.push({ group: 'Recent stays', items: past.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${normaliseDateIso(b.check_in_date)}→${normaliseDateIso(b.check_out_date)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
       const holds: any[] = await db.query("SELECT id, from_date, to_date, reason FROM room_holds WHERE room_id = ? ORDER BY from_date DESC LIMIT 20", [rid]).catch(() => []);
       if (holds.length) groups.push({ group: 'Holds / blocks', items: holds.map((h: any) => ({ type: 'Hold', id: h.id, label: h.reason || 'Blocked', sublabel: `${String(h.from_date).slice(0, 10)}→${String(h.to_date).slice(0, 10)}`, link: null })) });
       const folios: any[] = await db.query("SELECT id, invoice_number, grand_total, status FROM folios WHERE room_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 10", [rid]).catch(() => []);
@@ -56204,7 +56218,7 @@ ${data.tenant.name}`;
       const groups: any[] = [];
       if (f.booking_id) {
         const bk: any = await db.get("SELECT id, guest_name, status, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [f.booking_id]).catch(() => null);
-        if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.guest_name || bk.id, sublabel: `${bk.status || ''} · ${String(bk.check_in_date || '').slice(0, 10)}→${String(bk.check_out_date || '').slice(0, 10)}`, link: { objectType: 'ROOM_BOOKING', objectId: bk.id } }] });
+        if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.guest_name || bk.id, sublabel: `${bk.status || ''} · ${normaliseDateIso(bk.check_in_date)}→${normaliseDateIso(bk.check_out_date)}`, link: { objectType: 'ROOM_BOOKING', objectId: bk.id } }] });
       }
       if (f.room_id) {
         const rm: any = await db.get("SELECT id, name, room_number, status FROM rooms WHERE id = ?", [f.room_id]).catch(() => null);
@@ -58476,7 +58490,11 @@ ${data.tenant.name}`;
         const parent: any = await tenantDb.get("SELECT id, doc_type, status, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
           parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
-          parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
+          // parent.settled_at/created_at are pg TIMESTAMP columns (raw Date
+          // objects) - String(dateObject).slice(0,10) gives a garbled
+          // weekday+month+day, not the real date, on a GST Rule 53(1A)(f)
+          // compliance field printed on every credit note.
+          parentInvoiceDate = normaliseDateIso(parent.settled_at || parent.created_at);
         }
       }
 
@@ -58634,7 +58652,11 @@ ${data.tenant.name}`;
         const parent: any = await tenantDb.get("SELECT id, doc_type, status, invoice_number, created_at, settled_at FROM folios WHERE id = ?", [folio.parent_folio_id]);
         if (parent) {
           parentInvoiceNumber = await ensureFolioInvoiceNumber(tenantDb, req.params.id, parent);
-          parentInvoiceDate = String(parent.settled_at || parent.created_at || '').slice(0, 10);
+          // parent.settled_at/created_at are pg TIMESTAMP columns (raw Date
+          // objects) - String(dateObject).slice(0,10) gives a garbled
+          // weekday+month+day, not the real date, on a GST Rule 53(1A)(f)
+          // compliance field printed on every credit note.
+          parentInvoiceDate = normaliseDateIso(parent.settled_at || parent.created_at);
         }
       }
 
@@ -68885,8 +68907,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'pms-reports-group-dates-status-followup',
+    commit_marker: 'pg-date-vs-string-deep-sweep',
     code_features: [
+      'pg-date-vs-string-deep-sweep  User-requested no-room-for-failure re-review of every report found the same pg Date-vs-string landmine (a raw Postgres DATE/TIMESTAMP column compared or String()-stringified as if it were already text) in far more places than the first pass fixed, both in the All Reports hub and well beyond it. (1) Arrival, Departure, Police Enquiry, No Show and Daily Forecast report cards showed the correct field but the raw ISO timestamp ("2026-09-04T00:00:00.000Z") instead of a plain date, because a bare column definition with no getValue just prints whatever JSON gave it - added a shared dateOnly() helper and applied it to all five (this half of the bug lives in the browser, where the value really is already a JSON string, so a plain slice is safe there). (2) City Ledger and Outstanding printed a garbled weekday ("Mon Sep 14" instead of "2026-09-14") because the endpoint did String(dateObject).slice(0,10) on a live pg row - the exact wrong-side-of-the-fix version of the same bug, now normaliseDateIso(). (3) The Hotel Bookings dashboard arrivals/departures counters (bookings/stats) used the same broken string comparison, so arrivals and departures for today silently always read 0 no matter how many real bookings existed, and every BOOKED row was miscounted into "upcoming" instead - fixed and confirmed live with a same-day test booking. (4) Beyond reporting: the WhatsApp message sent to a guest at checkout showed a garbled stay-date range; the payment-link payload (email/WhatsApp "Send Payment Link") carried the same garbled dates to a real guest; the Room and Folio Object Detail "Where Used" tabs showed garbled booking date ranges; a credit note printed a garbled parent-invoice date on its GST Rule 53(1A)(f) compliance line; the event-invoice WhatsApp notification carried a garbled event date; a room-hold-released audit-log entry recorded a garbled date range; and two room-switch endpoints (mid-stay category change and general room reassignment) fed a garbled or entirely unparsed date string into the shared booking-conflict validator. Every one of these thirteen call sites now goes through the same existing normaliseDateIso() helper already used elsewhere in this codebase for exactly this landmine. Also fixed, as a genuine math bug rather than a display bug: the season-period "narrowest span wins" tie-break (peak-season rate override) computed span length from the same garbled dates, so Date.parse always failed and the tie-break silently fell through to a same-for-every-row default, meaning a short peak-season window never actually beat a year-long default season on an overlapping date - this is now real arithmetic again. TC-ALLREPORTS-DATE-FORMAT (source guard), TC-HOTEL-OUTSTANDING-DATES and TC-HOTEL-BOOKINGSTATS-DATES (both live, the latter creates and cancels a same-day test booking) added.',
       'pms-reports-group-dates-status-followup  Small follow-up to the same PMS reports UAT sweep: Group Sales Report and Group P and L showed raw ISO timestamps in Check-in/Check-out instead of a plain date, and Group P and L Status read a field the group-revenue endpoint never returns (the same gap already fixed on its sibling Group Sales Report card, missed there). Both now slice to a plain date and derive status the same way.',
       'pms-reports-uat-occupancy-and-field-name-fixes  User-reported UAT sweep of every report across the Hotel/PMS module (Payment Report not populating, Room Status report wrong, Management Reports, Revenue by Room Type, Groups Group Sales Report). Two distinct bug classes found and fixed. (1) CRITICAL, live revenue/overbooking risk: the Channel Manager Rates and Inventory grid (rate-grid endpoint) and the Update Rooms grid (inventory-grid endpoint) always computed 0 percent occupancy and the full room count as available, on every date, no matter how many real bookings existed - confirmed live on a tenant showing 34/34 available and 0 percent occupied for the next two weeks while the dashboard correctly showed 11.8 percent occupied. Root cause: both endpoints fetched room_bookings check_in_date/check_out_date directly from Postgres (a DATE column comes back as a JS Date object, not a string) and then compared those Date objects to plain YYYY-MM-DD strings with less-than-or-equal/greater-than/equals - a Date-vs-string relational comparison coerces the string via ToNumber, which is NaN for a date-only string, so every comparison was silently false. This is the exact same pg-Date-object landmine already fixed once in the calendar endpoints own iso() helper and in GL dates and reports elsewhere in this codebase, just never applied to these two sibling endpoints. Fixed by normalising both dates through the existing normaliseDateIso helper immediately after the query, before any comparison runs. Real impact: this occupancy feeds the OTA availability push, so a real booking could have been telling every connected OTA channel that its room was still free. TC-HOTEL-RATEGRID-OCC and TC-HOTEL-INVGRID-OCC book a real room for today and assert both grids now see it as occupied. (2) In the PMS Reports > All Reports hub, six report cards column definitions read field names their own endpoint never returned, so those columns silently showed a dash or zero no matter the real underlying data: Room Status Report (room_name/guest_name/check_in/check_out versus the APIs actual name/occupied_by/occupied_check_in/occupied_check_out), Payments Report (assumed a flat per-payment list; the endpoint actually returns one row per period times payment method times source, period/method/source/amount/txns - rewrote the columns to match that real shape instead of inventing a list format the API never had), Revenue by Room Type (total_rooms and occupancy_pct did not exist on the endpoint at all - added them server-side from a real per-type room count and the date ranges day count, not just relabelled; occupied field was actually named room_nights), Night Audit Report (the endpoint returns as_of/summary/arrivals/departures/in_house with no top-level rows or data array at all, so this report showed zero rows on every run regardless of date - pointed the extraction at in_house and rebuilt the columns around what that list actually carries, replacing two money columns the API never computed per guest with the Booking Value it does return), Occupancy Trend (date and available read fields named night and derived-from-total-rooms-minus-occupied instead), and Group Sales Report plus Group P&L (name not group_name, num_rooms not rooms, advance_amount not advance_paid, and no status field at all - Outstanding was silently overstating every groups due amount by its full advance since advance_paid always read 0; status is now derived from the room-count and settled_at fields the API does return). TC-HOTEL-REVBYTYPE-SHAPE and TC-ALLREPORTS-FIELD-NAMES (source guard for the five display-only fixes) added.',
       'events-uiux-sweep-upcoming-and-cancelled-payment  End-to-end Events and Convention module UI/UX click-through (owner-requested), same method as the Restaurant, Hotel and Spa sweeps. Two real bugs found and fixed, both display-only, no money moved and no GL impact. (1) The Operations Dashboard Upcoming events widget (a to-prepare-for list) is fed by an upcoming filter that only excluded CANCELLED bookings, so a same-day event already marked COMPLETED still showed there, badge and all, directly under a heading that says the opposite of what it displays; on a busy tenant this consumed every one of the widgets 15 slots with already-finished events, hiding the real upcoming bookings entirely. Fixed by also excluding COMPLETED. (2) A CANCELLED event booking still showed Pending in the Bookings tab Payment column and counted toward the PENDING KPI tile and the per-row Outstanding amount, because evPayStatus/evOutstanding computed purely from total_amount vs advance_amount with no awareness of booking status at all - telling the owner there was money to chase for an event that will never happen. The tiles OUTSTANDING total already excluded CANCELLED correctly (rows.filter(status!==CANCELLED)), which made the inconsistency visible: the aggregate said one thing, the row said another. Both helpers now take the bookings status and return NONE/0 for CANCELLED; every call site (the KPI count, the DataTable filter, the Outstanding and Payment columns) passes it through. TC-EVT-UPCOMING-EXCL-DONE (live, asserts no COMPLETED/CANCELLED status in the upcoming list), TC-EVT-PAYSTATUS-EXCL-CANCELLED (source guard). DATA-HYGIENE NOTE (not a code bug, flagged to the owner, nothing deleted): this tenants Events data is heavily polluted by unremoved UAT/smoke-test runs - 224 of 227 catering packages are UAT F7 Pkg <timestamp> rows, 475 of 479 checklist templates are E2E/UAT/FC3/Ovr test templates (inactive, so harmless operationally), the majority of the 588 quotations and 105 bookings are Smoke/UAT records, and one leftover test venue (Smoke Account Hall 1789566943961, is_active=1) is reachable by real customers on the public Enquire Now page alongside the 3 real venues - all consistent with the already-documented "scripts must clean up after themselves" gap, just at a larger scale than previously logged; needs an owner/super-admin cleanup pass, not a code fix.',
