@@ -72162,7 +72162,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
           <div className="space-y-2 max-h-80 overflow-y-auto">
             {pendingRows.slice(0, 20).map((r: any) => (
               <div key={`${r.staff_id}-${r.shift_date}`} className="bg-white rounded-xl p-3 flex items-center gap-3 flex-wrap text-xs">
-                <div className="font-bold text-[#1a1208]">{r.staff_name || r.staff_id}</div>
+                <div className="font-bold text-[#1a1208]">{r.staff_name || '(staff record removed)'}</div>
                 <div className="text-[#9c8e85] font-mono">{String(r.shift_date).slice(0, 10)}</div>
                 <div className="flex gap-3 text-[#6b5d52]">
                   <span>Planned: <strong>{Number(r.planned_hours).toFixed(1)}h</strong></span>
@@ -72753,7 +72753,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
                   {rows.map((r: any, i: number) => (
                     <tr key={i} className="border-t border-brand/5">
                       <td className="px-3 py-1.5 font-mono">{String(r.shift_date).slice(0, 10)}</td>
-                      <td className="px-3 py-1.5">{r.staff_name || r.staff_id}</td>
+                      <td className="px-3 py-1.5">{r.staff_name || '(staff record removed)'}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{Number(r.planned_hours || 0).toFixed(1)}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{Number(r.actual_hours  || 0).toFixed(1)}</td>
                       <td className={cn("px-3 py-1.5 text-right font-mono",
