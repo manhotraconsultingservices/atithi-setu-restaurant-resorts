@@ -7602,7 +7602,7 @@ async function _blockIfAcctClosed(res: Response, db: any, dateIso: string): Prom
   const p = await _acctPeriodBlock(db, dateIso);
   if (!p) return false;
   res.status(409).json({
-    error: `The books are closed for ${p.period_key} (signed off ${String(p.closed_at || '').slice(0, 10)}). Reopen that period before recording anything dated inside it.`,
+    error: `The books are closed for ${p.period_key} (signed off ${normaliseDateIso(p.closed_at)}). Reopen that period before recording anything dated inside it.`,
     code: 'ACCOUNTING_PERIOD_CLOSED',
     period_key: p.period_key, from_date: p.from_date, to_date: p.to_date,
   });
@@ -7896,7 +7896,7 @@ async function _postGlEntries(
     const _cr = (lines || []).reduce((a, l) => a + Number(l.cr_amount || 0), 0);
     await _recordGlException(
       db, restaurantId, journalRef, entryDate, sourceType, sourceId, _dr, _cr, lines,
-      `REFUSED — ${_closed.period_key} is closed (signed off ${String(_closed.closed_at || '').slice(0, 10)}). Reopen that period to post into it.`,
+      `REFUSED — ${_closed.period_key} is closed (signed off ${normaliseDateIso(_closed.closed_at)}). Reopen that period to post into it.`,
       postedBy,
     ).catch(() => {});
     return { ok: false, posted: 0, dropped: true, reason: 'ACCOUNTING_PERIOD_CLOSED' };
@@ -18923,7 +18923,10 @@ async function startServer() {
         },
         replied: Number(overall?.replied || 0),
         time_series: (series || []).map(r => ({
-          date: String(r.d).slice(0, 10),
+          // r.d is Postgres DATE(created_at) - a raw Date object, same
+          // landmine as everywhere else: String(dateObject).slice(0,10)
+          // gives a garbled weekday ("Fri Sep 18"), not the real date.
+          date: normaliseDateIso(r.d),
           count: Number(r.n || 0),
           avg_rating: Number(r.avg_r || 0),
         })),
@@ -20624,7 +20627,7 @@ async function startServer() {
       const body = (rows || []).map(r => {
         const payable = String(r.status || '').toUpperCase() === 'REJECTED' ? 0 : Number(r.pay_amount || 0);
         return [
-          String(r.shift_date).slice(0, 10),
+          normaliseDateIso(r.shift_date),
           r.name || '', r.role || '', r.payroll_id || '', r.phone || '',
           Number(r.planned_hours || 0).toFixed(2),
           Number(r.actual_hours  || 0).toFixed(2),
@@ -56185,7 +56188,7 @@ ${data.tenant.name}`;
       const past: any[] = await db.query("SELECT id, guest_name, check_in_date, check_out_date FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_OUT' ORDER BY check_out_date DESC LIMIT 10", [rid]).catch(() => []);
       if (past.length) groups.push({ group: 'Recent stays', items: past.map((b: any) => ({ type: 'Booking', id: b.id, label: `${b.guest_name || b.id}`, sublabel: `${normaliseDateIso(b.check_in_date)}→${normaliseDateIso(b.check_out_date)}`, link: { objectType: 'ROOM_BOOKING', objectId: b.id } })) });
       const holds: any[] = await db.query("SELECT id, from_date, to_date, reason FROM room_holds WHERE room_id = ? ORDER BY from_date DESC LIMIT 20", [rid]).catch(() => []);
-      if (holds.length) groups.push({ group: 'Holds / blocks', items: holds.map((h: any) => ({ type: 'Hold', id: h.id, label: h.reason || 'Blocked', sublabel: `${String(h.from_date).slice(0, 10)}→${String(h.to_date).slice(0, 10)}`, link: null })) });
+      if (holds.length) groups.push({ group: 'Holds / blocks', items: holds.map((h: any) => ({ type: 'Hold', id: h.id, label: h.reason || 'Blocked', sublabel: `${normaliseDateIso(h.from_date)}→${normaliseDateIso(h.to_date)}`, link: null })) });
       const folios: any[] = await db.query("SELECT id, invoice_number, grand_total, status FROM folios WHERE room_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 10", [rid]).catch(() => []);
       if (folios.length) groups.push({ group: 'Open folios', items: folios.map((f: any) => ({ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status} · ₹${Number(f.grand_total || 0).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: f.id } })) });
       const sr: any[] = await db.query("SELECT id, service_name, status FROM service_requests WHERE room_id = ? AND status NOT IN ('COMPLETED','CANCELLED') ORDER BY created_at DESC LIMIT 20", [rid]).catch(() => []);
@@ -65308,7 +65311,13 @@ ${data.tenant.name}`;
       }
 
       const result = configs.map((c: any) => {
-        const dateStr = String(c.config_date).slice(0, 10);
+        // c.config_date is a raw pg DATE column (Date object) - the garbled
+        // weekday string from String(dateObject).slice(0,10) never matched a
+        // key in allCountsMap (built from a real TO_CHAR'd "YYYY-MM-DD"), so
+        // countMap was always {} and every slot's existing booking count was
+        // silently ignored - the public reservation calendar showed a fully
+        // booked slot as available, a real double-booking risk.
+        const dateStr = normaliseDateIso(c.config_date);
         const rawSlots = JSON.parse(c.time_slots || '[]');
         const slots = rawSlots.map((s: any) => typeof s === 'string' ? { time: s, max_tables: c.max_tables } : s);
         const countMap = allCountsMap[dateStr] || {};
@@ -67012,7 +67021,7 @@ ${data.tenant.name}`;
           customerName:  booking.customer_name,
           customerPhone: booking.customer_phone,
           customerEmail: booking.customer_email,
-          bookingDate:   String(booking.booking_date).slice(0, 10),
+          bookingDate:   normaliseDateIso(booking.booking_date),
           bookingTime:   String(booking.booking_time).slice(0, 5),
           guests:        booking.guests,
         }).catch(() => {});
@@ -67037,7 +67046,7 @@ ${data.tenant.name}`;
           customerName:  booking.customer_name,
           customerPhone: booking.customer_phone,
           customerEmail: booking.customer_email,
-          bookingDate:   String(booking.booking_date).slice(0, 10),
+          bookingDate:   normaliseDateIso(booking.booking_date),
           bookingTime:   String(booking.booking_time).slice(0, 5),
           guests:        booking.guests,
         }).catch(() => {});
@@ -68907,8 +68916,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'pg-date-vs-string-deep-sweep',
+    commit_marker: 'pg-date-vs-string-sweep-part2-public-booking',
     code_features: [
+      'pg-date-vs-string-sweep-part2-public-booking  While checking Loyalty and Guest Feedback (owner-requested), Guest Feedback summary time_series showed the same garbled weekday ("Fri Sep 18" instead of "2026-09-18") already fixed in a dozen places this session - one more DATE(created_at) column read as a raw pg Date object. Chasing every remaining instance of the same String(dateObject).slice(0,10) pattern in the whole file (not just date-fields that looked report-related this time) turned up a CRITICAL one well outside reporting: the PUBLIC table-reservation availability calendar (GET /api/public/restaurants/:id/reservation-config) built its per-date lookup key the same broken way, so it never matched the real per-date booking-count map built from a correctly TO_CHAR-formatted key - the count map was silently always empty, meaning a slot already fully booked to its max_tables still showed as available on the public booking widget. This is a genuine double-booking risk on live customer traffic, not a display bug. Also fixed in the same pass: the accounting-period-closed error message shown to a bookkeeper garbled its own signed-off date; a timesheet CSV export garbled the shift date column; a Room object-detail "Where Used" tab garbled hold/block date ranges; a platform Telegram alert about tenant subscription due-dates was unreadable; and an event payment-instalment reminder email/SMS both garbled the due date shown to the customer AND, because the garbled string always sorts after a plain digit string, could never actually flag a payment as overdue in its own overdue<today comparison. Every one of these seven more call sites now goes through the same normaliseDateIso() helper. Verified several call sites were ALREADY safe on inspection (gl_entries.entry_date and bank_reconciliations.created_at are genuinely declared TEXT, not DATE, so String().slice(0,10) on them was always correct) rather than assuming every match found by grep was a bug. TC-RESV-PUBLIC-AVAILABILITY-DATES (live: fills a reservation slot to its max_tables and confirms has_availability flips to false) and TC-FEEDBACK-SUMMARY-DATES added.',
       'pg-date-vs-string-deep-sweep  User-requested no-room-for-failure re-review of every report found the same pg Date-vs-string landmine (a raw Postgres DATE/TIMESTAMP column compared or String()-stringified as if it were already text) in far more places than the first pass fixed, both in the All Reports hub and well beyond it. (1) Arrival, Departure, Police Enquiry, No Show and Daily Forecast report cards showed the correct field but the raw ISO timestamp ("2026-09-04T00:00:00.000Z") instead of a plain date, because a bare column definition with no getValue just prints whatever JSON gave it - added a shared dateOnly() helper and applied it to all five (this half of the bug lives in the browser, where the value really is already a JSON string, so a plain slice is safe there). (2) City Ledger and Outstanding printed a garbled weekday ("Mon Sep 14" instead of "2026-09-14") because the endpoint did String(dateObject).slice(0,10) on a live pg row - the exact wrong-side-of-the-fix version of the same bug, now normaliseDateIso(). (3) The Hotel Bookings dashboard arrivals/departures counters (bookings/stats) used the same broken string comparison, so arrivals and departures for today silently always read 0 no matter how many real bookings existed, and every BOOKED row was miscounted into "upcoming" instead - fixed and confirmed live with a same-day test booking. (4) Beyond reporting: the WhatsApp message sent to a guest at checkout showed a garbled stay-date range; the payment-link payload (email/WhatsApp "Send Payment Link") carried the same garbled dates to a real guest; the Room and Folio Object Detail "Where Used" tabs showed garbled booking date ranges; a credit note printed a garbled parent-invoice date on its GST Rule 53(1A)(f) compliance line; the event-invoice WhatsApp notification carried a garbled event date; a room-hold-released audit-log entry recorded a garbled date range; and two room-switch endpoints (mid-stay category change and general room reassignment) fed a garbled or entirely unparsed date string into the shared booking-conflict validator. Every one of these thirteen call sites now goes through the same existing normaliseDateIso() helper already used elsewhere in this codebase for exactly this landmine. Also fixed, as a genuine math bug rather than a display bug: the season-period "narrowest span wins" tie-break (peak-season rate override) computed span length from the same garbled dates, so Date.parse always failed and the tie-break silently fell through to a same-for-every-row default, meaning a short peak-season window never actually beat a year-long default season on an overlapping date - this is now real arithmetic again. TC-ALLREPORTS-DATE-FORMAT (source guard), TC-HOTEL-OUTSTANDING-DATES and TC-HOTEL-BOOKINGSTATS-DATES (both live, the latter creates and cancels a same-day test booking) added.',
       'pms-reports-group-dates-status-followup  Small follow-up to the same PMS reports UAT sweep: Group Sales Report and Group P and L showed raw ISO timestamps in Check-in/Check-out instead of a plain date, and Group P and L Status read a field the group-revenue endpoint never returns (the same gap already fixed on its sibling Group Sales Report card, missed there). Both now slice to a plain date and derive status the same way.',
       'pms-reports-uat-occupancy-and-field-name-fixes  User-reported UAT sweep of every report across the Hotel/PMS module (Payment Report not populating, Room Status report wrong, Management Reports, Revenue by Room Type, Groups Group Sales Report). Two distinct bug classes found and fixed. (1) CRITICAL, live revenue/overbooking risk: the Channel Manager Rates and Inventory grid (rate-grid endpoint) and the Update Rooms grid (inventory-grid endpoint) always computed 0 percent occupancy and the full room count as available, on every date, no matter how many real bookings existed - confirmed live on a tenant showing 34/34 available and 0 percent occupied for the next two weeks while the dashboard correctly showed 11.8 percent occupied. Root cause: both endpoints fetched room_bookings check_in_date/check_out_date directly from Postgres (a DATE column comes back as a JS Date object, not a string) and then compared those Date objects to plain YYYY-MM-DD strings with less-than-or-equal/greater-than/equals - a Date-vs-string relational comparison coerces the string via ToNumber, which is NaN for a date-only string, so every comparison was silently false. This is the exact same pg-Date-object landmine already fixed once in the calendar endpoints own iso() helper and in GL dates and reports elsewhere in this codebase, just never applied to these two sibling endpoints. Fixed by normalising both dates through the existing normaliseDateIso helper immediately after the query, before any comparison runs. Real impact: this occupancy feeds the OTA availability push, so a real booking could have been telling every connected OTA channel that its room was still free. TC-HOTEL-RATEGRID-OCC and TC-HOTEL-INVGRID-OCC book a real room for today and assert both grids now see it as occupied. (2) In the PMS Reports > All Reports hub, six report cards column definitions read field names their own endpoint never returned, so those columns silently showed a dash or zero no matter the real underlying data: Room Status Report (room_name/guest_name/check_in/check_out versus the APIs actual name/occupied_by/occupied_check_in/occupied_check_out), Payments Report (assumed a flat per-payment list; the endpoint actually returns one row per period times payment method times source, period/method/source/amount/txns - rewrote the columns to match that real shape instead of inventing a list format the API never had), Revenue by Room Type (total_rooms and occupancy_pct did not exist on the endpoint at all - added them server-side from a real per-type room count and the date ranges day count, not just relabelled; occupied field was actually named room_nights), Night Audit Report (the endpoint returns as_of/summary/arrivals/departures/in_house with no top-level rows or data array at all, so this report showed zero rows on every run regardless of date - pointed the extraction at in_house and rebuilt the columns around what that list actually carries, replacing two money columns the API never computed per guest with the Booking Value it does return), Occupancy Trend (date and available read fields named night and derived-from-total-rooms-minus-occupied instead), and Group Sales Report plus Group P&L (name not group_name, num_rooms not rooms, advance_amount not advance_paid, and no status field at all - Outstanding was silently overstating every groups due amount by its full advance since advance_paid always read 0; status is now derived from the room-count and settled_at fields the API does return). TC-HOTEL-REVBYTYPE-SHAPE and TC-ALLREPORTS-FIELD-NAMES (source guard for the five display-only fixes) added.',
@@ -72494,7 +72504,7 @@ ${data.tenant.name}`;
       const withFlags = lines.map((l: any) => ({
         ...l,
         cleared: !!l.cleared,
-        cleared_on: l.cleared_on ? String(l.cleared_on).slice(0, 10) : null,
+        cleared_on: l.cleared_on ? normaliseDateIso(l.cleared_on) : null,
       }));
       const statement_closing_balance = rec ? round(rec.statement_closing_balance) : null;
 
@@ -73264,7 +73274,7 @@ ${data.tenant.name}`;
       const overdue = rows.filter(r => Number(r.days_until_due) < 0);
       const dueToday = rows.filter(r => Number(r.days_until_due) === 0);
       const dueSoon = rows.filter(r => Number(r.days_until_due) > 0);
-      const fmt = (r: any) => `• ${_tgEsc(r.name || r.id)} — ${String(r.subscription_due_date).slice(0, 10)}`;
+      const fmt = (r: any) => `• ${_tgEsc(r.name || r.id)} — ${normaliseDateIso(r.subscription_due_date)}`;
       const parts: string[] = ['📅 *Subscription status — Atithi-Setu*', ''];
       if (overdue.length) parts.push(`⛔ *Overdue (${overdue.length})*`, ...overdue.map(fmt), '');
       if (dueToday.length) parts.push(`⚠️ *Due today (${dueToday.length})*`, ...dueToday.map(fmt), '');
@@ -74091,7 +74101,7 @@ ${data.tenant.name}`;
                 customerPhone: b.customer_phone || undefined,
                 customer_name: b.customer_name || '',
                 event_type: b.event_type || '',
-                event_date: String(b.event_date).slice(0, 10),
+                event_date: normaliseDateIso(b.event_date),
                 venue_name: b.venue_name || null,
                 guest_count: b.guest_count ?? '',
                 days: LEAD_DAYS,
@@ -74162,12 +74172,18 @@ ${data.tenant.name}`;
               );
               if (Number(dup?.n || 0) > 1) continue;
             } catch { /* race — fine */ }
-            const dueStr = String(r.due_date).slice(0, 10);
+            // r.due_date/event_date are pg DATE columns (raw Date objects) -
+            // String(dateObject).slice(0,10) gave a garbled weekday, both in
+            // the text shown to the customer AND in the overdue < comparison
+            // below (an uppercase letter always sorts after a digit, so
+            // "was due... and is now overdue" could never actually fire).
+            const dueStr = normaliseDateIso(r.due_date);
+            const eventDateStr = r.event_date ? normaliseDateIso(r.event_date) : '';
             const overdue = dueStr < todayIST;
             const amt = `Rs. ${remaining.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             const subject = `${overdue ? 'Overdue' : 'Payment'} reminder — ${r.label || 'instalment'} (${t.name})`;
-            const text = `Dear ${r.customer_name || 'Guest'},\n\nThis is a friendly reminder that your ${r.label || 'payment instalment'} of ${amt} for your event${r.event_date ? ' on ' + String(r.event_date).slice(0, 10) : ''} ${overdue ? `was due on ${dueStr} and is now overdue` : `is due on ${dueStr}`}.\n\nPlease arrange the payment at your earliest convenience.\n\nRegards,\n${t.name}`;
-            const html = `<p>Dear ${r.customer_name || 'Guest'},</p><p>This is a friendly reminder that your <strong>${r.label || 'payment instalment'}</strong> of <strong>${amt}</strong> for your event${r.event_date ? ' on ' + String(r.event_date).slice(0, 10) : ''} ${overdue ? `was due on <strong>${dueStr}</strong> and is now <strong>overdue</strong>` : `is due on <strong>${dueStr}</strong>`}.</p><p>Please arrange the payment at your earliest convenience.</p><p>Regards,<br/>${t.name}</p>`;
+            const text = `Dear ${r.customer_name || 'Guest'},\n\nThis is a friendly reminder that your ${r.label || 'payment instalment'} of ${amt} for your event${eventDateStr ? ' on ' + eventDateStr : ''} ${overdue ? `was due on ${dueStr} and is now overdue` : `is due on ${dueStr}`}.\n\nPlease arrange the payment at your earliest convenience.\n\nRegards,\n${t.name}`;
+            const html = `<p>Dear ${r.customer_name || 'Guest'},</p><p>This is a friendly reminder that your <strong>${r.label || 'payment instalment'}</strong> of <strong>${amt}</strong> for your event${eventDateStr ? ' on ' + eventDateStr : ''} ${overdue ? `was due on <strong>${dueStr}</strong> and is now <strong>overdue</strong>` : `is due on <strong>${dueStr}</strong>`}.</p><p>Please arrange the payment at your earliest convenience.</p><p>Regards,<br/>${t.name}</p>`;
             try { await sendEmail(r.customer_email, subject, text, html); sent++; }
             catch (e) { console.warn(`[event-reminder] send failed for schedule ${r.id}:`, e); }
           }
