@@ -50054,6 +50054,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
   const toast = useToast();
   const [printers, setPrinters] = useState<any[]>([]);
   const [agentToken, setAgentToken] = useState<string>('');
+  const [agentManifest, setAgentManifest] = useState<any>(null);
   const blank = { name: '', station: 'ALL', conn_type: 'USB', host: '', port: 9100, copies: 1, is_default: 0, width_cols: 48 };
   const [form, setForm] = useState<any>(blank);
   const [editing, setEditing] = useState<string | null>(null);
@@ -50089,6 +50090,10 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
     } catch { /* */ }
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [restaurantId]);
+  // Public route, not tenant-scoped — same binary for every tenant, only the
+  // .env (restaurant id + agent token) differs. Shows the current released
+  // version so an owner can tell whether an already-installed agent is stale.
+  useEffect(() => { fetch('/api/print-agent/manifest').then(r => r.ok ? r.json() : null).then(setAgentManifest).catch(() => {}); }, []);
   const save = async () => {
     if (!form.name?.trim()) { toast.error('Printer name is required'); return; }
     setBusy(true);
@@ -50109,11 +50114,23 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
     <div className="max-w-4xl space-y-5">
       <div>
         <h2 className="text-2xl font-bold font-serif">Kitchen &amp; Invoice Printers</h2>
-        <p className="text-sm text-[#6b5d52] mt-1">Auto-print <b>Kitchen Order Tickets</b> the moment an order is placed, and the <b>customer bill</b> on demand (the <b>Print Bill</b> button). Add each printer below, then install the <b>Atithi-Setu Print Agent</b> on your billing PC — one agent drives all printers. USB printers print through Windows by name; network printers over IP. See <code>print-agent/README.md</code> (one-click Windows installer included).</p>
+        <p className="text-sm text-[#6b5d52] mt-1">Auto-print <b>Kitchen Order Tickets</b> the moment an order is placed, and the <b>customer bill</b> on demand (the <b>Print Bill</b> button). Install the <b>Atithi-Setu Print Agent</b> below, then add each printer — one agent drives all of them. USB printers print through Windows by name; network printers over IP.</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-brand/10 p-4 shadow-sm space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">1. Install the print agent</p>
+          {agentManifest?.latest && <span className="text-[10px] font-mono text-[#9c8e85]">v{agentManifest.latest}</span>}
+        </div>
+        <p className="text-sm text-[#6b5d52]">One small program for your billing PC (Windows). Install it once — it stays running, sends tickets to every printer below, and updates itself.</p>
+        <a href="/api/print-agent/download" className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold bg-brand text-white hover:opacity-90">
+          <Download size={15} /> Download Print Agent (Windows)
+        </a>
+        <p className="text-[11px] text-[#9c8e85]">Windows may show a <b>"Windows protected your PC"</b> warning because this is a new app, not a known publisher — click <b>More info → Run anyway</b> to continue. Run the installer, then paste in the agent token below when it asks for one.</p>
       </div>
 
       <div className="bg-white rounded-2xl border border-brand/10 p-4 shadow-sm">
-        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Print agent token</p>
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">2. Print agent token</p>
         <div className="flex items-center gap-2 flex-wrap">
           <code className="bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-3 py-1.5 text-xs font-mono break-all">{agentToken || '—'}</code>
           <button onClick={() => { navigator.clipboard?.writeText(agentToken); toast.success('Copied'); }} className="text-xs font-bold text-brand hover:underline">Copy</button>
@@ -50123,7 +50140,7 @@ function PrintersConfig({ restaurantId, token }: { restaurantId: string; token: 
       </div>
 
       <div className="bg-white rounded-2xl border border-brand/10 p-4 shadow-sm space-y-3">
-        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{editing ? 'Edit printer' : 'Add a printer'}</p>
+        <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{editing ? 'Edit printer' : '3. Add a printer'}</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div><label className="text-[11px] text-[#6b5d52]">Name</label><input className={input} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Kitchen printer / Invoice printer" /></div>
           <div>
