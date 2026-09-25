@@ -29181,7 +29181,7 @@ ${data.tenant.name}`;
         ).catch(() => [] as any[]);
         if (legacy.length) {
           rows.push(...legacy);
-          rows.sort((a: any, b: any) => String(b.recorded_at || '').localeCompare(String(a.recorded_at || '')));
+          rows.sort((a: any, b: any) => _tsMs(b.recorded_at) - _tsMs(a.recorded_at));
           rows.splice(lim);
         }
       }
@@ -44905,7 +44905,7 @@ ${data.tenant.name}`;
         rows = rows
           .map((r: any) => { const { sc, mf } = score(r); return { ...r, match_score: sc, matched_field: mf }; })
           .sort((a: any, b: any) => (b.match_score - a.match_score)
-            || (String(b.check_in_date || '').localeCompare(String(a.check_in_date || ''))));
+            || (_tsMs(b.check_in_date) - _tsMs(a.check_in_date)));
       }
 
       res.json(rows);
@@ -57597,9 +57597,7 @@ ${data.tenant.name}`;
         result.push(grp);
       }
 
-      result.sort((a: any, b: any) =>
-        String(b.created_at || '').localeCompare(String(a.created_at || ''))
-      );
+      result.sort((a: any, b: any) => _tsMs(b.created_at) - _tsMs(a.created_at));
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folios" });
@@ -69230,8 +69228,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bulk-update-beats-older-grid-edits',
+    commit_marker: 'folio-list-weekday-sort-fix',
     code_features: [
+      'folio-list-weekday-sort-fix  The folios list sorted newest first with String(created_at).localeCompare, but a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a newer Monday folio sorted below an older Saturday one. It now orders by _tsMs epoch ms. The same weekday bug was fixed in the inventory stock-movement log merge (recorded_at TIMESTAMP mixed with legacy hotel movement_date DATE) and the hotel booking search tie-break (check_in_date DATE). Remaining localeCompare calls compare text such as names, TO_CHAR periods and already normalised YYYY-MM-DD keys. tsc and vite build clean.',
       'bulk-update-beats-older-grid-edits  Owner ran a Bulk update for both room types across October on pconvention.atithi-setu.com (RESTO-1009) and 1 Oct kept its old price. The bulk rows saved correctly, but 1 Oct (and 30 Sep) carried older single-day Grid override rows from cell edits on the Rates and inventory grid. Grid rows are priority 10 and bulk rows priority 5, so the older grid edit won on those days in the booking engine, the grid and the Aiosell push alike. A bulk update now deletes older Grid override rows for the same room type on the dates it covers (respecting its day-of-week filter). Also fixed a data-loss bug from the earlier overlap change: a bulk update deleted every older Bulk update row it touched at all, so setting 10 to 12 Oct after 1 to 31 Oct wiped the rest of October. Now only bulk rows wholly inside the new range are removed; a partly overlapping one keeps its other dates and loses the overlap on recency, and re-saving the same range bumps created_at. Recency itself was broken: all four rate resolvers ordered created_at with String(date).localeCompare, and a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a Monday save lost to an older Saturday one. New _tsMs helper compares real timestamps; the grid resolver also gained the tie-break so it shows the price guests pay. tsc and vite build clean.',
       'aiosell-inventory-push-ignored-manual-overrides  THE actual root cause behind every inventory not updated report on pconvention.atithi-setu.com (RESTO-1009) today, found using the verify-data diagnostic added minutes earlier. Every trigger fix shipped today made a push genuinely fire, and Aiosell genuinely acknowledged every one of them - but aiosellSyncTenants own inventory calculation, unchanged since the integration was first built, computed available rooms as total rooms minus occupied ONLY. It never once consulted room_inventory_overrides - the exact table Update rooms, Bulk updates inventory branch, and the new Available grid row all write to. A manually blocked room for maintenance or an owner stay therefore could never reach Aiosell no matter how many times or how correctly the push fired, because the push itself was never capable of carrying that number. Confirmed with hard evidence, not inference: read back Aiosells own stored data for three dates carrying real overrides (0, 5, and 2 rooms blocked) immediately after a fresh explicit push that reported success - Aiosell held the raw unoverridden total-minus-occupied count on every one of them, while a date with no override at all matched correctly. Fixed by pre-loading room_inventory_overrides for the push window once and checking it first for every date and room type, same precedence already used by GET /hotel/inventory-grid and the Rates and inventory grid - a manual override now wins outright, exactly as it already does everywhere it is displayed. tsc and vite build clean.',
       'aiosell-verify-data-diagnostic  Owner reported checking inside Aiosell itself and finding inventory not updated, immediately after a live browser test (Update rooms, saved through the real UI) produced a fresh OK sync-log entry on our side. Every diagnostic added so far (the raw response capture, the sync log) only proves Aiosell ACKNOWLEDGED a request - none of them confirm what Aiosell actually holds afterward, so there was no way to tell a genuine push-side gap apart from a display lag on Aiosells own dashboard without asking the owner to look. Added GET /hotel/aiosell/verify-data (type inventory or rates, a date range), which calls the aiosellFetchData /data endpoint and returns exactly what Aiosell reports back for those dates - closes the loop this integration has been missing since day one: not just did Aiosell receive it, but does Aiosell actually have it. tsc and vite build clean.',
