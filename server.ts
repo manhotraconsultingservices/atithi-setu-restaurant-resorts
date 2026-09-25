@@ -47802,6 +47802,30 @@ ${data.tenant.name}`;
         || String(b.created_at || '').localeCompare(String(a.created_at || '')));
       return Number(cands[0].rate) || base;
     };
+    // A manual availability override (Update rooms, Bulk update's inventory
+    // branch, the Rates & inventory grid's Available row) is exactly the class
+    // of change an owner most needs to reach the OTA — closing out rooms for
+    // maintenance or an owner stay is precisely what must never oversell. Yet
+    // this loop only ever computed total-minus-occupied and never consulted
+    // room_inventory_overrides at all, so a manual override never reached
+    // Aiosell no matter how many times or how correctly it triggered a push —
+    // the push itself was always incapable of carrying it. Confirmed live via
+    // the new verify-data diagnostic: dates with a real override (0/5/2 rooms
+    // blocked) still showed the raw auto-calculated full count on Aiosell's
+    // side after a fresh push. Pre-load overrides for the window once, same
+    // precedence as GET /hotel/inventory-grid (override wins outright).
+    const invOverrideRowsSync: any[] = typeIds.length
+      ? await tenantDb.query(
+          `SELECT room_type_id, date, available_count FROM room_inventory_overrides
+            WHERE restaurant_id = ? AND room_type_id = ANY(?) AND date >= ? AND date <= ?`,
+          [restaurantId, typeIds, windowStartIso, windowEndIso]
+        ).catch(() => [])
+      : [];
+    const invOverrideMapSync: Record<string, Record<string, number>> = {};
+    for (const r of invOverrideRowsSync) {
+      if (!invOverrideMapSync[r.room_type_id]) invOverrideMapSync[r.room_type_id] = {};
+      invOverrideMapSync[r.room_type_id][normaliseDateIso(r.date)] = Number(r.available_count);
+    }
     const invUpdates: AiosellInventoryUpdate[] = [];
     const rateUpdates: AiosellRateUpdate[] = [];
     for (let i = 0; i < days; i++) {
@@ -47809,6 +47833,11 @@ ${data.tenant.name}`;
       const rooms: Array<{ roomCode: string; available: number }> = [];
       for (const tid of typeIds) {
         const info = typeInfo.get(tid)!;
+        const manualAvail = invOverrideMapSync[tid]?.[iso];
+        if (manualAvail !== undefined) {
+          rooms.push({ roomCode: typeCodeByType.get(tid)!, available: Math.max(0, manualAvail) });
+          continue;
+        }
         const occRow: any = await tenantDb.get(
           `SELECT COUNT(*) AS n FROM room_bookings b JOIN rooms r ON r.id=b.room_id
             WHERE r.type_id=? AND b.status NOT IN ('CANCELLED','CHECKED_OUT') AND b.check_in_date <= ? AND b.check_out_date > ?`,
@@ -69177,8 +69206,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-verify-data-diagnostic',
+    commit_marker: 'aiosell-inventory-push-ignored-manual-overrides',
     code_features: [
+      'aiosell-inventory-push-ignored-manual-overrides  THE actual root cause behind every inventory not updated report on pconvention.atithi-setu.com (RESTO-1009) today, found using the verify-data diagnostic added minutes earlier. Every trigger fix shipped today made a push genuinely fire, and Aiosell genuinely acknowledged every one of them - but aiosellSyncTenants own inventory calculation, unchanged since the integration was first built, computed available rooms as total rooms minus occupied ONLY. It never once consulted room_inventory_overrides - the exact table Update rooms, Bulk updates inventory branch, and the new Available grid row all write to. A manually blocked room for maintenance or an owner stay therefore could never reach Aiosell no matter how many times or how correctly the push fired, because the push itself was never capable of carrying that number. Confirmed with hard evidence, not inference: read back Aiosells own stored data for three dates carrying real overrides (0, 5, and 2 rooms blocked) immediately after a fresh explicit push that reported success - Aiosell held the raw unoverridden total-minus-occupied count on every one of them, while a date with no override at all matched correctly. Fixed by pre-loading room_inventory_overrides for the push window once and checking it first for every date and room type, same precedence already used by GET /hotel/inventory-grid and the Rates and inventory grid - a manual override now wins outright, exactly as it already does everywhere it is displayed. tsc and vite build clean.',
       'aiosell-verify-data-diagnostic  Owner reported checking inside Aiosell itself and finding inventory not updated, immediately after a live browser test (Update rooms, saved through the real UI) produced a fresh OK sync-log entry on our side. Every diagnostic added so far (the raw response capture, the sync log) only proves Aiosell ACKNOWLEDGED a request - none of them confirm what Aiosell actually holds afterward, so there was no way to tell a genuine push-side gap apart from a display lag on Aiosells own dashboard without asking the owner to look. Added GET /hotel/aiosell/verify-data (type inventory or rates, a date range), which calls the aiosellFetchData /data endpoint and returns exactly what Aiosell reports back for those dates - closes the loop this integration has been missing since day one: not just did Aiosell receive it, but does Aiosell actually have it. tsc and vite build clean.',
       'rate-grid-available-blank-on-rate-override-fix  Browser-verified live on pconvention.atithi-setu.com (RESTO-1009) after shipping the new Available row on the Rates and inventory grid: Standard Double (which carries several overlapping rate_overrides after the earlier overlap fix let existing stacked rows persist) rendered a BLANK Available input for nearly every date in view, while Standard Single (fewer overrides) mostly showed real numbers. Root cause was a flow bug in the very code that computes the row, not a data problem: rate resolution and availability resolution shared one per-date loop, and the branch that resolves a TYPE-scope rate override ended in a bare continue - which skipped the rest of that loop iteration, including the availability computation, for every date the override touched. A room type with heavy rate-override coverage therefore had its availability left undefined (blank input) on most dates; a lightly-covered type mostly worked, which is exactly the inconsistent pattern reported. Restructured the loop so rate and availability resolve independently within the same iteration, with no early exit from one blocking the other. tsc and vite build clean.',
       'rates-inventory-grid-unified-save-button  The Rates and inventory grids new Available row shipped with its OWN separate Save button, alongside the rates grids existing one - two independent dirty-states, two independent PUT calls. Editing a rate AND an availability cell for the same visit and clicking only one of the two buttons saved just that half, which reads exactly like the grid is not pushing both rates and inventory even though both underlying endpoints already reach Aiosell correctly. Replaced the two buttons with one - it saves whatever mix of rate and availability edits are pending in a single click, against both endpoints, and clears both dirty-states together. tsc and vite build clean.',
