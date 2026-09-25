@@ -47671,6 +47671,41 @@ ${data.tenant.name}`;
       planDisc.set(m.rate_plan_id, Number(p?.discount_pct || 0));
     }
     const now = Date.now();
+    const windowStartIso = new Date(now).toISOString().slice(0, 10);
+    const windowEndIso = new Date(now + Math.max(0, days - 1) * 86400000).toISOString().slice(0, 10);
+    // The owner sets date-specific pricing (Bulk Update, the Rate Grid, seasonal
+    // rows) as TYPE-scope rate_overrides — Aiosell is pushed per room TYPE, not
+    // per physical room, so only TYPE-scope applies here. Without this, every
+    // date in the push window silently got the SAME flat room_types.base_rate,
+    // which is exactly why a seasonal/event rate an owner had carefully set up
+    // for specific future dates never reached the OTA: the push overwrote it
+    // with today's flat rate on every sync (live event, schedule, or manual).
+    const typeOverrides: any[] = typeIds.length
+      ? await tenantDb.query(
+          `SELECT scope_id, start_date, end_date, rate, applies_to_days, priority, created_at FROM rate_overrides
+            WHERE scope = 'TYPE' AND scope_id = ANY(?) AND start_date <= ? AND end_date >= ?`,
+          [typeIds, windowEndIso, windowStartIso]
+        ).catch(() => [])
+      : [];
+    const WD_AIOSELL = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const resolveTypeRate = (tid: string, iso: string): number => {
+      const info = typeInfo.get(tid);
+      const base = Number(info?.base || 0);
+      const wd = WD_AIOSELL[new Date(iso + 'T12:00:00Z').getUTCDay()];
+      const cands = typeOverrides.filter((o: any) => {
+        if (o.scope_id !== tid) return false;
+        if (iso < String(o.start_date).slice(0, 10) || iso > String(o.end_date).slice(0, 10)) return false;
+        if (o.applies_to_days) {
+          const days2 = String(o.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
+          if (!days2.includes(wd)) return false;
+        }
+        return true;
+      });
+      if (!cands.length) return base;
+      cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0)
+        || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+      return Number(cands[0].rate) || base;
+    };
     const invUpdates: AiosellInventoryUpdate[] = [];
     const rateUpdates: AiosellRateUpdate[] = [];
     for (let i = 0; i < days; i++) {
@@ -47691,7 +47726,8 @@ ${data.tenant.name}`;
         if (!m.external_rate_plan_code) continue;
         const info = typeInfo.get(m.local_room_type_id); if (!info) continue;
         const disc = m.rate_plan_id ? (planDisc.get(m.rate_plan_id) || 0) : 0;
-        const rate = Math.round(info.base * (1 - disc / 100));
+        const effectiveBase = resolveTypeRate(m.local_room_type_id, iso);
+        const rate = Math.round(effectiveBase * (1 - disc / 100));
         if (rate > 0) rates.push({ roomCode: m.external_room_code, rateplanCode: m.external_rate_plan_code, rate });
       }
       if (rates.length) rateUpdates.push({ startDate: iso, endDate: iso, rates });
@@ -69014,8 +69050,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-multiplier-repush-on-apply',
+    commit_marker: 'aiosell-push-honors-date-rate-overrides',
     code_features: [
+      'aiosell-push-honors-date-rate-overrides  While verifying the fix for Bulk Update never reaching Aiosell, found a deeper, more consequential bug underneath it on pconvention.atithi-setu.com (RESTO-1009): the owner had four real rate_overrides rows in place (a Regular Rate baseline plus three date-scoped Bulk Update rows for specific October date ranges at higher rates for a busy period), but aiosellSyncTenant computed each room rate ONCE, from room_types.base_rate alone, and pushed that exact same flat number for every single date in the push window - the entire 90 to 120 day range Aiosell was told about. Every date-scoped override the owner had set up was silently discarded on every push, live event, scheduled sweep, or manual, and replaced with whatever the flat base rate happened to be at that moment. This explains the complaint far more completely than a missing trigger alone would: even after wiring Bulk Update to actually call the pusher, the number it sent for those specific dates was still wrong. The very same date-window rate resolution already existed and already worked correctly elsewhere (triggerAllRoomRatePushs resolveRate, used by the direct-adapter path and the on-screen Rate Grid), it had simply never been ported into the Aiosell-specific pusher when that pusher was written separately. Fixed by pre-loading each room types TYPE-scope overrides for the push window once, then resolving the correct per-date rate inside the existing per-day loop (highest priority, most-recent-first on a tie, matching a start-end date range and, when set, a day-of-week filter) before applying the rate-plans discount percentage - so a seasonal or event rate set for specific dates now reaches Aiosell, and hence Agoda, for exactly those dates, while every other date still correctly falls back to the flat base rate. Verified live: pconventions own real override rows (their October event pricing) are now what a push actually computes and sends for those specific dates, not the flat rate. tsc and vite build clean.',
       'aiosell-multiplier-repush-on-apply  Owner set the Agoda row in Channel Rate Multipliers to 1.2 and pushed rates, but Agoda kept showing the plain unmultiplied rate. Live-tested on pconvention.atithi-setu.com (RESTO-1009): called the multiplier endpoint directly for agoda at 1.2 and Aiosell genuinely accepted it (its own reply, now visible thanks to the raw-response capture, read exactly Multiplier updated successfully for: [agoda]) - so the credentials, channel code, and Aiosell-side connection were all already correct, and this was not a repeat of the earlier missing-mapping or missing-mapping-connection class of bug. Root cause: Aiosell channel_multiplier only STORES the per-channel scaling factor going forward - it does not reach back and re-scale a rate this property already pushed earlier, so the OTA keeps showing whatever plain rate was last sent until the NEXT rate push happens to occur. The multiplier endpoint (POST /hotel/aiosell/multiplier) never triggered that next push itself, and Apply all sits well below the Push now button with nothing telling an owner they would need to click Push now a second time right after changing a multiplier for it to actually take effect. Fixed by triggering the existing scheduleAiosellResync push automatically the moment a multiplier is successfully applied, and by naming this explicitly in both the success toast and a note under the per-channel results panel, so the owner is never left wondering why the number on Agoda has not moved yet.',
       'aiosell-rate-push-missing-triggers  Client kept reporting rates not reaching Agoda from pconvention.atithi-setu.com (RESTO-1009), even after the earlier missing rate-plan-mapping fix and a confirmed successful test push. Traced every code path that can change a room rate and checked whether any of them actually reach Aiosell. Found a real, systemic gap: PATCH /hotel/room-types/:typeId - the actual change-a-room-price screen, where base_rate lives - called no OTA push at all, not even the wrong one. The other six rate-affecting routes (rate-overrides create and delete, the rate-grid bulk save, the explicit Publish Rates button, bulk-rate-update, and the rate-plans PUT) all called an existing helper, triggerAllRoomRatePush, built for the older direct-to-OTA adapter framework in channelAdapters.ts (Booking.com, MMT, Agoda, Expedia, Airbnb, Google Hotels). That registry has no AIOSELL entry, so for a channel_credentials row with channel AIOSELL, getChannelAdapter silently falls back to a MockAdapter - and MockAdapter.isReady always returns true, defeating the skip-stubs check right above it - so the call proceeds, logs, and returns ok true without ever contacting Aiosell, writing a false sent row into channel_sync_log. A property like pconvention, which reaches every OTA exclusively through Aiosell, therefore had no reliable path from a rate edit to Aiosell at all: the only things that ever worked were a booking lifecycle event happening to fire (create, modify, checkout, cancel already have their own correct, separate Aiosell-specific push), a staff member remembering to click Push Now in the Aiosell panel, or the scheduled interval sync - which was switched off for this tenant. Fixed by calling the correct, already-existing Aiosell-specific push, scheduleAiosellResync, from all seven of those routes (the six that had the wrong push, plus the room-types PATCH that had none), and by making the two places that loop over channel_credentials explicitly skip the AIOSELL row instead of silently mock-succeeding for it, so a future misconfigured or unmapped channel logs a true failure instead of a false success. tsc and vite build clean.',
       'aiosell-sync-log-raw-response  Owner reported pconvention.atithi-setu.com (RESTO-1009) changed a room rate, clicked Push now, got a success response, but the new rate never showed up on Aiosell/Agoda. Live-tested with the owner watching: changed Standard Double from 3200 to 5000, pushed, and every single sync log entry read the same generic Aiosell acknowledgement, Request Received Successfully, with nothing else attached. That message is the top level response text Aiosell itself returns, not something this codebase invents, so the PMS side of the exchange is genuinely sending the fresh value and Aiosell is genuinely accepting the call - but aiosellSyncTenant only ever extracted that one generic string and threw away the rest of the Aiosell response body before it reached the sync log, so if Aiosell ever attaches a more specific reason (this codebase already has one documented precedent, a channel multiplier response naming an unmapped channel), nobody could ever see it. Now every inventory and rate push - success or failure - captures the full raw response body (truncated) alongside the message and writes it into the Sync Log detail column, so the next time this happens the actual Aiosell payload is visible instead of a string that only ever reads Request Received Successfully. This is an observability fix, not a guess at the underlying cause - the generic acknowledgement plus this codebase own prior finding that Aiosell can silently accept a call for a channel that is not actually connected on its own dashboard both point at the Agoda connection needing to be verified on Aiosell side for hotel code 3b793323bc, which is outside anything the PMS can configure by API.',
