@@ -53484,7 +53484,45 @@ ${data.tenant.name}`;
         "UPDATE room_booking_groups SET num_rooms = (SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED'), total_amount = ? WHERE id=?",
         [groupId, round2(groupTotal), groupId]
       );
-      res.status(201).json({ ok: true, added: created.length, bookings: created });
+      // BUGFIX (reported live): a room added to a group that is ALREADY past
+      // check-in — other rooms already carry an open/settled folio — used to
+      // stay bare BOOKED with no folio of its own. The group's own
+      // total_amount above was correct, but the Master Folio/Master Account
+      // and the group Invoice PDF both build their totals by summing each
+      // ROOM'S OWN folio (buildGroupInvoicePdf, GET .../master-folio), not
+      // room_bookings.total_amount — so a folio-less new room was invisible
+      // to both, and its configured rate never reached the printed total.
+      // Fixing this required staff to remember to re-run "Check In Group"
+      // (only the still-BOOKED new room would be picked up) — a workflow
+      // that depends on a human remembering an unprompted extra step, which
+      // is exactly the class of fragile mechanism this codebase avoids.
+      // Deterministic fix: if the group's billing has already started
+      // (any sibling room already has a folio), seed this room's folio +
+      // per-night room-charge entries immediately, the same way check-in
+      // would — createFolioWithRoomCharges is idempotent and reads the
+      // booking's own configured rate/meal-plan/extras, so the charge that
+      // was quoted when the room was added is exactly what gets billed.
+      // Room STATUS stays BOOKED (guest ID collection / Form-C / the
+      // check-in checklist still happen through the normal check-in flow
+      // when the guest actually arrives) — only the billing folio is
+      // created early so the room is never invisible to the invoice.
+      let foliosSeeded = 0;
+      if (created.length) {
+        const groupHasBilling = await db.get(
+          `SELECT 1 AS x FROM folios f JOIN room_bookings b ON b.id = f.booking_id
+            WHERE b.group_id = ? AND f.status IN ('open','settled') LIMIT 1`,
+          [groupId]
+        ).catch(() => null);
+        if (groupHasBilling) {
+          for (const c of created) {
+            try {
+              const freshRow: any = await db.get("SELECT * FROM room_bookings WHERE id = ?", [c.id]);
+              if (freshRow) { await createFolioWithRoomCharges(req.params.id, freshRow); foliosSeeded++; }
+            } catch (e) { console.warn(`[group rooms/add] folio seed failed for ${c.id}:`, e); }
+          }
+        }
+      }
+      res.status(201).json({ ok: true, added: created.length, bookings: created, folios_seeded: foliosSeeded });
     } catch (err) {
       res.status(500).json({ error: "Failed to add rooms" });
     }
@@ -68924,8 +68962,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'kitchen-printers-agent-download-link',
+    commit_marker: 'group-add-room-folio-fix',
     code_features: [
+      'group-add-room-folio-fix  Owner-reported bug: rooms added to an already-active group booking were not reflected in the Group Folio, Master Account or Invoice PDF, and the configured rate per night never reached the total. Root-caused end to end before touching anything: the add-room endpoint (POST .../hotel/booking-groups/:groupId/rooms/add) correctly stores room_rate and total_amount on the new room_bookings row and correctly recomputes the groups own total_amount, so that field looked fine - but the Master Folio endpoint (GET .../master-folio) and the group Invoice PDF builder (buildGroupInvoicePdf) both compute their totals by summing each ROOMS OWN folio (folios WHERE booking_id = the room), never room_bookings.total_amount directly. A room only gets its own folio when it is checked in (createFolioWithRoomCharges runs there), and a room added after the OTHER rooms in the group already checked in stays plain BOOKED with no folio at all - invisible to both screens, exactly matching the report. The only existing workaround was for staff to remember to re-run group check-in (it would silently pick up just the new still-BOOKED room), which is precisely the class of fragile, human-memory-dependent mechanism this codebase avoids elsewhere. Fix: after inserting new room_bookings rows, check whether the group has already started billing (any sibling booking already carries an open or settled folio); if so, immediately seed the new rooms folio and per-night room-charge entries the same way check-in would, via the existing idempotent createFolioWithRoomCharges - which reads the rooms own configured rate, meal plan and extras, so the charge quoted at add-room time is exactly what gets billed. Room status is deliberately left BOOKED (guest ID capture, the Form-C gate and the check-in checklist still run through the normal check-in flow whenever the guest actually arrives) - only the billing folio is created early so the room is never invisible to the invoice. No change for a room added to a group that has not started billing yet - it continues to wait for the normal group check-in, unchanged. Added TC-BIZ-GRP-FOLIO (live: creates a 1-room group, force-checks it in, adds a second room, asserts the response reports folios_seeded=1 and the Master Folio shows a real folio_grand_total for the new room close to its quoted rate) and TC-BIZ-GRP-FOLIO-PDF (decodes the actual rendered invoice PDF and confirms the added rooms name is printed on it, not just present in the API response) to the local technical test suite.',
       'kitchen-printers-agent-download-link  Owner asked whether the print agent .exe could be published so a tenant can download it straight from their own dashboard, since network-printer reliability had already cost one client. The download route and the auto-update manifest already existed server-side (GET /api/print-agent/download and /api/print-agent/manifest, armed since 5 Sep, already serving the real 3.6.0 binary confirmed live at 57589142 bytes) but the Kitchen and Invoice Printers screen never linked to either one - the only mention was a line of text pointing an owner at print-agent/README.md, a file inside the git repo they have no access to at all. Added a Download Print Agent (Windows) button plus a short current-version tag (fetched from the manifest) right at the top of the screen, ahead of the existing agent-token card, and numbered the three steps (install agent, copy token, add printers) so the order reads clearly. Also added a plain-language heads-up that Windows SmartScreen will warn on first run since this is an unsigned binary, with the exact click-through (More info, Run anyway), so an owner does not mistake the warning for a broken download. No backend change needed - this was a missing UI surface over machinery that was already fully built and already live. TC-PRINTAGENT-DOWNLOAD-WIRED (live: checks the manifest and download routes both return something real, and that the deployed bundle actually carries the new download link).',
       'whatsapp-team-window-check-fix  Owner asked to confirm WhatsApp was actually working on pconvention.atithi-setu.com (RESTO-1009) after the new Notifications setup guide was written. The WhatsApp module is on and guest-facing sends (GUEST_PRE_ARRIVAL stay_reminder) were delivering and being read correctly, but every BOOKING_CREATED team alert to the staff number was failing with Metas 131047 Re-engagement message error - 38 of the last 86 WhatsApp sends on this tenant, all of it one events team notification. Root cause: the WhatsApp dispatch loop hardcoded windowOpen to true for any non-guest recipient (isGuestAudience question mark await _waWindowOpen(recipient) colon true), so a team or staff number - which essentially never messages the shared WhatsApp Business number back and so almost never has an open 24-hour service window - always skipped straight to a free-form send instead of the already-correctly-mapped, already-Meta-approved booking_confirmation template. Checked wa_template_map directly (SUPER_ADMIN, /internal) before writing any code: BOOKING_CREATED was already mapped to the approved booking_confirmation template with the right variable spec (guestName, checkIn, checkOut, bookingId), and the trigger call sites already pass every one of those fields - the mapping was correct and complete, it was simply never consulted for team recipients. The 24-hour-window rule is about the RECIPIENT phone number, not the audience type, so _waWindowOpen is now checked for every recipient before choosing free-form versus template, matching how guest sends already worked. No template-map change needed - the whole fix is one line, making team sends use the template that was already sitting there unused.',
       'workforce-uiux-sweep-timesheet-orphan-staff  Owner-requested UI/UX sweep of the Workforce module (Staff Directory, Attendance, Roster, Timesheet, Staff Payroll, HR and Payroll). Confirmed the roster/timesheet JOIN logic itself is correct (a real September attendance check resolved 93 of 93 records to a real staff name via GET /api/attendance), but a whole 30-day window of auto-reconciled timesheet_day rows (270 of 270) showed a raw internal staff_id UUID instead of a name in both the Timesheet approval queue and the Timesheet Dashboard detail table. Root-caused with the actual HR employee list, not assumed: none of the orphaned staff_ids exist in GET /hr/employees at all (not even as an inactive or resigned record), confirming these are leftover automated-test employees that were hard-deleted after the test run without cleaning up the attendance and timesheet_day rows they had generated - the same "scripts must clean up after themselves" gap already documented elsewhere, not a join or reconciliation bug. Left the reconciliation and JOIN logic untouched (correct), but a manager reviewing timesheets should never be shown a meaningless UUID for a row they can not identify or act on - both display spots now fall back to "(staff record removed)", matching the identical convention already shipped for the same class of dangling reference on the Guest Compliance / Form-C screen. TC-WORKFORCE-TIMESHEET-STAFFNAME added (source guard). Everything else in Workforce checked clean: Staff Payroll and HR and Payroll runs/payslips read real dates and real staff names with no field-name mismatches, Roster correctly builds its grid from the live staff master list rather than the (also correct) joined fields on each slot.',
