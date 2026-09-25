@@ -2134,6 +2134,14 @@ const DEFAULT_HOTEL_SERVICES: Array<{
 //
 // This helper accepts a Date or a string and always returns "YYYY-MM-DD".
 // ════════════════════════════════════════════════════════════════════════
+// Epoch ms for a pg TIMESTAMP (a JS Date) or an ISO string. Use this to order
+// by created_at: String(date) is "Sat Sep 26 2026 ...", which sorts by weekday.
+function _tsMs(v: any): number {
+  if (v instanceof Date) return v.getTime() || 0;
+  const t = Date.parse(String(v || ''));
+  return isNaN(t) ? 0 : t;
+}
+
 function normaliseDateIso(v: any): string {
   if (v == null || v === '') return '';
   if (v instanceof Date) {
@@ -5435,7 +5443,7 @@ async function getRateForRoomDate(restaurantId: string, roomId: string, date: st
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => {
       if (Number(b.priority || 0) !== Number(a.priority || 0)) return Number(b.priority || 0) - Number(a.priority || 0);
-      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+      return (_tsMs(b.created_at) - _tsMs(a.created_at));
     });
     const winner = candidates[0];
     return {
@@ -6160,7 +6168,7 @@ async function triggerAllRoomRatePush(restaurantId: string): Promise<void> {
         });
         if (!cands.length) return null;
         cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0)
-          || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+          || (_tsMs(b.created_at) - _tsMs(a.created_at)));
         return Number(cands[0].rate);
       };
       return pick(allRoomOvr.filter((r: any) => r.scope_id === room.id))
@@ -42645,7 +42653,10 @@ ${data.tenant.name}`;
           return true;
         });
         if (!cands.length) return null;
-        cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0));
+        // Same tie-break as the booking-time resolver and the Aiosell push
+        // (priority, then newest) so the grid shows the price guests pay.
+        cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0)
+          || (_tsMs(b.created_at) - _tsMs(a.created_at)));
         return Number(cands[0].rate);
       }
       const roomTypes: any[] = await tenantDb.query(
@@ -42887,34 +42898,47 @@ ${data.tenant.name}`;
       const appliesStr = applyDays ? applyDays.map((d: number) => WD_BULK[d]).join(',') : null;
       let created = 0, updated = 0, superseded = 0;
       for (const rtId of room_type_ids) {
+        // A bulk update is the owner's newest word on these dates, so it must beat
+        // anything older that it covers. Two kinds of older row used to survive:
+        //  - single-day "Grid override" rows (priority 10) from cell edits on the
+        //    Rates & inventory grid. They outrank a bulk row (priority 5), so a
+        //    bulk update for 1-31 Oct left 1 Oct at the old grid price.
+        //  - "Bulk update" rows. Only rows lying wholly inside the new range are
+        //    removed; a partly overlapping one keeps its other dates and loses the
+        //    overlap on recency (same priority, newest wins in every resolver).
+        //    Deleting every overlapping row wiped the dates outside the new range.
+        // Only these two labels are touched, never a hand-made rate plan.
+        const olderGrid: any[] = await tenantDb.query(
+          "SELECT id, start_date FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND label = 'Grid override' AND start_date >= ? AND end_date <= ?",
+          [rtId, from_date, to_date]
+        ).catch(() => []);
+        const gridIds = olderGrid
+          .filter((o: any) => {
+            if (!applyDays) return true;
+            const iso = normaliseDateIso(o.start_date);
+            return !!iso && applyDays.includes(new Date(iso + 'T12:00:00Z').getUTCDay());
+          })
+          .map((o: any) => o.id);
+        const containedBulk: any[] = await tenantDb.query(
+          "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND label = 'Bulk update' AND start_date >= ? AND end_date <= ? AND NOT (start_date = ? AND end_date = ?)",
+          [rtId, from_date, to_date, from_date, to_date]
+        ).catch(() => []);
+        const dropIds = [...gridIds, ...containedBulk.map((o: any) => o.id)];
+        if (dropIds.length) {
+          await tenantDb.run(`DELETE FROM rate_overrides WHERE id = ANY(?)`, [dropIds]).catch(() => {});
+          superseded += dropIds.length;
+        }
+
         const existing: any = await tenantDb.get(
-          "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND start_date = ? AND end_date = ?",
+          "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND label = 'Bulk update' AND start_date = ? AND end_date = ?",
           [rtId, from_date, to_date]
         );
         if (existing) {
-          await tenantDb.run("UPDATE rate_overrides SET rate = ?, applies_to_days = ? WHERE id = ?", [rateVal, appliesStr, existing.id]);
+          // Re-saving the same range is a new decision: bump created_at so it also
+          // wins the recency tie-break against any partly overlapping bulk row.
+          await tenantDb.run("UPDATE rate_overrides SET rate = ?, applies_to_days = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?", [rateVal, appliesStr, existing.id]);
           updated++;
         } else {
-          // "Bulk update" is meant to REPLACE the rate for a period, not stack on top
-          // of whatever was set the last time someone ran it for a nearby-but-not-
-          // identical range. Before this, only an EXACT start/end match reused a row —
-          // a range that shifted by even a day (an entirely normal way to use this,
-          // e.g. adjusting an event's dates) silently created ANOTHER row instead,
-          // leaving both in force. Layer enough of those and the effective rate for
-          // a date is decided by an opaque priority+recency tie-break nobody set out
-          // to configure — which is exactly the pile of overlapping "Bulk update"
-          // rows an owner reported seeing and could not explain. Superseding here is
-          // scoped tight: same room type, same "Bulk update" label only, so a
-          // deliberately separate rate plan added via "+ Add Rate Plan" (a different
-          // label) is never touched.
-          const overlapping: any[] = await tenantDb.query(
-            "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND label = 'Bulk update' AND start_date <= ? AND end_date >= ?",
-            [rtId, to_date, from_date]
-          ).catch(() => []);
-          if (overlapping.length) {
-            await tenantDb.run(`DELETE FROM rate_overrides WHERE id = ANY(?)`, [overlapping.map((o: any) => o.id)]).catch(() => {});
-            superseded += overlapping.length;
-          }
           const rid = `RATE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
           await tenantDb.run(
             "INSERT INTO rate_overrides (id, scope, scope_id, start_date, end_date, rate, label, applies_to_days, priority) VALUES (?, 'TYPE', ?, ?, ?, ?, 'Bulk update', ?, 5)",
@@ -47799,7 +47823,7 @@ ${data.tenant.name}`;
       });
       if (!cands.length) return base;
       cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0)
-        || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+        || (_tsMs(b.created_at) - _tsMs(a.created_at)));
       return Number(cands[0].rate) || base;
     };
     // A manual availability override (Update rooms, Bulk update's inventory
@@ -69206,8 +69230,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-inventory-push-ignored-manual-overrides',
+    commit_marker: 'bulk-update-beats-older-grid-edits',
     code_features: [
+      'bulk-update-beats-older-grid-edits  Owner ran a Bulk update for both room types across October on pconvention.atithi-setu.com (RESTO-1009) and 1 Oct kept its old price. The bulk rows saved correctly, but 1 Oct (and 30 Sep) carried older single-day Grid override rows from cell edits on the Rates and inventory grid. Grid rows are priority 10 and bulk rows priority 5, so the older grid edit won on those days in the booking engine, the grid and the Aiosell push alike. A bulk update now deletes older Grid override rows for the same room type on the dates it covers (respecting its day-of-week filter). Also fixed a data-loss bug from the earlier overlap change: a bulk update deleted every older Bulk update row it touched at all, so setting 10 to 12 Oct after 1 to 31 Oct wiped the rest of October. Now only bulk rows wholly inside the new range are removed; a partly overlapping one keeps its other dates and loses the overlap on recency, and re-saving the same range bumps created_at. Recency itself was broken: all four rate resolvers ordered created_at with String(date).localeCompare, and a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a Monday save lost to an older Saturday one. New _tsMs helper compares real timestamps; the grid resolver also gained the tie-break so it shows the price guests pay. tsc and vite build clean.',
       'aiosell-inventory-push-ignored-manual-overrides  THE actual root cause behind every inventory not updated report on pconvention.atithi-setu.com (RESTO-1009) today, found using the verify-data diagnostic added minutes earlier. Every trigger fix shipped today made a push genuinely fire, and Aiosell genuinely acknowledged every one of them - but aiosellSyncTenants own inventory calculation, unchanged since the integration was first built, computed available rooms as total rooms minus occupied ONLY. It never once consulted room_inventory_overrides - the exact table Update rooms, Bulk updates inventory branch, and the new Available grid row all write to. A manually blocked room for maintenance or an owner stay therefore could never reach Aiosell no matter how many times or how correctly the push fired, because the push itself was never capable of carrying that number. Confirmed with hard evidence, not inference: read back Aiosells own stored data for three dates carrying real overrides (0, 5, and 2 rooms blocked) immediately after a fresh explicit push that reported success - Aiosell held the raw unoverridden total-minus-occupied count on every one of them, while a date with no override at all matched correctly. Fixed by pre-loading room_inventory_overrides for the push window once and checking it first for every date and room type, same precedence already used by GET /hotel/inventory-grid and the Rates and inventory grid - a manual override now wins outright, exactly as it already does everywhere it is displayed. tsc and vite build clean.',
       'aiosell-verify-data-diagnostic  Owner reported checking inside Aiosell itself and finding inventory not updated, immediately after a live browser test (Update rooms, saved through the real UI) produced a fresh OK sync-log entry on our side. Every diagnostic added so far (the raw response capture, the sync log) only proves Aiosell ACKNOWLEDGED a request - none of them confirm what Aiosell actually holds afterward, so there was no way to tell a genuine push-side gap apart from a display lag on Aiosells own dashboard without asking the owner to look. Added GET /hotel/aiosell/verify-data (type inventory or rates, a date range), which calls the aiosellFetchData /data endpoint and returns exactly what Aiosell reports back for those dates - closes the loop this integration has been missing since day one: not just did Aiosell receive it, but does Aiosell actually have it. tsc and vite build clean.',
       'rate-grid-available-blank-on-rate-override-fix  Browser-verified live on pconvention.atithi-setu.com (RESTO-1009) after shipping the new Available row on the Rates and inventory grid: Standard Double (which carries several overlapping rate_overrides after the earlier overlap fix let existing stacked rows persist) rendered a BLANK Available input for nearly every date in view, while Standard Single (fewer overrides) mostly showed real numbers. Root cause was a flow bug in the very code that computes the row, not a data problem: rate resolution and availability resolution shared one per-date loop, and the branch that resolves a TYPE-scope rate override ended in a bare continue - which skipped the rest of that loop iteration, including the availability computation, for every date the override touched. A room type with heavy rate-override coverage therefore had its availability left undefined (blank input) on most dates; a lightly-covered type mostly worked, which is exactly the inconsistent pattern reported. Restructured the loop so rate and availability resolve independently within the same iteration, with no early exit from one blocking the other. tsc and vite build clean.',
