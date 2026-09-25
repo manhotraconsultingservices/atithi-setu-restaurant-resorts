@@ -6034,6 +6034,11 @@ async function triggerAriPush(
       const channelKey = String(credRow.channel || '').toUpperCase();
       // Skip pushing back to the OTA that originated this booking.
       if (channelKey === sourceChannel) continue;
+      // AIOSELL has no entry in the adapter registry below, so it would silently
+      // fall back to MockAdapter (isReady() always true there, defeating the "skip
+      // stubs" comment below) and log a false success. It's already kept in step by
+      // the Aiosell-specific booking-event hook (aiosellEventHook/scheduleAiosellResync).
+      if (channelKey === 'AIOSELL') continue;
 
       const adapter = getChannelAdapter(channelKey);
       // getChannelAdapter falls back to MOCK for unknown channels; skip stubs
@@ -6162,6 +6167,12 @@ async function triggerAllRoomRatePush(restaurantId: string): Promise<void> {
 
     for (const credRow of enabledOtas) {
       const channelKey = String(credRow.channel || '').toUpperCase();
+      // AIOSELL is a channel manager (its own hotel-code/mapping model), not one of
+      // the direct per-OTA adapters below — 'AIOSELL' has no entry in that registry,
+      // so getChannelAdapter would silently fall back to MockAdapter, which reports
+      // ok:true without pushing anything. Skip it here; it is pushed correctly via
+      // scheduleAiosellResync/aiosellSyncTenant at the routes that call this function.
+      if (channelKey === 'AIOSELL') continue;
       const adapter = getChannelAdapter(channelKey);
       if (!adapter.isReady(credRow)) continue;
 
@@ -42567,6 +42578,7 @@ ${data.tenant.name}`;
       const created = await tenantDb.get("SELECT * FROM rate_overrides WHERE id = ?", [id]);
       res.status(201).json(created);
       triggerAllRoomRatePush(req.params.id).catch(() => {});
+      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
     } catch (err) {
       console.error("create rate-override error:", err);
       res.status(500).json({ error: "Failed to create rate override" });
@@ -42581,6 +42593,7 @@ ${data.tenant.name}`;
       await tenantDb.run("DELETE FROM rate_overrides WHERE id = ?", [req.params.overrideId]);
       res.json({ success: true });
       triggerAllRoomRatePush(req.params.id).catch(() => {});
+      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
     } catch (err) {
       res.status(500).json({ error: "Failed to delete rate override" });
     }
@@ -42736,6 +42749,7 @@ ${data.tenant.name}`;
         }
       }
       triggerAllRoomRatePush(req.params.id).catch(() => {});
+      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
       res.json({ ok: true, saved: overrides.length });
     } catch (err) {
       res.status(500).json({ error: "Failed to save rate grid" });
@@ -42749,6 +42763,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const enabledOtas: any[] = await db.query("SELECT channel FROM channel_credentials WHERE is_enabled = 1");
       triggerAllRoomRatePush(req.params.id).catch(() => {});
+      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
       const n = enabledOtas.length;
       res.json({ ok: true, queued: n, message: `Rates queued for ${n} OTA channel${n !== 1 ? 's' : ''}.` });
     } catch (err) {
@@ -42823,6 +42838,7 @@ ${data.tenant.name}`;
         }
       }
       triggerAllRoomRatePush(req.params.id).catch(() => {});
+      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
       res.json({ ok: true, created, updated });
     } catch (err) {
       res.status(500).json({ error: "Failed to apply bulk rate update" });
@@ -43768,6 +43784,15 @@ ${data.tenant.name}`;
       const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
       await tenantDb.run(`UPDATE room_types SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.typeId]);
       res.json(await tenantDb.get("SELECT * FROM room_types WHERE id = ?", [req.params.typeId]));
+      // This is the actual "change a room's price" screen — until this fix, editing
+      // base_rate here never reached any OTA channel: this route called no push at
+      // all, unlike the rate-plans/rate-overrides routes (which called the generic
+      // multi-adapter triggerAllRoomRatePush, itself a no-op for AIOSELL — see the
+      // note beside scheduleAiosellResync below). Push whenever a rate/availability-
+      // relevant field changed; self-guards to a cheap no-op for non-Aiosell tenants.
+      if ('base_rate' in patch || 'capacity' in patch || 'is_active' in patch) {
+        scheduleAiosellResync(req.params.id, { rates: true });
+      }
     } catch (err) {
       res.status(500).json({ error: "Failed to update room type" });
     }
@@ -48337,6 +48362,7 @@ ${data.tenant.name}`;
     }).catch(() => {});
     res.json({ ok: true, count: saved, rate_plans: persisted });
     triggerAllRoomRatePush(req.params.id).catch(() => {});
+    scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
   });
 
   app.delete("/api/restaurant/:id/hotel/rate-plans/:planId", authenticate, hotelStaff, requireTabAction('SETTINGS', 'DELETE'), async (req: AuthRequest, res: Response) => {
@@ -68982,8 +69008,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-sync-log-raw-response',
+    commit_marker: 'aiosell-rate-push-missing-triggers',
     code_features: [
+      'aiosell-rate-push-missing-triggers  Client kept reporting rates not reaching Agoda from pconvention.atithi-setu.com (RESTO-1009), even after the earlier missing rate-plan-mapping fix and a confirmed successful test push. Traced every code path that can change a room rate and checked whether any of them actually reach Aiosell. Found a real, systemic gap: PATCH /hotel/room-types/:typeId - the actual change-a-room-price screen, where base_rate lives - called no OTA push at all, not even the wrong one. The other six rate-affecting routes (rate-overrides create and delete, the rate-grid bulk save, the explicit Publish Rates button, bulk-rate-update, and the rate-plans PUT) all called an existing helper, triggerAllRoomRatePush, built for the older direct-to-OTA adapter framework in channelAdapters.ts (Booking.com, MMT, Agoda, Expedia, Airbnb, Google Hotels). That registry has no AIOSELL entry, so for a channel_credentials row with channel AIOSELL, getChannelAdapter silently falls back to a MockAdapter - and MockAdapter.isReady always returns true, defeating the skip-stubs check right above it - so the call proceeds, logs, and returns ok true without ever contacting Aiosell, writing a false sent row into channel_sync_log. A property like pconvention, which reaches every OTA exclusively through Aiosell, therefore had no reliable path from a rate edit to Aiosell at all: the only things that ever worked were a booking lifecycle event happening to fire (create, modify, checkout, cancel already have their own correct, separate Aiosell-specific push), a staff member remembering to click Push Now in the Aiosell panel, or the scheduled interval sync - which was switched off for this tenant. Fixed by calling the correct, already-existing Aiosell-specific push, scheduleAiosellResync, from all seven of those routes (the six that had the wrong push, plus the room-types PATCH that had none), and by making the two places that loop over channel_credentials explicitly skip the AIOSELL row instead of silently mock-succeeding for it, so a future misconfigured or unmapped channel logs a true failure instead of a false success. tsc and vite build clean.',
       'aiosell-sync-log-raw-response  Owner reported pconvention.atithi-setu.com (RESTO-1009) changed a room rate, clicked Push now, got a success response, but the new rate never showed up on Aiosell/Agoda. Live-tested with the owner watching: changed Standard Double from 3200 to 5000, pushed, and every single sync log entry read the same generic Aiosell acknowledgement, Request Received Successfully, with nothing else attached. That message is the top level response text Aiosell itself returns, not something this codebase invents, so the PMS side of the exchange is genuinely sending the fresh value and Aiosell is genuinely accepting the call - but aiosellSyncTenant only ever extracted that one generic string and threw away the rest of the Aiosell response body before it reached the sync log, so if Aiosell ever attaches a more specific reason (this codebase already has one documented precedent, a channel multiplier response naming an unmapped channel), nobody could ever see it. Now every inventory and rate push - success or failure - captures the full raw response body (truncated) alongside the message and writes it into the Sync Log detail column, so the next time this happens the actual Aiosell payload is visible instead of a string that only ever reads Request Received Successfully. This is an observability fix, not a guess at the underlying cause - the generic acknowledgement plus this codebase own prior finding that Aiosell can silently accept a call for a channel that is not actually connected on its own dashboard both point at the Agoda connection needing to be verified on Aiosell side for hotel code 3b793323bc, which is outside anything the PMS can configure by API.',
       'group-add-room-folio-fix  Owner-reported bug: rooms added to an already-active group booking were not reflected in the Group Folio, Master Account or Invoice PDF, and the configured rate per night never reached the total. Root-caused end to end before touching anything: the add-room endpoint (POST .../hotel/booking-groups/:groupId/rooms/add) correctly stores room_rate and total_amount on the new room_bookings row and correctly recomputes the groups own total_amount, so that field looked fine - but the Master Folio endpoint (GET .../master-folio) and the group Invoice PDF builder (buildGroupInvoicePdf) both compute their totals by summing each ROOMS OWN folio (folios WHERE booking_id = the room), never room_bookings.total_amount directly. A room only gets its own folio when it is checked in (createFolioWithRoomCharges runs there), and a room added after the OTHER rooms in the group already checked in stays plain BOOKED with no folio at all - invisible to both screens, exactly matching the report. The only existing workaround was for staff to remember to re-run group check-in (it would silently pick up just the new still-BOOKED room), which is precisely the class of fragile, human-memory-dependent mechanism this codebase avoids elsewhere. Fix: after inserting new room_bookings rows, check whether the group has already started billing (any sibling booking already carries an open or settled folio); if so, immediately seed the new rooms folio and per-night room-charge entries the same way check-in would, via the existing idempotent createFolioWithRoomCharges - which reads the rooms own configured rate, meal plan and extras, so the charge quoted at add-room time is exactly what gets billed. Room status is deliberately left BOOKED (guest ID capture, the Form-C gate and the check-in checklist still run through the normal check-in flow whenever the guest actually arrives) - only the billing folio is created early so the room is never invisible to the invoice. No change for a room added to a group that has not started billing yet - it continues to wait for the normal group check-in, unchanged. Added TC-BIZ-GRP-FOLIO (live: creates a 1-room group, force-checks it in, adds a second room, asserts the response reports folios_seeded=1 and the Master Folio shows a real folio_grand_total for the new room close to its quoted rate) and TC-BIZ-GRP-FOLIO-PDF (decodes the actual rendered invoice PDF and confirms the added rooms name is printed on it, not just present in the API response) to the local technical test suite.',
       'kitchen-printers-agent-download-link  Owner asked whether the print agent .exe could be published so a tenant can download it straight from their own dashboard, since network-printer reliability had already cost one client. The download route and the auto-update manifest already existed server-side (GET /api/print-agent/download and /api/print-agent/manifest, armed since 5 Sep, already serving the real 3.6.0 binary confirmed live at 57589142 bytes) but the Kitchen and Invoice Printers screen never linked to either one - the only mention was a line of text pointing an owner at print-agent/README.md, a file inside the git repo they have no access to at all. Added a Download Print Agent (Windows) button plus a short current-version tag (fetched from the manifest) right at the top of the screen, ahead of the existing agent-token card, and numbered the three steps (install agent, copy token, add printers) so the order reads clearly. Also added a plain-language heads-up that Windows SmartScreen will warn on first run since this is an unsigned binary, with the exact click-through (More info, Run anyway), so an owner does not mistake the warning for a broken download. No backend change needed - this was a missing UI surface over machinery that was already fully built and already live. TC-PRINTAGENT-DOWNLOAD-WIRED (live: checks the manifest and download routes both return something real, and that the deployed bundle actually carries the new download link).',
