@@ -42651,8 +42651,25 @@ ${data.tenant.name}`;
       const roomTypes: any[] = await tenantDb.query(
         "SELECT id, name, description, base_rate, capacity FROM room_types ORDER BY display_order, name"
       );
-      const rooms: any[] = await tenantDb.query("SELECT id, name, type_id, base_rate, status FROM rooms ORDER BY name");
+      const rooms: any[] = await tenantDb.query("SELECT id, name, type_id, base_rate, status FROM rooms WHERE status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name");
       const totalRooms = rooms.length;
+      // Per-type availability, so the same grid this owner already edits rates on
+      // can show and edit availability per room type too — this used to be a
+      // single read-only whole-property "Available Rooms" row with no way to
+      // change it here at all (Update rooms was the only editable surface).
+      // Manual overrides win the same way GET /hotel/inventory-grid already does.
+      const typeTotal = new Map<string, number>();
+      for (const r of rooms) { const k = r.type_id || '__untyped__'; typeTotal.set(k, (typeTotal.get(k) || 0) + 1); }
+      const invOverrideRows: any[] = await tenantDb.query(
+        `SELECT room_type_id, date, available_count FROM room_inventory_overrides
+          WHERE restaurant_id = ? AND date >= ? AND date <= ?`,
+        [req.params.id, fromDate, toDate]
+      ).catch(() => []);
+      const invOverrideMap: Record<string, Record<string, number>> = {};
+      for (const r of invOverrideRows) {
+        if (!invOverrideMap[r.room_type_id]) invOverrideMap[r.room_type_id] = {};
+        invOverrideMap[r.room_type_id][normaliseDateIso(r.date)] = Number(r.available_count);
+      }
       const allOverrides: any[] = await tenantDb.query(
         "SELECT * FROM rate_overrides WHERE start_date <= ? AND end_date >= ?", [toDate, fromDate]
       );
@@ -42699,7 +42716,10 @@ ${data.tenant.name}`;
       const roomTypeRates = roomTypes.map((rt: any) => {
         const typeOvr  = allOverrides.filter((o: any) => o.scope === 'TYPE' && o.scope_id === rt.id);
         const typeRooms = rooms.filter((r: any) => r.type_id === rt.id);
+        const typeRoomIds = new Set(typeRooms.map((r: any) => r.id));
         const rates: Record<string, number> = {};
+        const available: Record<string, number> = {};
+        const typeTotalRooms = typeTotal.get(rt.id) || 0;
         for (const d of dates) {
           const tr = pickRateGrid(typeOvr, d);
           if (tr !== null) { rates[d] = tr; continue; }
@@ -42710,8 +42730,14 @@ ${data.tenant.name}`;
             if (r !== null && (best === null || r > best)) best = r;
           }
           rates[d] = best ?? Number(rt.base_rate || 0);
+
+          const manualAvail = invOverrideMap[rt.id]?.[d];
+          if (manualAvail !== undefined) { available[d] = manualAvail; continue; }
+          const occ = bookings.filter((b: any) => typeRoomIds.has(b.room_id) &&
+            (b.booking_type === 'DAY_USE' ? b.check_in_date === d : b.check_in_date <= d && b.check_out_date > d)).length;
+          available[d] = Math.max(0, typeTotalRooms - occ);
         }
-        return { id: rt.id, name: rt.name, base_rate: rt.base_rate, capacity: rt.capacity, rates };
+        return { id: rt.id, name: rt.name, base_rate: rt.base_rate, capacity: rt.capacity, total_rooms: typeTotalRooms, rates, available };
       });
       const untypedRooms = rooms.filter((r: any) => !r.type_id);
       if (untypedRooms.length > 0) {
@@ -42725,7 +42751,7 @@ ${data.tenant.name}`;
           }
           rates[d] = best ?? Number(untypedRooms[0]?.base_rate || 0);
         }
-        roomTypeRates.push({ id: '__untyped__', name: 'Other Rooms', base_rate: untypedRooms[0]?.base_rate || 0, capacity: null, rates });
+        roomTypeRates.push({ id: '__untyped__', name: 'Other Rooms', base_rate: untypedRooms[0]?.base_rate || 0, capacity: null, total_rooms: untypedRooms.length, rates, available: {} });
       }
       res.json({ dates, meta, room_types: roomTypeRates });
     } catch (err) {
@@ -48183,10 +48209,20 @@ ${data.tenant.name}`;
       for (const { channel, multiplier } of list) {
         const r = await aiosellChannelMultiplier(cfg, t.hotelCode, multiplier, [channel]);
         const raw = String(r.message || '');
-        const needsChannel = !r.ok && /add mapping|not updated|mapping|not connected|no channel/i.test(raw);
+        // Aiosell's own success flag for THIS endpoint (`status`) is unreliable —
+        // confirmed live: booking.com and gommt both come back with the envelope
+        // saying success, while the free-text message plainly reads "Multiplier
+        // not updated, please add mapping for: [...]". The old `!r.ok &&` guard
+        // trusted that envelope, so this exact failure rendered as a green
+        // checkmark with the refusal text sitting right next to it — an owner
+        // setting a multiplier for a channel Aiosell has not connected saw
+        // "applied" and had no reason to think anything was wrong. Detect the
+        // phrase regardless of what the envelope claims.
+        const needsChannel = /add mapping|not updated|not connected|no channel/i.test(raw);
+        const channelOk = r.ok && !needsChannel;
         results.push({
-          channel, multiplier, ok: !!r.ok,
-          message: r.ok ? (raw || 'Applied')
+          channel, multiplier, ok: channelOk,
+          message: channelOk ? (raw || 'Applied')
             : needsChannel ? `Not connected in Aiosell — connect "${channel}" in the Aiosell dashboard (Channels / OTA connections), then retry.`
             : (raw || 'Failed'),
         });
@@ -69106,8 +69142,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-grid-and-bulk-inventory-push',
+    commit_marker: 'aiosell-multiplier-false-success-and-inline-availability',
     code_features: [
+      'aiosell-multiplier-false-success-and-inline-availability  Owner flagged Channel Rate Multiplier as a critical bug on pconvention.atithi-setu.com (RESTO-1009). Live-tested every default pre-seeded channel, not just Agoda: Agoda genuinely applies (confirmed twice, once from the apply response and once read back independently from Aiosells own property endpoint, which now reports rate_multiplier 1.2 stored against Agoda) - but Booking.com and GoMMT, the other two rows this screen pre-seeds by default, come back from Aiosell with the envelope saying success while the actual free text message plainly reads Multiplier not updated please add mapping for those channels. The route only checked that failure phrase when the envelope already said failure, so this exact case - success flag true, message says not updated - rendered as a green checkmark with the refusal text sitting right next to it. An owner who had never touched Agoda and only ever set Booking.com or GoMMT, the two channels this screen shows first, would see applied and have no reason to think anything was wrong, when neither had ever taken effect. Fixed by detecting that phrase regardless of what Aiosells own envelope claims, so a channel Aiosell has not connected now correctly shows the not-connected guidance instead of a false checkmark. Also, per the owner asking that Rates and inventory, Update rooms, and Bulk update should all push to Aiosell: the Rates and inventory grid gained an editable Available row under each room type (previously read-only there, so changing a rate for specific dates meant switching tabs to also close out rooms for the same dates) - same PUT /hotel/inventory-grid this already used elsewhere, same push wiring. tsc and vite build clean.',
+      'bulk-inventory-confirmation-message-fix  Owner reported Bulk inventory is not getting updated. Live-tested the exact save the Bulk update screen makes with type set to inventory - the backend genuinely saves every row (confirmed a real saved count back from the API) and, since the fix earlier today, genuinely pushes it to Aiosell too. The actual bug was entirely in the confirmation the owner sees: the Apply Bulk Update button always shows an alert reading Done, N created, N updated, but those two field names only exist on the RATE branchs response - the inventory branch responds with a single saved count and no created or updated fields at all, so that alert read Done, 0 created, 0 updated for a bulk inventory update every single time, regardless of how many rows had actually just been saved. A real success looked identical to a complete no-op. Fixed the confirmation message to read the field the inventory branch actually returns, and folded in the supersede count from the earlier Bulk Update overlap fix into the rate branchs own message while in there. No backend change was needed - the data was always saving and, since todays earlier fix, always reaching Aiosell; only the message lied about it. tsc and vite build clean.',
       'inventory-grid-and-bulk-inventory-push  Owner asked to make sure all three RMS Workspace surfaces (Rates and inventory, Update rooms, Bulk update) push to Aiosell. Rates and inventory (the Rate Grid) and Bulk updates rate branch already did, from earlier fixes this same day. Auditing the other two found the SAME missing-trigger bug in two more places: PUT /hotel/inventory-grid, which is what Update rooms actually saves through, had NO push call at all - a manual stop-sell or a room blocked for maintenance there never reached Aiosell, which is the one kind of change most likely to cause a real overbooking if a since-blocked room stays sellable on an OTA. And Bulk updates OWN inventory branch (the same endpoint, a different updateType) returned a response before ever reaching the rate branches push call a few lines below it, so a bulk availability change through that screen had exactly the same gap. Fixed both by calling the existing scheduleAiosellResync after a successful save, without forcing a rate re-push since availability is already sent on every Aiosell push regardless. Between this and the earlier fixes today, all three RMS Workspace screens - and the explicit Publish Rates button - now reach Aiosell on every save. tsc and vite build clean.',
       'rate-override-date-compare-pgdate-bug  Owner set a rate for one specific date on pconvention.atithi-setu.com (RESTO-1009) and every date on the Rates and Inventory grid changed to that same number - reported as updating a single date changes all dates. Root cause: rate_overrides.start_date and end_date are pg DATE columns, which come back from a query as real JS Date objects, not strings (db.ts only overrides the type parser for NUMERIC, none exists for DATE). The date-range filters in pickRateGrid (the grid endpoint), resolveRate (the older triggerAllRoomRatePush pusher), and resolveTypeRate (this sessions own new Aiosell per-date rate resolver) all compared a plain iso string against that Date object directly, or via String(dateObject) which calls Date.prototype.toString and yields something like Wed Sep 30 2026 GMT+0530, never a real ISO date. Either way the comparison never behaved as a real date-range check - a string versus a Date coerces to NaN on one side and a NaN comparison is always false, so a row was never excluded no matter what date was being resolved, and a single-day override quietly won for every date in view once it sorted first by priority. This is the exact pg-Date-is-a-JS-Date-object class of bug already documented and fixed once in this codebase for a different endpoint - it had simply never been ported to these three. Fixed all three call sites with the existing normaliseDateIso helper, which already correctly handles a Date object or a string. Also folded into the same deploy: Publish Rates was reported as pushing nothing to Aiosell - live-tested and the underlying push was already working correctly (confirmed via a fresh live-triggered OK sync-log entry appearing seconds after the button is clicked), the actual gap was that the endpoint fired the push in the background on an 8-second debounce and immediately returned a generic queued message with no mention of Aiosell at all, so a genuine success looked indistinguishable from nothing having happened. Publish Rates now awaits the Aiosell push directly, the same way the dedicated Push now button already does, and names Aiosell explicitly in the result. tsc and vite build clean.',
       'bulk-rate-update-supersedes-overlap  Owner looked at the Rate Plans table on pconvention.atithi-setu.com (RESTO-1009) and reported entries appearing on their own, asking for the root cause. Checked every place in the codebase that writes to rate_overrides - there are exactly four, and all four sit behind an authenticated route a person (or a script) has to call; there is no cron job, scheduled sweep, or other background process anywhere that touches this table, so nothing was creating rows unattended. The real mechanism: Bulk Update only treated a save as an update of an EXISTING row when the new date range matched a prior one EXACTLY, start and end both identical. The entirely ordinary way this screen actually gets used - set a rate for the next couple of weeks today, nudge the range or the number again in a few days as an events real dates firm up - shifts that range by even a single day, so each of those saves silently INSERTED another row instead of replacing the last one. Repeat that a handful of times for the same room and the table fills up with several overlapping Bulk update rows for the same period, each still in force, with the actually-served rate for any given date decided by an opaque priority-then-most-recent tie-break nobody set out to configure - exactly the pile the owner was looking at and could not explain. Fixed at the point of save: before inserting a new Bulk update row, any EXISTING Bulk update rows for that SAME room type whose date range overlaps the new one are deleted first, so saving a bulk update now genuinely replaces the rate for that period the way its name implies, instead of stacking on top of it. Deliberately scoped to same room type and the literal Bulk update label only, so a distinct rate plan a manager added by hand through plus Add Rate Plan, or the Rate Grids own single-day overrides, are never touched by this. Existing overlapping rows already on this tenant were left in place rather than silently deleted, since only the owner can say which of several already-saved numbers for the same dates was the intended one.',

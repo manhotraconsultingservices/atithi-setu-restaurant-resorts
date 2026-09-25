@@ -12726,6 +12726,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
   const [rateGridFrom, setRateGridFrom] = useState<string>(() => todayIST());
   const [rateGridSaving, setRateGridSaving] = useState(false);
+  // Inline "Available Rooms" edits on this same Rates & Inventory grid — this row
+  // used to be a plain read-only number; an owner had to switch to the separate
+  // Update Rooms tab to change availability at all. Same {roomTypeId: {date: count}}
+  // shape as rateGridDirty, saved through the same PUT /hotel/inventory-grid the
+  // Update Rooms tab already uses (already wired to push to Aiosell).
+  const [rateGridInvDirty, setRateGridInvDirty] = useState<Record<string,Record<string,number>>>({});
+  const [rateGridInvSaving, setRateGridInvSaving] = useState(false);
   const [bulkRateForm, setBulkRateForm] = useState<any>({ type: 'rate', room_type_ids: [], from_date: '', to_date: '', value: '', apply_days: [] });
   const [bulkRateSaving, setBulkRateSaving] = useState(false);
   // Update Rooms (inventory grid) state
@@ -26703,6 +26710,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {rateGridSaving ? 'Saving…' : `Save ${Object.values(rateGridDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} changes`}
                   </button>
                 )}
+                {Object.keys(rateGridInvDirty).length > 0 && (
+                  <button
+                    disabled={rateGridInvSaving}
+                    onClick={async () => {
+                      const overrides: any[] = [];
+                      for (const [rtId, dates] of Object.entries(rateGridInvDirty)) {
+                        for (const [date, count] of Object.entries(dates)) {
+                          overrides.push({ room_type_id: rtId, date, available_count: Number(count) });
+                        }
+                      }
+                      setRateGridInvSaving(true);
+                      try {
+                        // Same endpoint the Update rooms tab already saves through
+                        // (already wired to push to Aiosell) — this button just
+                        // gives access to it from this grid too.
+                        await hotelApi('/inventory-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
+                        setRateGridInvDirty({});
+                        await fetchRateGrid();
+                      } catch { alert('Failed to save availability.'); }
+                      finally { setRateGridInvSaving(false); }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-sky-600 text-white text-sm font-bold hover:bg-sky-700 transition-colors"
+                  >
+                    {rateGridInvSaving ? 'Saving…' : `Save ${Object.values(rateGridInvDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} availability change(s)`}
+                  </button>
+                )}
               </div>
 
               {rateGridLoading ? (
@@ -26804,6 +26837,45 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   className={cn(
                                     'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none disabled:opacity-70 disabled:cursor-not-allowed',
                                     isDirty ? 'border-blue-400 font-bold text-blue-800' : 'border-transparent hover:border-[#e8e0d8]'
+                                  )}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                      {/* Per room type editable "Available" row — this used to only
+                          exist on the separate Update rooms tab; an owner adjusting
+                          a rate here for an event had no way to also close out
+                          rooms for the same dates without switching tabs. */}
+                      {rateGrid.room_types.filter(rt => rt.id !== '__untyped__').map(rt => (
+                        <tr key={`${rt.id}-avail`} className="border-t border-dashed border-[#e8e0d8] bg-slate-50/60">
+                          <td className="sticky left-0 bg-slate-50/60 z-10 px-4 py-1.5 border-r border-[#e8e0d8] text-[10px] text-[#6b5d52] pl-6">
+                            ↳ Available ({rt.total_rooms ?? '?'} total)
+                          </td>
+                          {rateGrid.dates.map(d => {
+                            const dirty = rateGridInvDirty[rt.id]?.[d];
+                            const stored = rt.available?.[d];
+                            const displayVal = dirty !== undefined ? dirty : (stored ?? '');
+                            const isDirty = dirty !== undefined;
+                            return (
+                              <td key={d} className={cn('px-1 py-1 border-l border-[#e8e0d8]', isDirty ? 'bg-blue-50' : '')}>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="1"
+                                  value={displayVal}
+                                  disabled={!canWriteTab('CHANNEL_MANAGER')}
+                                  onChange={e => {
+                                    const v = Number(e.target.value);
+                                    setRateGridInvDirty(prev => ({
+                                      ...prev,
+                                      [rt.id]: { ...(prev[rt.id] || {}), [d]: v },
+                                    }));
+                                  }}
+                                  className={cn(
+                                    'w-full text-center text-[11px] py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none disabled:opacity-70 disabled:cursor-not-allowed',
+                                    isDirty ? 'border-blue-400 font-bold text-blue-800' : 'border-transparent hover:border-[#e8e0d8] text-[#6b5d52]'
                                   )}
                                 />
                               </td>
@@ -27126,7 +27198,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         method: 'POST',
                         body: JSON.stringify({ ...bulkRateForm, rate: Number(bulkRateForm.value) }),
                       });
-                      alert(`Done. ${res.created ?? 0} created, ${res.updated ?? 0} updated.`);
+                      // The inventory branch responds { ok, saved } — it has no
+                      // created/updated fields at all, so this alert always read
+                      // "0 created, 0 updated" for a bulk inventory update no
+                      // matter how many rows actually saved, making a real
+                      // success look like the feature silently did nothing.
+                      if (bulkRateForm.type === 'inventory') {
+                        alert(`Done. ${res.saved ?? 0} date(s) updated.`);
+                      } else {
+                        const supersededNote = res.superseded ? `, replaced ${res.superseded} overlapping rule(s)` : '';
+                        alert(`Done. ${res.created ?? 0} created, ${res.updated ?? 0} updated${supersededNote}.`);
+                      }
                       if (bulkRateForm.type === 'inventory') fetchInvGrid();
                       else fetchRateGrid();
                     } catch { alert('Failed to apply bulk update.'); }
