@@ -42721,21 +42721,35 @@ ${data.tenant.name}`;
         const available: Record<string, number> = {};
         const typeTotalRooms = typeTotal.get(rt.id) || 0;
         for (const d of dates) {
+          // Rate resolution and availability resolution are independent — a
+          // date with an active rate override still needs its availability
+          // computed. The `continue` that used to sit right after resolving
+          // the rate skipped the whole rest of this loop body, including
+          // available[d], for every date a TYPE-scope override touched — on a
+          // room type with several overlapping Bulk update rows (the common
+          // case after the earlier overlap fix let stacked rows persist),
+          // nearly every date hit this and the Available row rendered blank.
           const tr = pickRateGrid(typeOvr, d);
-          if (tr !== null) { rates[d] = tr; continue; }
-          let best: number | null = null;
-          for (const room of typeRooms) {
-            const rOvr = allOverrides.filter((o: any) => o.scope === 'ROOM' && o.scope_id === room.id);
-            const r = pickRateGrid(rOvr, d);
-            if (r !== null && (best === null || r > best)) best = r;
+          if (tr !== null) {
+            rates[d] = tr;
+          } else {
+            let best: number | null = null;
+            for (const room of typeRooms) {
+              const rOvr = allOverrides.filter((o: any) => o.scope === 'ROOM' && o.scope_id === room.id);
+              const r = pickRateGrid(rOvr, d);
+              if (r !== null && (best === null || r > best)) best = r;
+            }
+            rates[d] = best ?? Number(rt.base_rate || 0);
           }
-          rates[d] = best ?? Number(rt.base_rate || 0);
 
           const manualAvail = invOverrideMap[rt.id]?.[d];
-          if (manualAvail !== undefined) { available[d] = manualAvail; continue; }
-          const occ = bookings.filter((b: any) => typeRoomIds.has(b.room_id) &&
-            (b.booking_type === 'DAY_USE' ? b.check_in_date === d : b.check_in_date <= d && b.check_out_date > d)).length;
-          available[d] = Math.max(0, typeTotalRooms - occ);
+          if (manualAvail !== undefined) {
+            available[d] = manualAvail;
+          } else {
+            const occ = bookings.filter((b: any) => typeRoomIds.has(b.room_id) &&
+              (b.booking_type === 'DAY_USE' ? b.check_in_date === d : b.check_in_date <= d && b.check_out_date > d)).length;
+            available[d] = Math.max(0, typeTotalRooms - occ);
+          }
         }
         return { id: rt.id, name: rt.name, base_rate: rt.base_rate, capacity: rt.capacity, total_rooms: typeTotalRooms, rates, available };
       });
@@ -69142,8 +69156,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rates-inventory-grid-unified-save-button',
+    commit_marker: 'rate-grid-available-blank-on-rate-override-fix',
     code_features: [
+      'rate-grid-available-blank-on-rate-override-fix  Browser-verified live on pconvention.atithi-setu.com (RESTO-1009) after shipping the new Available row on the Rates and inventory grid: Standard Double (which carries several overlapping rate_overrides after the earlier overlap fix let existing stacked rows persist) rendered a BLANK Available input for nearly every date in view, while Standard Single (fewer overrides) mostly showed real numbers. Root cause was a flow bug in the very code that computes the row, not a data problem: rate resolution and availability resolution shared one per-date loop, and the branch that resolves a TYPE-scope rate override ended in a bare continue - which skipped the rest of that loop iteration, including the availability computation, for every date the override touched. A room type with heavy rate-override coverage therefore had its availability left undefined (blank input) on most dates; a lightly-covered type mostly worked, which is exactly the inconsistent pattern reported. Restructured the loop so rate and availability resolve independently within the same iteration, with no early exit from one blocking the other. tsc and vite build clean.',
       'rates-inventory-grid-unified-save-button  The Rates and inventory grids new Available row shipped with its OWN separate Save button, alongside the rates grids existing one - two independent dirty-states, two independent PUT calls. Editing a rate AND an availability cell for the same visit and clicking only one of the two buttons saved just that half, which reads exactly like the grid is not pushing both rates and inventory even though both underlying endpoints already reach Aiosell correctly. Replaced the two buttons with one - it saves whatever mix of rate and availability edits are pending in a single click, against both endpoints, and clears both dirty-states together. tsc and vite build clean.',
       'aiosell-multiplier-false-success-and-inline-availability  Owner flagged Channel Rate Multiplier as a critical bug on pconvention.atithi-setu.com (RESTO-1009). Live-tested every default pre-seeded channel, not just Agoda: Agoda genuinely applies (confirmed twice, once from the apply response and once read back independently from Aiosells own property endpoint, which now reports rate_multiplier 1.2 stored against Agoda) - but Booking.com and GoMMT, the other two rows this screen pre-seeds by default, come back from Aiosell with the envelope saying success while the actual free text message plainly reads Multiplier not updated please add mapping for those channels. The route only checked that failure phrase when the envelope already said failure, so this exact case - success flag true, message says not updated - rendered as a green checkmark with the refusal text sitting right next to it. An owner who had never touched Agoda and only ever set Booking.com or GoMMT, the two channels this screen shows first, would see applied and have no reason to think anything was wrong, when neither had ever taken effect. Fixed by detecting that phrase regardless of what Aiosells own envelope claims, so a channel Aiosell has not connected now correctly shows the not-connected guidance instead of a false checkmark. Also, per the owner asking that Rates and inventory, Update rooms, and Bulk update should all push to Aiosell: the Rates and inventory grid gained an editable Available row under each room type (previously read-only there, so changing a rate for specific dates meant switching tabs to also close out rooms for the same dates) - same PUT /hotel/inventory-grid this already used elsewhere, same push wiring. tsc and vite build clean.',
       'bulk-inventory-confirmation-message-fix  Owner reported Bulk inventory is not getting updated. Live-tested the exact save the Bulk update screen makes with type set to inventory - the backend genuinely saves every row (confirmed a real saved count back from the API) and, since the fix earlier today, genuinely pushes it to Aiosell too. The actual bug was entirely in the confirmation the owner sees: the Apply Bulk Update button always shows an alert reading Done, N created, N updated, but those two field names only exist on the RATE branchs response - the inventory branch responds with a single saved count and no created or updated fields at all, so that alert read Done, 0 created, 0 updated for a bulk inventory update every single time, regardless of how many rows had actually just been saved. A real success looked identical to a complete no-op. Fixed the confirmation message to read the field the inventory branch actually returns, and folded in the supersede count from the earlier Bulk Update overlap fix into the rate branchs own message while in there. No backend change was needed - the data was always saving and, since todays earlier fix, always reaching Aiosell; only the message lied about it. tsc and vite build clean.',
