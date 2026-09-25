@@ -6148,7 +6148,10 @@ async function triggerAllRoomRatePush(restaurantId: string): Promise<void> {
       const wd = WD[new Date(date + 'T12:00:00Z').getUTCDay()];
       const pick = (rows: any[]): number | null => {
         const cands = rows.filter((r: any) => {
-          if (date < r.start_date || date > r.end_date) return false;
+          // Same pg-DATE-is-a-JS-Date-object landmine as pickRateGrid/resolveTypeRate
+          // (server.ts) — a raw string/Date compare here was always false either way,
+          // so every override silently matched every date. normaliseDateIso first.
+          if (date < normaliseDateIso(r.start_date) || date > normaliseDateIso(r.end_date)) return false;
           if (r.applies_to_days) {
             const days = String(r.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
             if (days.length > 0 && !days.includes(wd)) return false;
@@ -42627,7 +42630,14 @@ ${data.tenant.name}`;
       function pickRateGrid(overrides: any[], dateStr: string): number | null {
         const wd = WD[new Date(dateStr + 'T12:00:00Z').getUTCDay()];
         const cands = overrides.filter((r: any) => {
-          if (dateStr < r.start_date || dateStr > r.end_date) return false;
+          // r.start_date/end_date are pg DATE columns → JS Date objects, not
+          // strings. `dateStr < r.start_date` coerces the Date to a number
+          // (epoch ms) and the string to NaN, so the comparison was ALWAYS
+          // false either way — every override matched every date in view,
+          // regardless of its actual date range (a single-day Grid override
+          // silently applied to all 12+ days on screen). normaliseDateIso
+          // gives a real 'YYYY-MM-DD' string on either side of the compare.
+          if (dateStr < normaliseDateIso(r.start_date) || dateStr > normaliseDateIso(r.end_date)) return false;
           if (r.applies_to_days) {
             const days = String(r.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
             if (days.length > 0 && !days.includes(wd)) return false;
@@ -42763,9 +42773,19 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const enabledOtas: any[] = await db.query("SELECT channel FROM channel_credentials WHERE is_enabled = 1");
       triggerAllRoomRatePush(req.params.id).catch(() => {});
-      scheduleAiosellResync(req.params.id, { rates: true }); // AIOSELL is not a registered channel in channelAdapters.ts (falls back to the no-op MockAdapter there) - push through the Aiosell-specific path too so a rate/availability change actually reaches Agoda et al. instead of only logging a false success.
+      // This button is a deliberate, explicit "publish now" action — unlike the
+      // other Aiosell triggers added elsewhere (which fire silently in the
+      // background after an edit), an owner clicking THIS expects to know
+      // whether it actually reached Aiosell, not a generic "queued" message
+      // while the real push happens 8s later out of sight. Await it directly,
+      // the same way the dedicated Push now button in the Aiosell panel does,
+      // and fold its outcome into the response.
+      const aiosellOut = await aiosellSyncTenant(req.params.id, AIOSELL_DEFAULT_DAYS, { rates: true, trigger: 'manual', actor: req.user?.email });
       const n = enabledOtas.length;
-      res.json({ ok: true, queued: n, message: `Rates queued for ${n} OTA channel${n !== 1 ? 's' : ''}.` });
+      const aiosellNote = aiosellOut.ok ? `Aiosell: ${aiosellOut.inventory}${aiosellOut.rates ? ` / ${aiosellOut.rates}` : ''}.`
+        : aiosellOut.error && !/credentials not set|Hotel code not set|sync is disabled|No Aiosell room/i.test(aiosellOut.error)
+          ? `Aiosell: ${aiosellOut.error}` : '';
+      res.json({ ok: true, queued: n, aiosell: aiosellOut, message: `Rates queued for ${n} OTA channel${n !== 1 ? 's' : ''}.${aiosellNote ? ' ' + aiosellNote : ''}` });
     } catch (err) {
       res.status(500).json({ error: "Failed to publish rates" });
     }
@@ -42812,6 +42832,12 @@ ${data.tenant.name}`;
             saved++;
           }
         }
+        // This branch returned before ANY push call existed — an availability/
+        // stop-sell change made here (e.g. blocking rooms for maintenance) never
+        // reached Aiosell at all, unlike the rate branch below. Availability is
+        // always sent on every Aiosell push regardless of the `rates` flag, so a
+        // plain resync is enough — no need to also force a rate push here.
+        scheduleAiosellResync(req.params.id);
         return res.json({ ok: true, saved });
       }
 
@@ -42985,6 +43011,10 @@ ${data.tenant.name}`;
         );
         saved++;
       }
+      // The "Update rooms" tab is exactly the kind of change (manual stop-sell,
+      // blocking rooms) that most needs to reach Aiosell immediately to avoid
+      // overbooking — this endpoint never pushed anything before this fix.
+      if (saved > 0) scheduleAiosellResync(req.params.id);
       res.json({ ok: true, saved });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to save inventory overrides' });
@@ -47714,7 +47744,13 @@ ${data.tenant.name}`;
       const wd = WD_AIOSELL[new Date(iso + 'T12:00:00Z').getUTCDay()];
       const cands = typeOverrides.filter((o: any) => {
         if (o.scope_id !== tid) return false;
-        if (iso < String(o.start_date).slice(0, 10) || iso > String(o.end_date).slice(0, 10)) return false;
+        // rate_overrides.start_date/end_date are pg DATE columns, which come back
+        // as JS Date objects here (no type-parser override for OID 1082, unlike
+        // the NUMERIC one in db.ts) — String(dateObj) calls Date.prototype.toString,
+        // giving "Wed Sep 30 2026 ...", not an ISO date, so comparing that against
+        // an ISO `iso` string silently never matched correctly. normaliseDateIso
+        // handles both a Date and a string correctly.
+        if (iso < normaliseDateIso(o.start_date) || iso > normaliseDateIso(o.end_date)) return false;
         if (o.applies_to_days) {
           const days2 = String(o.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
           if (!days2.includes(wd)) return false;
@@ -69070,8 +69106,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bulk-rate-update-supersedes-overlap',
+    commit_marker: 'inventory-grid-and-bulk-inventory-push',
     code_features: [
+      'inventory-grid-and-bulk-inventory-push  Owner asked to make sure all three RMS Workspace surfaces (Rates and inventory, Update rooms, Bulk update) push to Aiosell. Rates and inventory (the Rate Grid) and Bulk updates rate branch already did, from earlier fixes this same day. Auditing the other two found the SAME missing-trigger bug in two more places: PUT /hotel/inventory-grid, which is what Update rooms actually saves through, had NO push call at all - a manual stop-sell or a room blocked for maintenance there never reached Aiosell, which is the one kind of change most likely to cause a real overbooking if a since-blocked room stays sellable on an OTA. And Bulk updates OWN inventory branch (the same endpoint, a different updateType) returned a response before ever reaching the rate branches push call a few lines below it, so a bulk availability change through that screen had exactly the same gap. Fixed both by calling the existing scheduleAiosellResync after a successful save, without forcing a rate re-push since availability is already sent on every Aiosell push regardless. Between this and the earlier fixes today, all three RMS Workspace screens - and the explicit Publish Rates button - now reach Aiosell on every save. tsc and vite build clean.',
+      'rate-override-date-compare-pgdate-bug  Owner set a rate for one specific date on pconvention.atithi-setu.com (RESTO-1009) and every date on the Rates and Inventory grid changed to that same number - reported as updating a single date changes all dates. Root cause: rate_overrides.start_date and end_date are pg DATE columns, which come back from a query as real JS Date objects, not strings (db.ts only overrides the type parser for NUMERIC, none exists for DATE). The date-range filters in pickRateGrid (the grid endpoint), resolveRate (the older triggerAllRoomRatePush pusher), and resolveTypeRate (this sessions own new Aiosell per-date rate resolver) all compared a plain iso string against that Date object directly, or via String(dateObject) which calls Date.prototype.toString and yields something like Wed Sep 30 2026 GMT+0530, never a real ISO date. Either way the comparison never behaved as a real date-range check - a string versus a Date coerces to NaN on one side and a NaN comparison is always false, so a row was never excluded no matter what date was being resolved, and a single-day override quietly won for every date in view once it sorted first by priority. This is the exact pg-Date-is-a-JS-Date-object class of bug already documented and fixed once in this codebase for a different endpoint - it had simply never been ported to these three. Fixed all three call sites with the existing normaliseDateIso helper, which already correctly handles a Date object or a string. Also folded into the same deploy: Publish Rates was reported as pushing nothing to Aiosell - live-tested and the underlying push was already working correctly (confirmed via a fresh live-triggered OK sync-log entry appearing seconds after the button is clicked), the actual gap was that the endpoint fired the push in the background on an 8-second debounce and immediately returned a generic queued message with no mention of Aiosell at all, so a genuine success looked indistinguishable from nothing having happened. Publish Rates now awaits the Aiosell push directly, the same way the dedicated Push now button already does, and names Aiosell explicitly in the result. tsc and vite build clean.',
       'bulk-rate-update-supersedes-overlap  Owner looked at the Rate Plans table on pconvention.atithi-setu.com (RESTO-1009) and reported entries appearing on their own, asking for the root cause. Checked every place in the codebase that writes to rate_overrides - there are exactly four, and all four sit behind an authenticated route a person (or a script) has to call; there is no cron job, scheduled sweep, or other background process anywhere that touches this table, so nothing was creating rows unattended. The real mechanism: Bulk Update only treated a save as an update of an EXISTING row when the new date range matched a prior one EXACTLY, start and end both identical. The entirely ordinary way this screen actually gets used - set a rate for the next couple of weeks today, nudge the range or the number again in a few days as an events real dates firm up - shifts that range by even a single day, so each of those saves silently INSERTED another row instead of replacing the last one. Repeat that a handful of times for the same room and the table fills up with several overlapping Bulk update rows for the same period, each still in force, with the actually-served rate for any given date decided by an opaque priority-then-most-recent tie-break nobody set out to configure - exactly the pile the owner was looking at and could not explain. Fixed at the point of save: before inserting a new Bulk update row, any EXISTING Bulk update rows for that SAME room type whose date range overlaps the new one are deleted first, so saving a bulk update now genuinely replaces the rate for that period the way its name implies, instead of stacking on top of it. Deliberately scoped to same room type and the literal Bulk update label only, so a distinct rate plan a manager added by hand through plus Add Rate Plan, or the Rate Grids own single-day overrides, are never touched by this. Existing overlapping rows already on this tenant were left in place rather than silently deleted, since only the owner can say which of several already-saved numbers for the same dates was the intended one.',
       'aiosell-push-honors-date-rate-overrides  While verifying the fix for Bulk Update never reaching Aiosell, found a deeper, more consequential bug underneath it on pconvention.atithi-setu.com (RESTO-1009): the owner had four real rate_overrides rows in place (a Regular Rate baseline plus three date-scoped Bulk Update rows for specific October date ranges at higher rates for a busy period), but aiosellSyncTenant computed each room rate ONCE, from room_types.base_rate alone, and pushed that exact same flat number for every single date in the push window - the entire 90 to 120 day range Aiosell was told about. Every date-scoped override the owner had set up was silently discarded on every push, live event, scheduled sweep, or manual, and replaced with whatever the flat base rate happened to be at that moment. This explains the complaint far more completely than a missing trigger alone would: even after wiring Bulk Update to actually call the pusher, the number it sent for those specific dates was still wrong. The very same date-window rate resolution already existed and already worked correctly elsewhere (triggerAllRoomRatePushs resolveRate, used by the direct-adapter path and the on-screen Rate Grid), it had simply never been ported into the Aiosell-specific pusher when that pusher was written separately. Fixed by pre-loading each room types TYPE-scope overrides for the push window once, then resolving the correct per-date rate inside the existing per-day loop (highest priority, most-recent-first on a tie, matching a start-end date range and, when set, a day-of-week filter) before applying the rate-plans discount percentage - so a seasonal or event rate set for specific dates now reaches Aiosell, and hence Agoda, for exactly those dates, while every other date still correctly falls back to the flat base rate. Verified live: pconventions own real override rows (their October event pricing) are now what a push actually computes and sends for those specific dates, not the flat rate. tsc and vite build clean.',
       'aiosell-multiplier-repush-on-apply  Owner set the Agoda row in Channel Rate Multipliers to 1.2 and pushed rates, but Agoda kept showing the plain unmultiplied rate. Live-tested on pconvention.atithi-setu.com (RESTO-1009): called the multiplier endpoint directly for agoda at 1.2 and Aiosell genuinely accepted it (its own reply, now visible thanks to the raw-response capture, read exactly Multiplier updated successfully for: [agoda]) - so the credentials, channel code, and Aiosell-side connection were all already correct, and this was not a repeat of the earlier missing-mapping or missing-mapping-connection class of bug. Root cause: Aiosell channel_multiplier only STORES the per-channel scaling factor going forward - it does not reach back and re-scale a rate this property already pushed earlier, so the OTA keeps showing whatever plain rate was last sent until the NEXT rate push happens to occur. The multiplier endpoint (POST /hotel/aiosell/multiplier) never triggered that next push itself, and Apply all sits well below the Push now button with nothing telling an owner they would need to click Push now a second time right after changing a multiplier for it to actually take effect. Fixed by triggering the existing scheduleAiosellResync push automatically the moment a multiplier is successfully applied, and by naming this explicitly in both the success toast and a note under the per-channel results panel, so the owner is never left wondering why the number on Agoda has not moved yet.',
