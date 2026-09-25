@@ -47671,25 +47671,45 @@ ${data.tenant.name}`;
       }
       if (rates.length) rateUpdates.push({ startDate: iso, endDate: iso, rates });
     }
-    let invMsg = 'skipped', rateMsg = 'skipped';
+    // Aiosell's top-level `message` is usually just a generic ack ("Request
+    // Received Successfully") that says nothing about whether the update
+    // actually reached a specific downstream OTA. Its `data` object has, at
+    // least for the multiplier endpoint, carried a specific actionable hint
+    // ("please add mapping for: <channel>") that the old code never surfaced
+    // anywhere — the sync log only ever recorded the generic message, so a
+    // property owner staring at a string of "OK" entries had no way to tell
+    // apart a genuine full success from Aiosell quietly accepting the call
+    // while not actually being connected to the OTA in question on its own
+    // dashboard. Capture the raw response body (truncated) on every push, not
+    // just the message, so the Sync Log can show whatever Aiosell actually
+    // sent back instead of a note that only ever reads "ok".
+    const rawDetail = (r: { message: string; data?: any }): string => {
+      try {
+        const raw = JSON.stringify(r.data);
+        return raw && raw !== JSON.stringify({ message: r.message }) ? `${r.message} — raw: ${raw.slice(0, 400)}` : r.message;
+      } catch { return r.message; }
+    };
+    let invMsg = 'skipped', rateMsg = 'skipped', invDetail = 'skipped', rateDetail = 'skipped';
     if (invUpdates.length) {
       const r = await aiosellPushInventory(cfg, t.hotelCode, invUpdates);
       invMsg = r.ok ? r.message : `ERR: ${r.message}`;
+      invDetail = rawDetail(r);
       if (!r.ok) {
-        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'FAIL', summary: `Availability push failed — ${typeIds.length} room type(s) × ${days} days`, detail: r.message });
+        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'FAIL', summary: `Availability push failed — ${typeIds.length} room type(s) × ${days} days`, detail: invDetail });
         return { ok: false, error: `Inventory push failed: ${r.message}`, inventory: invMsg };
       }
     }
     if (pushRates && rateUpdates.length) {
       const r = await aiosellPushRates(cfg, t.hotelCode, rateUpdates);
       rateMsg = r.ok ? r.message : `ERR: ${r.message}`;
+      rateDetail = rawDetail(r);
       if (!r.ok) {
-        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'RATES', trigger: logTrig, actor: opts?.actor, status: 'PARTIAL', summary: `Availability pushed, but rate push failed — ${typeIds.length} room type(s) × ${days} days`, detail: r.message });
+        logAiosellSync(tenantDb, { direction: 'OUT', operation: 'RATES', trigger: logTrig, actor: opts?.actor, status: 'PARTIAL', summary: `Availability pushed, but rate push failed — ${typeIds.length} room type(s) × ${days} days`, detail: rateDetail });
         return { ok: false, error: `Rate push failed: ${r.message}`, inventory: invMsg, rates: rateMsg };
       }
     }
     await tenantDb.run("UPDATE channel_credentials SET last_synced = CURRENT_TIMESTAMP WHERE channel='AIOSELL'").catch(() => {});
-    logAiosellSync(tenantDb, { direction: 'OUT', operation: pushRates ? 'INVENTORY+RATES' : 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'OK', summary: `Pushed availability${pushRates ? ' + rates' : ''} — ${typeIds.length} room type(s) × ${days} days`, detail: `inventory: ${invMsg}${pushRates ? ` · rates: ${rateMsg}` : ''}` });
+    logAiosellSync(tenantDb, { direction: 'OUT', operation: pushRates ? 'INVENTORY+RATES' : 'INVENTORY', trigger: logTrig, actor: opts?.actor, status: 'OK', summary: `Pushed availability${pushRates ? ' + rates' : ''} — ${typeIds.length} room type(s) × ${days} days`, detail: `inventory: ${invDetail}${pushRates ? ` · rates: ${rateDetail}` : ''}` });
     return { ok: true, inventory: invMsg, rates: rateMsg, pushed_types: typeIds.length };
   }
 
@@ -68962,8 +68982,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'group-add-room-folio-fix',
+    commit_marker: 'aiosell-sync-log-raw-response',
     code_features: [
+      'aiosell-sync-log-raw-response  Owner reported pconvention.atithi-setu.com (RESTO-1009) changed a room rate, clicked Push now, got a success response, but the new rate never showed up on Aiosell/Agoda. Live-tested with the owner watching: changed Standard Double from 3200 to 5000, pushed, and every single sync log entry read the same generic Aiosell acknowledgement, Request Received Successfully, with nothing else attached. That message is the top level response text Aiosell itself returns, not something this codebase invents, so the PMS side of the exchange is genuinely sending the fresh value and Aiosell is genuinely accepting the call - but aiosellSyncTenant only ever extracted that one generic string and threw away the rest of the Aiosell response body before it reached the sync log, so if Aiosell ever attaches a more specific reason (this codebase already has one documented precedent, a channel multiplier response naming an unmapped channel), nobody could ever see it. Now every inventory and rate push - success or failure - captures the full raw response body (truncated) alongside the message and writes it into the Sync Log detail column, so the next time this happens the actual Aiosell payload is visible instead of a string that only ever reads Request Received Successfully. This is an observability fix, not a guess at the underlying cause - the generic acknowledgement plus this codebase own prior finding that Aiosell can silently accept a call for a channel that is not actually connected on its own dashboard both point at the Agoda connection needing to be verified on Aiosell side for hotel code 3b793323bc, which is outside anything the PMS can configure by API.',
       'group-add-room-folio-fix  Owner-reported bug: rooms added to an already-active group booking were not reflected in the Group Folio, Master Account or Invoice PDF, and the configured rate per night never reached the total. Root-caused end to end before touching anything: the add-room endpoint (POST .../hotel/booking-groups/:groupId/rooms/add) correctly stores room_rate and total_amount on the new room_bookings row and correctly recomputes the groups own total_amount, so that field looked fine - but the Master Folio endpoint (GET .../master-folio) and the group Invoice PDF builder (buildGroupInvoicePdf) both compute their totals by summing each ROOMS OWN folio (folios WHERE booking_id = the room), never room_bookings.total_amount directly. A room only gets its own folio when it is checked in (createFolioWithRoomCharges runs there), and a room added after the OTHER rooms in the group already checked in stays plain BOOKED with no folio at all - invisible to both screens, exactly matching the report. The only existing workaround was for staff to remember to re-run group check-in (it would silently pick up just the new still-BOOKED room), which is precisely the class of fragile, human-memory-dependent mechanism this codebase avoids elsewhere. Fix: after inserting new room_bookings rows, check whether the group has already started billing (any sibling booking already carries an open or settled folio); if so, immediately seed the new rooms folio and per-night room-charge entries the same way check-in would, via the existing idempotent createFolioWithRoomCharges - which reads the rooms own configured rate, meal plan and extras, so the charge quoted at add-room time is exactly what gets billed. Room status is deliberately left BOOKED (guest ID capture, the Form-C gate and the check-in checklist still run through the normal check-in flow whenever the guest actually arrives) - only the billing folio is created early so the room is never invisible to the invoice. No change for a room added to a group that has not started billing yet - it continues to wait for the normal group check-in, unchanged. Added TC-BIZ-GRP-FOLIO (live: creates a 1-room group, force-checks it in, adds a second room, asserts the response reports folios_seeded=1 and the Master Folio shows a real folio_grand_total for the new room close to its quoted rate) and TC-BIZ-GRP-FOLIO-PDF (decodes the actual rendered invoice PDF and confirms the added rooms name is printed on it, not just present in the API response) to the local technical test suite.',
       'kitchen-printers-agent-download-link  Owner asked whether the print agent .exe could be published so a tenant can download it straight from their own dashboard, since network-printer reliability had already cost one client. The download route and the auto-update manifest already existed server-side (GET /api/print-agent/download and /api/print-agent/manifest, armed since 5 Sep, already serving the real 3.6.0 binary confirmed live at 57589142 bytes) but the Kitchen and Invoice Printers screen never linked to either one - the only mention was a line of text pointing an owner at print-agent/README.md, a file inside the git repo they have no access to at all. Added a Download Print Agent (Windows) button plus a short current-version tag (fetched from the manifest) right at the top of the screen, ahead of the existing agent-token card, and numbered the three steps (install agent, copy token, add printers) so the order reads clearly. Also added a plain-language heads-up that Windows SmartScreen will warn on first run since this is an unsigned binary, with the exact click-through (More info, Run anyway), so an owner does not mistake the warning for a broken download. No backend change needed - this was a missing UI surface over machinery that was already fully built and already live. TC-PRINTAGENT-DOWNLOAD-WIRED (live: checks the manifest and download routes both return something real, and that the deployed bundle actually carries the new download link).',
       'whatsapp-team-window-check-fix  Owner asked to confirm WhatsApp was actually working on pconvention.atithi-setu.com (RESTO-1009) after the new Notifications setup guide was written. The WhatsApp module is on and guest-facing sends (GUEST_PRE_ARRIVAL stay_reminder) were delivering and being read correctly, but every BOOKING_CREATED team alert to the staff number was failing with Metas 131047 Re-engagement message error - 38 of the last 86 WhatsApp sends on this tenant, all of it one events team notification. Root cause: the WhatsApp dispatch loop hardcoded windowOpen to true for any non-guest recipient (isGuestAudience question mark await _waWindowOpen(recipient) colon true), so a team or staff number - which essentially never messages the shared WhatsApp Business number back and so almost never has an open 24-hour service window - always skipped straight to a free-form send instead of the already-correctly-mapped, already-Meta-approved booking_confirmation template. Checked wa_template_map directly (SUPER_ADMIN, /internal) before writing any code: BOOKING_CREATED was already mapped to the approved booking_confirmation template with the right variable spec (guestName, checkIn, checkOut, bookingId), and the trigger call sites already pass every one of those fields - the mapping was correct and complete, it was simply never consulted for team recipients. The 24-hour-window rule is about the RECIPIENT phone number, not the audience type, so _waWindowOpen is now checked for every recipient before choosing free-form versus template, matching how guest sends already worked. No template-map change needed - the whole fix is one line, making team sends use the template that was already sitting there unused.',
