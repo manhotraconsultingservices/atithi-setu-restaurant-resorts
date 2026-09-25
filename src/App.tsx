@@ -26688,54 +26688,54 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
                 >Next 7d ▶</button>
                 <button onClick={() => fetchRateGrid()} className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm">↻</button>
-                {Object.keys(rateGridDirty).length > 0 && (
-                  <button
-                    disabled={rateGridSaving}
-                    onClick={async () => {
-                      const overrides: any[] = [];
-                      for (const [rtId, dates] of Object.entries(rateGridDirty)) {
-                        for (const [date, rate] of Object.entries(dates)) {
-                          overrides.push({ room_type_id: rtId, date, rate: Number(rate) });
-                        }
-                      }
-                      setRateGridSaving(true);
-                      try {
-                        await hotelApi('/rate-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
-                        await fetchRateGrid();
-                      } catch { alert('Failed to save rates.'); }
-                      finally { setRateGridSaving(false); }
-                    }}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition-colors"
-                  >
-                    {rateGridSaving ? 'Saving…' : `Save ${Object.values(rateGridDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} changes`}
-                  </button>
-                )}
-                {Object.keys(rateGridInvDirty).length > 0 && (
-                  <button
-                    disabled={rateGridInvSaving}
-                    onClick={async () => {
-                      const overrides: any[] = [];
-                      for (const [rtId, dates] of Object.entries(rateGridInvDirty)) {
-                        for (const [date, count] of Object.entries(dates)) {
-                          overrides.push({ room_type_id: rtId, date, available_count: Number(count) });
-                        }
-                      }
-                      setRateGridInvSaving(true);
-                      try {
-                        // Same endpoint the Update rooms tab already saves through
-                        // (already wired to push to Aiosell) — this button just
-                        // gives access to it from this grid too.
-                        await hotelApi('/inventory-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
-                        setRateGridInvDirty({});
-                        await fetchRateGrid();
-                      } catch { alert('Failed to save availability.'); }
-                      finally { setRateGridInvSaving(false); }
-                    }}
-                    className="px-4 py-2 rounded-xl bg-sky-600 text-white text-sm font-bold hover:bg-sky-700 transition-colors"
-                  >
-                    {rateGridInvSaving ? 'Saving…' : `Save ${Object.values(rateGridInvDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} availability change(s)`}
-                  </button>
-                )}
+                {(() => {
+                  const rateCount = Object.values(rateGridDirty).reduce<number>((s, d) => s + Object.keys(d).length, 0);
+                  const invCount  = Object.values(rateGridInvDirty).reduce<number>((s, d) => s + Object.keys(d).length, 0);
+                  if (rateCount === 0 && invCount === 0) return null;
+                  const saving = rateGridSaving || rateGridInvSaving;
+                  const parts: string[] = [];
+                  if (rateCount) parts.push(`${rateCount} rate${rateCount === 1 ? '' : 's'}`);
+                  if (invCount) parts.push(`${invCount} availability`);
+                  return (
+                    <button
+                      disabled={saving}
+                      onClick={async () => {
+                        // A single "Save" for this grid, whatever mix of rate and
+                        // availability cells were touched — this used to be two
+                        // separate buttons, each with its own dirty-state, so
+                        // saving a rate change never touched an availability edit
+                        // made alongside it (and vice versa) unless both buttons
+                        // were clicked. From the owner's side that looked like
+                        // "the grid isn't pushing both rates and inventory" — it
+                        // wasn't a push-side bug at all, both endpoints already
+                        // reach Aiosell; the grid just made you save them twice.
+                        setRateGridSaving(true); setRateGridInvSaving(true);
+                        try {
+                          if (rateCount) {
+                            const overrides: any[] = [];
+                            for (const [rtId, dates] of Object.entries(rateGridDirty)) {
+                              for (const [date, rate] of Object.entries(dates)) overrides.push({ room_type_id: rtId, date, rate: Number(rate) });
+                            }
+                            await hotelApi('/rate-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
+                          }
+                          if (invCount) {
+                            const overrides: any[] = [];
+                            for (const [rtId, dates] of Object.entries(rateGridInvDirty)) {
+                              for (const [date, count] of Object.entries(dates)) overrides.push({ room_type_id: rtId, date, available_count: Number(count) });
+                            }
+                            await hotelApi('/inventory-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
+                          }
+                          setRateGridDirty({}); setRateGridInvDirty({});
+                          await fetchRateGrid();
+                        } catch { alert('Failed to save changes.'); }
+                        finally { setRateGridSaving(false); setRateGridInvSaving(false); }
+                      }}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                    >
+                      {saving ? 'Saving…' : `Save ${parts.join(' + ')} change${(rateCount + invCount) === 1 ? '' : 's'}`}
+                    </button>
+                  );
+                })()}
               </div>
 
               {rateGridLoading ? (
