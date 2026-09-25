@@ -65657,7 +65657,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
       }) });
       setMultResult(r);
       const applied = Number(r?.applied ?? 0), failed = Number(r?.failed ?? 0);
-      if (failed === 0) toast.success(`Applied to ${applied} channel${applied === 1 ? '' : 's'}.`);
+      if (failed === 0) toast.success(`Applied to ${applied} channel${applied === 1 ? '' : 's'}. Re-pushing rates now so it reaches the OTA${applied === 1 ? '' : 's'} — a rate change alone does not re-scale a rate already sent.`);
       else toast.error(`${applied} applied, ${failed} need attention — see below.`);
     } catch (e: any) { setErr(e.message || 'Failed to apply multipliers.'); }
     finally { setBusyOp(''); }
@@ -66170,6 +66170,11 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
                       <span><b>{r.channel}</b> ×{Number(r.multiplier).toFixed(2)} — {r.message}</span>
                     </div>
                   ))}
+                  {multResult.repushed && (
+                    <div className="text-[11px] text-[#6b5d52] pt-1 border-t border-[#efe6da]">
+                      Rates are being re-pushed with the new multiplier now — Aiosell does not re-scale a rate it already sent, so give it a few seconds and check Sync log.
+                    </div>
+                  )}
                 </div>
               )}
             </div>
