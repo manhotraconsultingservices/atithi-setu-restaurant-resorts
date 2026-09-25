@@ -48179,6 +48179,27 @@ ${data.tenant.name}`;
       res.json({ success: true, count: list.length, ingested, reservations: list });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
+
+  // Read back what Aiosell itself has stored for inventory or rates, straight from
+  // Aiosell's own /data endpoint — every other diagnostic here only proves we sent
+  // a request Aiosell acknowledged; it never confirmed what Aiosell actually holds
+  // afterward. Added specifically to root-cause an owner report of "I checked in
+  // Aiosell and inventory is not updated" after our own sync log showed OK.
+  app.get("/api/restaurant/:id/hotel/aiosell/verify-data", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_CHANNEL), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureCredCols(tenantDb, req.params.id);
+      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
+      const t = await aiosellTenantConfig(tenantDb); if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
+      const type = (String(req.query.type || 'inventory') === 'rates') ? 'rates' : 'inventory';
+      const startDate = String(req.query.startDate || _todayIST());
+      const endDate = String(req.query.endDate || (() => { const d = new Date(startDate + 'T12:00:00Z'); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10); })());
+      const r = await aiosellFetchData(cfg, t.hotelCode, type as any, startDate, endDate);
+      if (!r.ok) return res.status(400).json({ error: r.message, code: 'AIOSELL_REJECTED', raw: r.data });
+      res.json({ success: true, type, startDate, endDate, data: r.data });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
   app.post("/api/restaurant/:id/hotel/aiosell/marknoshow", authenticate, hotelStaff, requireTabAction('SETTINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -69156,8 +69177,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rate-grid-available-blank-on-rate-override-fix',
+    commit_marker: 'aiosell-verify-data-diagnostic',
     code_features: [
+      'aiosell-verify-data-diagnostic  Owner reported checking inside Aiosell itself and finding inventory not updated, immediately after a live browser test (Update rooms, saved through the real UI) produced a fresh OK sync-log entry on our side. Every diagnostic added so far (the raw response capture, the sync log) only proves Aiosell ACKNOWLEDGED a request - none of them confirm what Aiosell actually holds afterward, so there was no way to tell a genuine push-side gap apart from a display lag on Aiosells own dashboard without asking the owner to look. Added GET /hotel/aiosell/verify-data (type inventory or rates, a date range), which calls the aiosellFetchData /data endpoint and returns exactly what Aiosell reports back for those dates - closes the loop this integration has been missing since day one: not just did Aiosell receive it, but does Aiosell actually have it. tsc and vite build clean.',
       'rate-grid-available-blank-on-rate-override-fix  Browser-verified live on pconvention.atithi-setu.com (RESTO-1009) after shipping the new Available row on the Rates and inventory grid: Standard Double (which carries several overlapping rate_overrides after the earlier overlap fix let existing stacked rows persist) rendered a BLANK Available input for nearly every date in view, while Standard Single (fewer overrides) mostly showed real numbers. Root cause was a flow bug in the very code that computes the row, not a data problem: rate resolution and availability resolution shared one per-date loop, and the branch that resolves a TYPE-scope rate override ended in a bare continue - which skipped the rest of that loop iteration, including the availability computation, for every date the override touched. A room type with heavy rate-override coverage therefore had its availability left undefined (blank input) on most dates; a lightly-covered type mostly worked, which is exactly the inconsistent pattern reported. Restructured the loop so rate and availability resolve independently within the same iteration, with no early exit from one blocking the other. tsc and vite build clean.',
       'rates-inventory-grid-unified-save-button  The Rates and inventory grids new Available row shipped with its OWN separate Save button, alongside the rates grids existing one - two independent dirty-states, two independent PUT calls. Editing a rate AND an availability cell for the same visit and clicking only one of the two buttons saved just that half, which reads exactly like the grid is not pushing both rates and inventory even though both underlying endpoints already reach Aiosell correctly. Replaced the two buttons with one - it saves whatever mix of rate and availability edits are pending in a single click, against both endpoints, and clears both dirty-states together. tsc and vite build clean.',
       'aiosell-multiplier-false-success-and-inline-availability  Owner flagged Channel Rate Multiplier as a critical bug on pconvention.atithi-setu.com (RESTO-1009). Live-tested every default pre-seeded channel, not just Agoda: Agoda genuinely applies (confirmed twice, once from the apply response and once read back independently from Aiosells own property endpoint, which now reports rate_multiplier 1.2 stored against Agoda) - but Booking.com and GoMMT, the other two rows this screen pre-seeds by default, come back from Aiosell with the envelope saying success while the actual free text message plainly reads Multiplier not updated please add mapping for those channels. The route only checked that failure phrase when the envelope already said failure, so this exact case - success flag true, message says not updated - rendered as a green checkmark with the refusal text sitting right next to it. An owner who had never touched Agoda and only ever set Booking.com or GoMMT, the two channels this screen shows first, would see applied and have no reason to think anything was wrong, when neither had ever taken effect. Fixed by detecting that phrase regardless of what Aiosells own envelope claims, so a channel Aiosell has not connected now correctly shows the not-connected guidance instead of a false checkmark. Also, per the owner asking that Rates and inventory, Update rooms, and Bulk update should all push to Aiosell: the Rates and inventory grid gained an editable Available row under each room type (previously read-only there, so changing a rate for specific dates meant switching tabs to also close out rooms for the same dates) - same PUT /hotel/inventory-grid this already used elsewhere, same push wiring. tsc and vite build clean.',
