@@ -12051,11 +12051,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       markAvailabilityDirty();
     } catch { setMoveRoom(m => m ? { ...m, busyId: '', error: 'Could not move the guest.' } : m); }
   };
-  // Complimentary upgrade — move a CHECKED_IN guest to any available room (cross-category)
-  // at no extra charge. Rate stays at original booking rate.
-  const [upgradeRoom, setUpgradeRoom] = useState<{ booking: any; rooms: any[] | null; loading: boolean; busyId: string; error: string } | null>(null);
+  // Room upgrade — move a CHECKED_IN guest to any available room (cross-category).
+  // The booking's own rate is unchanged; an optional upgrade charge (0 = complimentary)
+  // is added to the folio as its own line, per night or one-time.
+  const [upgradeRoom, setUpgradeRoom] = useState<{ booking: any; rooms: any[] | null; loading: boolean; busyId: string; error: string; charge: string; basis: 'PER_NIGHT' | 'TOTAL' } | null>(null);
   const openUpgradeRoom = async (b: any) => {
-    setUpgradeRoom({ booking: b, rooms: null, loading: true, busyId: '', error: '' });
+    setUpgradeRoom({ booking: b, rooms: null, loading: true, busyId: '', error: '', charge: '0', basis: 'PER_NIGHT' });
     try {
       const ci = String(b.check_in_date || '').slice(0, 10);
       const co = String(b.check_out_date || '').slice(0, 10);
@@ -12073,13 +12074,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
   const confirmUpgradeRoom = async (roomId: string) => {
+    const chargeNum = Number(upgradeRoom?.charge || 0);
+    if (!Number.isFinite(chargeNum) || chargeNum < 0) {
+      setUpgradeRoom(m => m ? { ...m, error: 'Enter an upgrade charge of 0 or more.' } : m);
+      return;
+    }
     setUpgradeRoom(m => m ? { ...m, busyId: roomId, error: '' } : m);
     try {
       const bid = upgradeRoom?.booking?.id;
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${bid}/complimentary-upgrade`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ new_room_id: roomId }),
+        body: JSON.stringify({ new_room_id: roomId, upgrade_charge: chargeNum, charge_basis: upgradeRoom?.basis || 'PER_NIGHT' }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) { setUpgradeRoom(m => m ? { ...m, busyId: '', error: d?.error || 'Could not upgrade the room.' } : m); return; }
@@ -37430,23 +37436,59 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
-      {/* ═════════ Complimentary upgrade modal ═════════ */}
+      {/* ═════════ Room upgrade modal ═════════ */}
       {upgradeRoom && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setUpgradeRoom(null)}>
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-start justify-between mb-1">
               <div>
-                <p className="text-[11px] font-bold uppercase tracking-widest text-violet-600">Complimentary Upgrade</p>
+                <p className="text-[11px] font-bold uppercase tracking-widest text-violet-600">{tr('Room Upgrade')}</p>
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">{upgradeRoom.booking?.guest_name}</h3>
               </div>
               <button onClick={() => setUpgradeRoom(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
             </div>
-            <p className="text-xs text-[#6b5d52] mb-1">
-              Currently in <strong>{bookingRoomLabel(upgradeRoom.booking)}</strong>.
+            <p className="text-xs text-[#6b5d52] mb-3">
+              {tr('Currently in')} <strong>{bookingRoomLabel(upgradeRoom.booking)}</strong>.
             </p>
-            <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 mb-4">
-              The original room rate is kept — guest pays nothing extra. A note is added to the folio documenting the upgrade.
-            </p>
+            {(() => {
+              const amt = Number(upgradeRoom.charge || 0);
+              const nights = (() => {
+                const co = String(upgradeRoom.booking?.check_out_date || '').slice(0, 10);
+                const d = co ? Math.round((Date.parse(co + 'T00:00:00Z') - Date.parse(todayIST() + 'T00:00:00Z')) / 86400000) : 1;
+                return Math.max(1, d);
+              })();
+              const total = upgradeRoom.basis === 'PER_NIGHT' ? amt * nights : amt;
+              return (
+                <div className="rounded-xl border border-violet-200 bg-violet-50/60 px-3 py-2.5 mb-4 space-y-2">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">{tr('Upgrade charge')}</label>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center rounded-xl border border-brand/15 bg-white px-2">
+                      <span className="text-sm text-[#6b5d52]">₹</span>
+                      <input type="number" min="0" step="50" value={upgradeRoom.charge}
+                        disabled={!!upgradeRoom.busyId}
+                        onChange={e => { const v = e.target.value; setUpgradeRoom(m => m ? { ...m, charge: v, error: '' } : m); }}
+                        className="w-24 px-1 py-1.5 text-sm outline-none bg-transparent" />
+                    </div>
+                    <div className="flex rounded-xl border border-brand/15 overflow-hidden text-xs">
+                      {(['PER_NIGHT', 'TOTAL'] as const).map(bs => (
+                        <button key={bs} type="button" disabled={!!upgradeRoom.busyId}
+                          onClick={() => setUpgradeRoom(m => m ? { ...m, basis: bs } : m)}
+                          className={cn('px-2.5 py-1.5 font-semibold', upgradeRoom.basis === bs ? 'bg-violet-600 text-white' : 'bg-white text-[#6b5d52] hover:bg-violet-50')}>
+                          {bs === 'PER_NIGHT' ? tr('Per night') : tr('One-time')}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-[#6b5d52]">
+                    {amt > 0
+                      ? (upgradeRoom.basis === 'PER_NIGHT'
+                          ? `${tr('Adds to the folio')}: ₹${amt.toLocaleString('en-IN')} × ${nights} ${nights === 1 ? tr('night') : tr('nights')} = ₹${total.toLocaleString('en-IN')}`
+                          : `${tr('Adds to the folio')}: ₹${total.toLocaleString('en-IN')}`)
+                      : tr('No charge. The folio shows the room upgrade with ₹0.')}
+                  </p>
+                </div>
+              );
+            })()}
             {upgradeRoom.error && <div className="mb-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{upgradeRoom.error}</div>}
             {upgradeRoom.loading ? (
               <p className="text-sm text-[#9c8e85] italic py-6 text-center">Finding available rooms…</p>

@@ -419,6 +419,8 @@ export const hi: Record<string, string> = {
   'Check In': 'चेक इन', 'Check Out': 'चेक आउट', 'Settle Group': 'ग्रुप निपटाएं',
   'Edit booking': 'बुकिंग संपादित करें', 'Documents': 'दस्तावेज़', 'Add room': 'कमरा जोड़ें', 'to group': 'ग्रुप में',
   'Record advance': 'अग्रिम दर्ज करें', 'Open folio': 'फोलियो खोलें', 'Move room': 'कमरा बदलें', 'Upgrade room': 'कमरा अपग्रेड करें',
+  'Room Upgrade': 'कमरा अपग्रेड', 'Currently in': 'अभी यहाँ', 'Upgrade charge': 'अपग्रेड शुल्क', 'Per night': 'प्रति रात', 'One-time': 'एक बार',
+  'Adds to the folio': 'फोलियो में जुड़ेगा', 'night': 'रात', 'nights': 'रातें', 'No charge. The folio shows the room upgrade with ₹0.': 'कोई शुल्क नहीं। फोलियो में कमरा अपग्रेड ₹0 के साथ दिखेगा।',
   'Amend checkout date': 'चेकआउट तिथि संशोधित करें', 'Group invoice PDF': 'ग्रुप इनवॉइस PDF', 'Email group invoice': 'ग्रुप इनवॉइस ईमेल करें',
   'Re-sync to channel': 'चैनल से पुनः-सिंक करें', 'Cancel booking': 'बुकिंग रद्द करें',
   'Showing': 'दिखा रहा', 'Rows/page': 'पंक्तियां/पृष्ठ', 'First': 'पहला', 'Prev': 'पिछला', 'Page': 'पृष्ठ', 'Next': 'अगला', 'Last': 'अंतिम',

@@ -46563,10 +46563,11 @@ ${data.tenant.name}`;
     }
   });
 
-  // Complimentary upgrade: move a CHECKED_IN guest to any available room at no extra charge.
-  // Unlike reassign-room, cross-category moves are allowed. All monetary fields on the
-  // booking stay unchanged; only the physical room assignment moves. A ₹0 folio note
-  // records the upgrade for audit purposes.
+  // Room upgrade: move a CHECKED_IN guest to any available room. Unlike reassign-room,
+  // cross-category moves are allowed. The booking's own monetary fields stay unchanged;
+  // an optional upgrade charge (upgrade_charge, entered per night or one-time) is added
+  // to the open folio as its own ROOM_CHARGE line. With no charge a ₹0 note records
+  // the move. The route keeps its original path so existing callers are unaffected.
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/complimentary-upgrade", authenticate, hotelStaff, requireTabAction('HOTEL_BOOKINGS', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -46574,10 +46575,22 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       const newRoomId = String(req.body?.new_room_id || '').trim();
       if (!newRoomId) return res.status(400).json({ error: 'new_room_id is required.' });
+      const rawCharge = req.body?.upgrade_charge;
+      const chargeInput = rawCharge == null || rawCharge === '' ? 0 : Number(rawCharge);
+      if (!Number.isFinite(chargeInput) || chargeInput < 0) {
+        return res.status(400).json({ error: 'Upgrade charge must be zero or a positive amount.' });
+      }
+      const chargeBasis = String(req.body?.charge_basis || 'TOTAL').toUpperCase() === 'PER_NIGHT' ? 'PER_NIGHT' : 'TOTAL';
       const bk: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!bk) return res.status(404).json({ error: 'Booking not found.' });
       if (String(bk.status || '').toUpperCase() !== 'CHECKED_IN') {
-        return res.status(409).json({ error: 'Complimentary upgrade is only available for checked-in guests.' });
+        return res.status(409).json({ error: 'Room upgrade is only available for checked-in guests.' });
+      }
+      // A charge must land on a bill. Check for the open folio before moving anyone,
+      // so a charged upgrade can never be applied with the charge silently dropped.
+      const openFolio: any = await tenantDb.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open' LIMIT 1", [req.params.bookingId]).catch(() => null);
+      if (chargeInput > 0 && !openFolio?.id) {
+        return res.status(409).json({ error: 'This booking has no open folio, so an upgrade charge cannot be billed. Open the folio first, or upgrade with no charge.' });
       }
       if (String(bk.room_id) === newRoomId) {
         return res.status(400).json({ error: 'New room is the same as the current room.' });
@@ -46609,28 +46622,69 @@ ${data.tenant.name}`;
       await tenantDb.run("UPDATE rooms SET status = 'VACANT' WHERE id = ?", [bk.room_id]).catch(() => {});
       await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [newRoomId]).catch(() => {});
       await tenantDb.run("UPDATE folios SET room_id = ? WHERE booking_id = ? AND status = 'open'", [newRoomId, req.params.bookingId]).catch(() => {});
-      // Insert a ₹0 folio note documenting the upgrade for the invoice audit trail.
       const oldLabel = oldRoom?.name || oldRoom?.room_number || String(bk.room_id);
       const newLabel = newRoom.name || newRoom.room_number || newRoomId;
-      const folio: any = await tenantDb.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open' LIMIT 1", [req.params.bookingId]).catch(() => null);
-      if (folio?.id) {
-        await tenantDb.run(
-          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-           VALUES (?, ?, 'NOTE', ?, 1, 0, 0, 0, 0)`,
-          [`FE-UPG-${Date.now()}`, folio.id, `Complimentary upgrade: ${oldLabel} → ${newLabel}`]
-        ).catch(() => {});
+      const baseDesc = `Room upgrade: ${oldLabel} → ${newLabel}`;
+      // Nights still to be stayed, for a per-night charge (today IST → checkout, at least 1).
+      let nights = 1;
+      if (chargeBasis === 'PER_NIGHT') {
+        const today = _istNowParts().date;
+        const co = normaliseDateIso(bk.check_out_date);
+        const diff = co ? Math.round((Date.parse(co + 'T00:00:00Z') - Date.parse(today + 'T00:00:00Z')) / 86400000) : 1;
+        nights = Math.max(1, diff);
       }
-      // Record the complimentary upgrade in the room_changes audit log.
+      const chargeTotal = Math.round(chargeInput * (chargeBasis === 'PER_NIGHT' ? nights : 1) * 100) / 100;
+      let entryDesc = `${baseDesc} · no charge`;
+      if (openFolio?.id) {
+        if (chargeTotal > 0) {
+          // Same tax treatment as every other room line: the slab is tested on the
+          // per-unit value (per night when charged per night), the typed amount follows
+          // the property's "rates include GST" setting, and reapplyHotelGstRates will
+          // land on the same slab at checkout.
+          const cfg = await loadHotelTaxConfig(req.params.id);
+          const incRow: any = await centralDb.get("SELECT rates_include_gst FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
+          const inclusive: 0 | 1 = Number(incRow?.rates_include_gst ?? 1) === 1 ? 1 : 0;
+          // One line per night, like the room nights themselves: the checkout re-slab
+          // tests each line's own value, so a single multi-night line could jump slab.
+          const qty = chargeBasis === 'PER_NIGHT' ? nights : 1;
+          const unitTyped = Math.round(chargeInput * 100) / 100;
+          const gstPct = gstRateForTariff(unitTyped, cfg);
+          const unit = rateBreakdown(unitTyped, gstPct, inclusive);
+          entryDesc = chargeBasis === 'PER_NIGHT' ? `${baseDesc} · ${qty} night${qty === 1 ? '' : 's'} × ₹${unitTyped}` : baseDesc;
+          try {
+            for (let i = 1; i <= qty; i++) {
+              const lineDesc = qty > 1 ? `${baseDesc} (night ${i} of ${qty})` : baseDesc;
+              await tenantDb.run(
+                `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+                 VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
+                [`FE-UPG-${Date.now()}-${i}`, openFolio.id, lineDesc, unit.net, unit.net, gstPct, unit.gst]
+              );
+            }
+            await recomputeFolioTotals(tenantDb, openFolio.id);
+          } catch (e: any) {
+            console.error('room upgrade charge insert failed:', e);
+            return res.status(500).json({ error: `The guest was moved to ${newLabel}, but the upgrade charge could not be added to the folio (${e?.message || 'error'}). Add it to the folio manually.` });
+          }
+        } else {
+          await tenantDb.run(
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+             VALUES (?, ?, 'NOTE', ?, 1, 0, 0, 0, 0)`,
+            [`FE-UPG-${Date.now()}`, openFolio.id, entryDesc]
+          ).catch(() => {});
+        }
+      }
+      const chargeNote = chargeTotal > 0 ? ` (charge ₹${chargeTotal})` : ' (no charge)';
       await tenantDb.run(
         `INSERT INTO room_changes (id, booking_id, guest_name, from_room_id, from_room_name, to_room_id, to_room_name, reason, changed_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [`RC-${Date.now()}`, req.params.bookingId, bk.guest_name,
          bk.room_id, oldLabel, newRoomId, newLabel,
-         'Complimentary upgrade', (req as any).user?.id || null]
+         `Room upgrade${chargeNote}`, (req as any).user?.id || null]
       ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
-      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'UPGRADED', summary: `Complimentary upgrade: ${oldLabel} → ${newLabel}` });
-      res.json({ ok: true, booking: row, old_room_id: bk.room_id, new_room_id: newRoomId, old_room_label: oldLabel, new_room_label: newLabel });
+      await writeObjectAudit(tenantDb, req, { objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'UPGRADED', summary: `${baseDesc}${chargeNote}` });
+      res.json({ ok: true, booking: row, old_room_id: bk.room_id, new_room_id: newRoomId, old_room_label: oldLabel, new_room_label: newLabel,
+        upgrade_charge: chargeInput, charge_basis: chargeBasis, nights: chargeBasis === 'PER_NIGHT' ? nights : null, charge_total: chargeTotal, folio_entry: entryDesc });
     } catch (err: any) {
       console.error('complimentary-upgrade error:', err);
       res.status(500).json({ error: err?.message || 'Failed to upgrade room' });
@@ -69228,8 +69282,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'folio-list-weekday-sort-fix',
+    commit_marker: 'room-upgrade-charge',
     code_features: [
+      'room-upgrade-charge  Owner request: the post check-in Upgrade room action only ever did a complimentary upgrade and always wrote Complimentary upgrade on the folio. It now asks for an upgrade charge (default 0) charged per night for the nights left or one-time. A charge above 0 is added to the open folio as ROOM_CHARGE lines worded Room upgrade: old room to new room, one line per night like the room nights themselves, so the checkout GST re-slab tests each night at its own value; the typed amount follows the property rates include GST setting via rateBreakdown and the room slab via gstRateForTariff, exactly like the early check-in fee, and it reaches the ledger at checkout with every other room line. A zero charge keeps the existing 0 value note, now worded Room upgrade with no charge. A charged upgrade is refused with 409 before anyone is moved when the booking has no open folio, so a charge can never be silently dropped. The route path is unchanged and the charge fields are optional, so existing callers behave exactly as before. room_changes and the booking audit history record the charge. tsc and vite build clean.',
       'folio-list-weekday-sort-fix  The folios list sorted newest first with String(created_at).localeCompare, but a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a newer Monday folio sorted below an older Saturday one. It now orders by _tsMs epoch ms. The same weekday bug was fixed in the inventory stock-movement log merge (recorded_at TIMESTAMP mixed with legacy hotel movement_date DATE) and the hotel booking search tie-break (check_in_date DATE). Remaining localeCompare calls compare text such as names, TO_CHAR periods and already normalised YYYY-MM-DD keys. tsc and vite build clean.',
       'bulk-update-beats-older-grid-edits  Owner ran a Bulk update for both room types across October on pconvention.atithi-setu.com (RESTO-1009) and 1 Oct kept its old price. The bulk rows saved correctly, but 1 Oct (and 30 Sep) carried older single-day Grid override rows from cell edits on the Rates and inventory grid. Grid rows are priority 10 and bulk rows priority 5, so the older grid edit won on those days in the booking engine, the grid and the Aiosell push alike. A bulk update now deletes older Grid override rows for the same room type on the dates it covers (respecting its day-of-week filter). Also fixed a data-loss bug from the earlier overlap change: a bulk update deleted every older Bulk update row it touched at all, so setting 10 to 12 Oct after 1 to 31 Oct wiped the rest of October. Now only bulk rows wholly inside the new range are removed; a partly overlapping one keeps its other dates and loses the overlap on recency, and re-saving the same range bumps created_at. Recency itself was broken: all four rate resolvers ordered created_at with String(date).localeCompare, and a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a Monday save lost to an older Saturday one. New _tsMs helper compares real timestamps; the grid resolver also gained the tie-break so it shows the price guests pay. tsc and vite build clean.',
       'aiosell-inventory-push-ignored-manual-overrides  THE actual root cause behind every inventory not updated report on pconvention.atithi-setu.com (RESTO-1009) today, found using the verify-data diagnostic added minutes earlier. Every trigger fix shipped today made a push genuinely fire, and Aiosell genuinely acknowledged every one of them - but aiosellSyncTenants own inventory calculation, unchanged since the integration was first built, computed available rooms as total rooms minus occupied ONLY. It never once consulted room_inventory_overrides - the exact table Update rooms, Bulk updates inventory branch, and the new Available grid row all write to. A manually blocked room for maintenance or an owner stay therefore could never reach Aiosell no matter how many times or how correctly the push fired, because the push itself was never capable of carrying that number. Confirmed with hard evidence, not inference: read back Aiosells own stored data for three dates carrying real overrides (0, 5, and 2 rooms blocked) immediately after a fresh explicit push that reported success - Aiosell held the raw unoverridden total-minus-occupied count on every one of them, while a date with no override at all matched correctly. Fixed by pre-loading room_inventory_overrides for the push window once and checking it first for every date and room type, same precedence already used by GET /hotel/inventory-grid and the Rates and inventory grid - a manual override now wins outright, exactly as it already does everywhere it is displayed. tsc and vite build clean.',

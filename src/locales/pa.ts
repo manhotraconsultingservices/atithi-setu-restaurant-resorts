@@ -380,6 +380,8 @@ export const pa: Record<string, string> = {
   'Check In': 'ਚੈੱਕ ਇਨ', 'Check Out': 'ਚੈੱਕ ਆਊਟ', 'Settle Group': 'ਗਰੁੱਪ ਨਿਪਟਾਓ',
   'Edit booking': 'ਬੁਕਿੰਗ ਸੋਧੋ', 'Documents': 'ਦਸਤਾਵੇਜ਼', 'Add room': 'ਕਮਰਾ ਸ਼ਾਮਲ ਕਰੋ', 'to group': 'ਗਰੁੱਪ ਵਿੱਚ',
   'Record advance': 'ਪੇਸ਼ਗੀ ਦਰਜ ਕਰੋ', 'Open folio': 'ਫੋਲੀਓ ਖੋਲ੍ਹੋ', 'Move room': 'ਕਮਰਾ ਬਦਲੋ', 'Upgrade room': 'ਕਮਰਾ ਅੱਪਗ੍ਰੇਡ ਕਰੋ',
+  'Room Upgrade': 'ਕਮਰਾ ਅੱਪਗ੍ਰੇਡ', 'Currently in': 'ਹੁਣ ਇੱਥੇ', 'Upgrade charge': 'ਅੱਪਗ੍ਰੇਡ ਖ਼ਰਚਾ', 'Per night': 'ਪ੍ਰਤੀ ਰਾਤ', 'One-time': 'ਇੱਕ ਵਾਰ',
+  'Adds to the folio': 'ਫੋਲੀਓ ਵਿੱਚ ਜੁੜੇਗਾ', 'night': 'ਰਾਤ', 'nights': 'ਰਾਤਾਂ', 'No charge. The folio shows the room upgrade with ₹0.': 'ਕੋਈ ਖ਼ਰਚਾ ਨਹੀਂ। ਫੋਲੀਓ ਵਿੱਚ ਕਮਰਾ ਅੱਪਗ੍ਰੇਡ ₹0 ਨਾਲ ਦਿਖੇਗਾ।',
   'Amend checkout date': 'ਚੈੱਕਆਊਟ ਤਾਰੀਖ ਸੋਧੋ', 'Group invoice PDF': 'ਗਰੁੱਪ ਇਨਵੌਇਸ PDF', 'Email group invoice': 'ਗਰੁੱਪ ਇਨਵੌਇਸ ਈਮੇਲ ਕਰੋ',
   'Re-sync to channel': 'ਚੈਨਲ ਨਾਲ ਮੁੜ-ਸਿੰਕ ਕਰੋ', 'Cancel booking': 'ਬੁਕਿੰਗ ਰੱਦ ਕਰੋ',
   'Showing': 'ਦਿਖਾ ਰਿਹਾ', 'Rows/page': 'ਕਤਾਰਾਂ/ਪੰਨਾ', 'First': 'ਪਹਿਲਾ', 'Prev': 'ਪਿੱਛੇ', 'Page': 'ਪੰਨਾ', 'Next': 'ਅੱਗੇ', 'Last': 'ਆਖਰੀ',
