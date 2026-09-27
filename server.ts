@@ -2142,6 +2142,39 @@ function _tsMs(v: any): number {
   return isNaN(t) ? 0 : t;
 }
 
+// Events catering "pick N" menus. A package section may carry pick (dishes the
+// guest chooses) and extra_price (per plate, per dish chosen beyond pick). Given
+// the staff's choices it returns the menu to snapshot on the booking line (only
+// the chosen dishes, plus "(N more to choose)" while a section is short), the
+// per-plate surcharge, and the cleaned selection. Sections without pick keep every
+// dish, as before. With no extra_price a section cannot go over its limit.
+function buildCateringMenuSelection(menuJson: any, selection: any): { snapshot: any[]; selection: Record<string, string[]>; extraPerPlate: number; pending: number } | null {
+  let menu: any;
+  try { menu = typeof menuJson === 'string' ? JSON.parse(menuJson) : menuJson; } catch { return null; }
+  if (!Array.isArray(menu) || !selection || typeof selection !== 'object') return null;
+  const sel: Record<string, string[]> = {};
+  const snapshot: any[] = [];
+  let extra = 0, pendingTotal = 0;
+  for (const s of menu) {
+    const name = String(s?.section || '').trim();
+    if (!name) continue;
+    const opts: string[] = (Array.isArray(s.options) ? s.options : []).map((x: any) => String(x));
+    const pick = Number(s.pick) > 0 ? Math.floor(Number(s.pick)) : 0;
+    if (!pick) { snapshot.push({ section: name, options: opts }); continue; }
+    const extraPrice = Math.max(0, Number(s.extra_price) || 0);
+    const raw: string[] = Array.isArray(selection[name]) ? selection[name].map((x: any) => String(x)) : [];
+    let chosen = [...new Set(raw)].filter(x => opts.includes(x));
+    if (extraPrice <= 0) chosen = chosen.slice(0, pick);
+    sel[name] = chosen;
+    const extras = Math.max(0, chosen.length - pick);
+    const pending = Math.max(0, pick - chosen.length);
+    extra += extras * extraPrice;
+    pendingTotal += pending;
+    snapshot.push({ section: name, options: pending ? [...chosen, `(${pending} more to choose)`] : chosen, pick, chosen, extras, extra_price: extraPrice, pending });
+  }
+  return { snapshot, selection: sel, extraPerPlate: Math.round(extra * 100) / 100, pending: pendingTotal };
+}
+
 function normaliseDateIso(v: any): string {
   if (v == null || v === '') return '';
   if (v instanceof Date) {
@@ -34669,12 +34702,22 @@ ${data.tenant.name}`;
         const pricePerPlate = c.price_per_plate !== undefined ? Number(c.price_per_plate) : Number(master?.price_per_plate || 0);
         const pax = Math.max(0, Number(c.pax || 0));
         const gst = Number(c.gst_percent ?? master?.gst_percent ?? 5);
-        const lineTotal = round2(pricePerPlate * pax);
+        // Menu choices ("pick N" packages): the snapshot becomes the chosen menu and
+        // dishes beyond a section's limit add a per-plate surcharge. A line sent
+        // without menu_selection is stored exactly as before.
+        let menuSnapshot = c.menu_snapshot ?? master?.menu_json ?? null;
+        let extraPerPlate = 0;
+        let selectionJson: string | null = null;
+        if (c.menu_selection && typeof c.menu_selection === 'object') {
+          const built = buildCateringMenuSelection(master?.menu_json, c.menu_selection);
+          if (built) { menuSnapshot = JSON.stringify(built.snapshot); extraPerPlate = built.extraPerPlate; selectionJson = JSON.stringify(built.selection); }
+        }
+        const lineTotal = round2((pricePerPlate + extraPerPlate) * pax);
         await db.run(
-          `INSERT INTO event_booking_catering (id, booking_id, package_id, name_snapshot, package_type_snapshot, description_snapshot, menu_snapshot, pax, price_per_plate, gst_percent, line_total, cost_snapshot)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO event_booking_catering (id, booking_id, package_id, name_snapshot, package_type_snapshot, description_snapshot, menu_snapshot, pax, price_per_plate, gst_percent, line_total, cost_snapshot, menu_selection_json, extra_per_plate)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [mkEventId('EBC'), bookingId, c.package_id, master?.name || c.name_snapshot || 'Catering', master?.package_type || 'BUFFET',
-           c.description_snapshot ?? master?.description ?? null, c.menu_snapshot ?? master?.menu_json ?? null, pax, pricePerPlate, gst, lineTotal, Number(master?.cost_price || 0)]
+           c.description_snapshot ?? master?.description ?? null, menuSnapshot, pax, pricePerPlate, gst, lineTotal, Number(master?.cost_price || 0), selectionJson, extraPerPlate]
         );
       }
     }
@@ -37273,8 +37316,10 @@ ${data.tenant.name}`;
       // Compose a readable menu line from the snapshot JSON, if present.
       let menu = '';
       try { const m = c.menu_snapshot ? JSON.parse(c.menu_snapshot) : null; if (Array.isArray(m)) menu = m.map((s: any) => `${s.section}: ${(s.options || []).join(', ')}`).join(' | '); } catch { /* */ }
-      const d = [c.description_snapshot, menu].filter(Boolean).join(' — ');
-      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: c.price_per_plate, amount: round2(c.line_total), gst_rate: fnbGst(c.gst_percent), gst_amount: 0 });
+      const xpp = Number(c.extra_per_plate || 0);
+      const extraNote = xpp > 0 ? `includes extra dishes ₹${xpp} per plate` : '';
+      const d = [c.description_snapshot, menu, extraNote].filter(Boolean).join(' — ');
+      lines.push({ line_type: 'FNB', description: `${c.name_snapshot} (${c.package_type_snapshot}) × ${c.pax} pax${d ? ` — ${d}` : ''}`, quantity: c.pax, unit_rate: round2(Number(c.price_per_plate || 0) + xpp), amount: round2(c.line_total), gst_rate: fnbGst(c.gst_percent), gst_amount: 0 });
     }
     // Bill only rooms that are actually held: exclude 'FAILED' (couldn't be reserved
     // at confirm — kept visible in the booking view, but never invoiced/quoted).
@@ -69282,8 +69327,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'room-upgrade-charge',
+    commit_marker: 'event-catering-pick-menu',
     code_features: [
+      'event-catering-pick-menu  Owner request for event catering packages: a section can now say how many dishes the guest chooses (pick, for example 3 starters of 8) and an optional extra price per plate for each dish chosen beyond that. Owner decisions: extras are allowed with a surcharge, an incomplete menu warns but never blocks confirming the event, and staff make the choices. Package sections store pick and extra_price inside the existing menu_json, so a package without them behaves exactly as before. On a booking, Choose menu opens the sections as dish chips with a live chosen-of-pick counter; a section with no extra price cannot go over its limit. The server rebuilds the line from the package on every save (buildCateringMenuSelection): menu_snapshot becomes the chosen menu with a (N more to choose) marker while short, so the invoice, quotation and function sheet print it with no change of their own, and extra_per_plate is folded into line_total so the bill, analytics and ledger include it unchanged. The raw choices are kept in menu_selection_json and re-sent by the editor, because the booking PUT rewrites catering lines and would otherwise drop the menu on a guest-count change. Two nullable columns added in createEventTables. A line saved without a selection is stored exactly as before. Strings localized in English, Hindi, Tamil, Kannada and Telugu. tsc and vite build clean.',
       'room-upgrade-charge  Owner request: the post check-in Upgrade room action only ever did a complimentary upgrade and always wrote Complimentary upgrade on the folio. It now asks for an upgrade charge (default 0) charged per night for the nights left or one-time. A charge above 0 is added to the open folio as ROOM_CHARGE lines worded Room upgrade: old room to new room, one line per night like the room nights themselves, so the checkout GST re-slab tests each night at its own value; the typed amount follows the property rates include GST setting via rateBreakdown and the room slab via gstRateForTariff, exactly like the early check-in fee, and it reaches the ledger at checkout with every other room line. A zero charge keeps the existing 0 value note, now worded Room upgrade with no charge. A charged upgrade is refused with 409 before anyone is moved when the booking has no open folio, so a charge can never be silently dropped. The route path is unchanged and the charge fields are optional, so existing callers behave exactly as before. room_changes and the booking audit history record the charge. tsc and vite build clean.',
       'folio-list-weekday-sort-fix  The folios list sorted newest first with String(created_at).localeCompare, but a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a newer Monday folio sorted below an older Saturday one. It now orders by _tsMs epoch ms. The same weekday bug was fixed in the inventory stock-movement log merge (recorded_at TIMESTAMP mixed with legacy hotel movement_date DATE) and the hotel booking search tie-break (check_in_date DATE). Remaining localeCompare calls compare text such as names, TO_CHAR periods and already normalised YYYY-MM-DD keys. tsc and vite build clean.',
       'bulk-update-beats-older-grid-edits  Owner ran a Bulk update for both room types across October on pconvention.atithi-setu.com (RESTO-1009) and 1 Oct kept its old price. The bulk rows saved correctly, but 1 Oct (and 30 Sep) carried older single-day Grid override rows from cell edits on the Rates and inventory grid. Grid rows are priority 10 and bulk rows priority 5, so the older grid edit won on those days in the booking engine, the grid and the Aiosell push alike. A bulk update now deletes older Grid override rows for the same room type on the dates it covers (respecting its day-of-week filter). Also fixed a data-loss bug from the earlier overlap change: a bulk update deleted every older Bulk update row it touched at all, so setting 10 to 12 Oct after 1 to 31 Oct wiped the rest of October. Now only bulk rows wholly inside the new range are removed; a partly overlapping one keeps its other dates and loses the overlap on recency, and re-saving the same range bumps created_at. Recency itself was broken: all four rate resolvers ordered created_at with String(date).localeCompare, and a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a Monday save lost to an older Saturday one. New _tsMs helper compares real timestamps; the grid resolver also gained the tie-break so it shows the price guests pay. tsc and vite build clean.',

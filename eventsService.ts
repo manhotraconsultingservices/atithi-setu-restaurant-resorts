@@ -808,6 +808,10 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  // Menu choices for a "pick N" package ({section: [dish]}) and the per-plate
+  // surcharge for dishes chosen beyond a section's limit. line_total includes it.
+  await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS menu_selection_json TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS extra_per_plate DOUBLE PRECISION DEFAULT 0`).catch(() => {});
 
   // ── Sprint 3B: staff rostering ──────────────────────────────────────────────
   // Assign roster staff (the shared `attendance_staff` roster — same people who

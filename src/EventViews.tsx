@@ -612,20 +612,27 @@ function EventCatering({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', package_type: 'BUFFET', price_per_plate: '', gst_percent: '5', cost_price: '', description: '', sections: [{ name: '', optionsText: '' }] };
+  const blank = { name: '', package_type: 'BUFFET', price_per_plate: '', gst_percent: '5', cost_price: '', description: '', sections: [{ name: '', optionsText: '', pick: '', extraPrice: '' }] };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/catering-packages')); } catch { /* */ } };
   useEffect(() => { load(); }, []);
 
   const openEdit = (r: any) => {
-    let sections = [{ name: '', optionsText: '' }];
-    try { const m = r.menu_json ? JSON.parse(r.menu_json) : []; if (Array.isArray(m) && m.length) sections = m.map((s: any) => ({ name: s.section || '', optionsText: (s.options || []).join(', ') })); } catch { /* */ }
+    let sections = [{ name: '', optionsText: '', pick: '', extraPrice: '' }];
+    try { const m = r.menu_json ? JSON.parse(r.menu_json) : []; if (Array.isArray(m) && m.length) sections = m.map((s: any) => ({ name: s.section || '', optionsText: (s.options || []).join(', '), pick: Number(s.pick) > 0 ? String(s.pick) : '', extraPrice: Number(s.extra_price) > 0 ? String(s.extra_price) : '' })); } catch { /* */ }
     setEdit(r); setForm({ ...r, sections }); setShowForm(true);
   };
   const save = async () => {
     if (!form.name) return;
-    const menu = (form.sections || []).filter((s: any) => s.name).map((s: any) => ({ section: s.name, options: String(s.optionsText || '').split(',').map((x: string) => x.trim()).filter(Boolean) }));
+    const menu = (form.sections || []).filter((s: any) => s.name).map((s: any) => {
+      const sec: any = { section: s.name, options: String(s.optionsText || '').split(',').map((x: string) => x.trim()).filter(Boolean) };
+      // Optional: guest picks N of these dishes, and a per-plate price for each dish beyond N.
+      const pick = Math.floor(Number(s.pick) || 0);
+      if (pick > 0) sec.pick = Math.min(pick, sec.options.length || pick);
+      if (pick > 0 && Number(s.extraPrice) > 0) sec.extra_price = Number(s.extraPrice);
+      return sec;
+    });
     const body = { name: form.name, package_type: form.package_type, price_per_plate: Number(form.price_per_plate || 0), gst_percent: Number(form.gst_percent || 5), cost_price: Number(form.cost_price || 0), description: form.description, menu_json: menu };
     try {
       if (edit) await api(`/events/catering-packages/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
@@ -664,10 +671,13 @@ function EventCatering({ restaurantId, token }: Props) {
               <div key={i} className="flex items-center gap-2 mb-1.5">
                 <input className={`${INPUT} md:w-56`} placeholder={t('events.catering.sectionName')} value={s.name} onChange={e => setSection(i, 'name', e.target.value)} />
                 <input className={INPUT} placeholder={t('events.catering.options')} value={s.optionsText} onChange={e => setSection(i, 'optionsText', e.target.value)} />
+                <input type="number" min={0} className={`${INPUT} w-24 shrink-0`} placeholder={t('events.catering.pick')} title={t('events.catering.pickHint')} value={s.pick ?? ''} onChange={e => setSection(i, 'pick', e.target.value)} />
+                <input type="number" min={0} className={`${INPUT} w-28 shrink-0`} placeholder={t('events.catering.extraPrice')} title={t('events.catering.extraPriceHint')} value={s.extraPrice ?? ''} disabled={!(Number(s.pick) > 0)} onChange={e => setSection(i, 'extraPrice', e.target.value)} />
                 <button className={BTN_DANGER} onClick={() => setForm({ ...form, sections: form.sections.filter((_: any, j: number) => j !== i) })}><Trash2 size={13} /></button>
               </div>
             ))}
-            <button className={BTN_GHOST} onClick={() => setForm({ ...form, sections: [...(form.sections || []), { name: '', optionsText: '' }] })}>{t('events.catering.addSection')}</button>
+            <button className={BTN_GHOST} onClick={() => setForm({ ...form, sections: [...(form.sections || []), { name: '', optionsText: '', pick: '', extraPrice: '' }] })}>{t('events.catering.addSection')}</button>
+            <p className="text-[11px] text-[#9d8b7e] mt-1">{t('events.catering.pickHelp')}</p>
           </div>
 
           <div className="flex gap-2 mt-3">
@@ -1370,7 +1380,21 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   // Catering line helpers (parallel to rentals/services). pax defaults to the
   // booking's guest_count for a sensible starting quantity.
-  const cateringArray = () => (bk.catering || []).map((x: any) => ({ package_id: x.package_id, pax: x.pax, price_per_plate: x.price_per_plate }));
+  // menu_selection is sent back on every save: the server rewrites catering lines
+  // on each PUT, so omitting it would silently drop the menu already chosen.
+  const cateringArray = () => (bk.catering || []).map((x: any) => {
+    let menu_selection: any;
+    try { menu_selection = x.menu_selection_json ? JSON.parse(x.menu_selection_json) : undefined; } catch { menu_selection = undefined; }
+    return { package_id: x.package_id, pax: x.pax, price_per_plate: x.price_per_plate, ...(menu_selection ? { menu_selection } : {}) };
+  });
+  const [menuPick, setMenuPick] = useState<{ idx: number; sel: Record<string, string[]> } | null>(null);
+  const saveMenuPick = async () => {
+    if (!menuPick) return;
+    const arr = cateringArray(); if (!arr[menuPick.idx]) return;
+    arr[menuPick.idx] = { ...arr[menuPick.idx], menu_selection: menuPick.sel };
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ catering: arr }) });
+    setMenuPick(null); await load(); flashSaved();
+  };
   const addCatering = async (pkgId: string) => {
     const p = caterPkgs.find(x => x.id === pkgId); if (!p) return;
     const arr = cateringArray();
@@ -1924,7 +1948,98 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               {editable && <button onClick={() => removeCatering(i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
+          {/* "Pick N" menus: per line, a status and a way to choose the dishes. */}
+          {(bk.catering || []).map((c: any, i: number) => {
+            const pkg = caterPkgs.find((p: any) => p.id === c.package_id);
+            let pmenu: any[] = []; try { pmenu = JSON.parse(pkg?.menu_json || '[]') || []; } catch { pmenu = []; }
+            const pickSecs = pmenu.filter((sec: any) => Number(sec.pick) > 0);
+            if (!pickSecs.length) return null;
+            let sel: Record<string, string[]> = {}; try { sel = c.menu_selection_json ? JSON.parse(c.menu_selection_json) : {}; } catch { sel = {}; }
+            const pending = pickSecs.reduce((n: number, sec: any) => n + Math.max(0, Number(sec.pick) - (sel[sec.section] || []).length), 0);
+            const xpp = Number(c.extra_per_plate || 0);
+            return (
+              <div key={`mp-${c.id}`} className="flex items-center gap-2 flex-wrap text-[11px] py-1.5 border-b border-[#f0e9df]">
+                <span className="text-[#6b5d52] font-medium">{c.name_snapshot}</span>
+                {pending > 0
+                  ? <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">{t('events.catering.toChoose', { n: pending })}</span>
+                  : <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">{t('events.catering.menuChosen')}</span>}
+                {xpp > 0 && <span className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200">{t('events.catering.extrasPerPlate', { amt: money(xpp) })}</span>}
+                {editable && <button className={`${BTN_GHOST} !py-0.5 !text-[11px]`} onClick={() => setMenuPick({ idx: i, sel: JSON.parse(JSON.stringify(sel)) })}>{t('events.catering.chooseMenu')}</button>}
+              </div>
+            );
+          })}
         </div>
+
+        {menuPick && (() => {
+          const c = (bk.catering || [])[menuPick.idx];
+          const pkg = c ? caterPkgs.find((p: any) => p.id === c.package_id) : null;
+          let pmenu: any[] = []; try { pmenu = JSON.parse(pkg?.menu_json || '[]') || []; } catch { pmenu = []; }
+          const toggle = (secName: string, dish: string, pick: number, extraPrice: number) => {
+            const cur = menuPick.sel[secName] || [];
+            let next: string[];
+            if (cur.includes(dish)) next = cur.filter(x => x !== dish);
+            else if (cur.length < pick || extraPrice > 0) next = [...cur, dish];
+            else return;
+            setMenuPick({ ...menuPick, sel: { ...menuPick.sel, [secName]: next } });
+          };
+          const extraPerPlate = pmenu.reduce((sum: number, sec: any) => {
+            const pick = Number(sec.pick) || 0; if (!pick) return sum;
+            return sum + Math.max(0, (menuPick.sel[sec.section] || []).length - pick) * (Number(sec.extra_price) || 0);
+          }, 0);
+          return (
+            <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setMenuPick(null)}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] overflow-y-auto p-5" onClick={e => e.stopPropagation()}>
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9d8b7e]">{t('events.catering.chooseMenu')}</p>
+                    <h3 className="text-lg font-bold">{c?.name_snapshot} · {c?.pax} {t('events.catering.pax')}</h3>
+                  </div>
+                  <button onClick={() => setMenuPick(null)} className="p-1 rounded hover:bg-[#faf7f2]"><X size={16} /></button>
+                </div>
+                <div className="space-y-3">
+                  {pmenu.map((sec: any) => {
+                    const pick = Number(sec.pick) || 0;
+                    const extraPrice = Number(sec.extra_price) || 0;
+                    const chosen = menuPick.sel[sec.section] || [];
+                    const full = pick > 0 && chosen.length >= pick;
+                    return (
+                      <div key={sec.section} className="rounded-xl border border-[#e8dccf] p-3">
+                        <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                          <span className="font-semibold text-sm">{sec.section}</span>
+                          {pick > 0
+                            ? <span className={`text-[11px] px-2 py-0.5 rounded-full border ${chosen.length >= pick ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                {t('events.catering.chosenOf', { n: chosen.length, pick })}{extraPrice > 0 ? ` · ${t('events.catering.extraEach', { amt: money(extraPrice) })}` : ''}
+                              </span>
+                            : <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]">{t('events.catering.allIncluded')}</span>}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {(sec.options || []).map((dish: string) => {
+                            const on = pick === 0 || chosen.includes(dish);
+                            const blocked = pick > 0 && !on && full && extraPrice <= 0;
+                            return (
+                              <button key={dish} type="button" disabled={pick === 0 || blocked}
+                                onClick={() => toggle(sec.section, dish, pick, extraPrice)}
+                                className={`text-xs px-2.5 py-1 rounded-full border ${on ? 'bg-sky-50 text-sky-800 border-sky-300' : blocked ? 'text-[#c7b9a9] border-[#efe6da] cursor-not-allowed' : 'bg-white text-[#3d3128] border-[#e8dccf] hover:border-sky-300'}`}>
+                                {dish}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex items-center justify-between gap-3 mt-4 flex-wrap">
+                  <span className="text-xs text-[#6b5d52]">{extraPerPlate > 0 ? t('events.catering.extrasTotal', { amt: money(extraPerPlate), total: money(extraPerPlate * Number(c?.pax || 0)) }) : t('events.catering.noExtras')}</span>
+                  <div className="flex gap-2">
+                    <button className={BTN_GHOST} onClick={() => setMenuPick(null)}>{t('common.cancel')}</button>
+                    <button className={BTN_PRIMARY} onClick={saveMenuPick}>{t('events.catering.saveMenu')}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Hotel rooms */}
         <div className={`${CARD} md:col-span-2`}>
