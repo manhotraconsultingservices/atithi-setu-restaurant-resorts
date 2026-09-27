@@ -46669,7 +46669,8 @@ ${data.tenant.name}`;
       await tenantDb.run("UPDATE folios SET room_id = ? WHERE booking_id = ? AND status = 'open'", [newRoomId, req.params.bookingId]).catch(() => {});
       const oldLabel = oldRoom?.name || oldRoom?.room_number || String(bk.room_id);
       const newLabel = newRoom.name || newRoom.room_number || newRoomId;
-      const baseDesc = `Room upgrade: ${oldLabel} → ${newLabel}`;
+      // "to", not an arrow: the invoice PDF font has no arrow glyph and printed it as "!'".
+      const baseDesc = `Room upgrade: ${oldLabel} to ${newLabel}`;
       // Nights still to be stayed, for a per-night charge (today IST → checkout, at least 1).
       let nights = 1;
       if (chargeBasis === 'PER_NIGHT') {
@@ -46682,13 +46683,14 @@ ${data.tenant.name}`;
       let entryDesc = `${baseDesc} · no charge`;
       if (openFolio?.id) {
         if (chargeTotal > 0) {
-          // Same tax treatment as every other room line: the slab is tested on the
-          // per-unit value (per night when charged per night), the typed amount follows
-          // the property's "rates include GST" setting, and reapplyHotelGstRates will
-          // land on the same slab at checkout.
+          // Same tax treatment as this booking's own room nights: the slab is tested on
+          // the per-unit value (per night when charged per night), and the typed amount
+          // is read the way the room rate was, from room_rate_gst_exclusive (1, the
+          // default, adds GST on top; 0 means the amount already includes it). Following
+          // the property-wide setting instead put GST on top of the nights but inside the
+          // upgrade on the same bill. reapplyHotelGstRates lands on the same slab at checkout.
           const cfg = await loadHotelTaxConfig(req.params.id);
-          const incRow: any = await centralDb.get("SELECT rates_include_gst FROM restaurants WHERE id = ?", [req.params.id]).catch(() => null);
-          const inclusive: 0 | 1 = Number(incRow?.rates_include_gst ?? 1) === 1 ? 1 : 0;
+          const inclusive: 0 | 1 = Number(bk.room_rate_gst_exclusive ?? 1) === 0 ? 1 : 0;
           // One line per night, like the room nights themselves: the checkout re-slab
           // tests each line's own value, so a single multi-night line could jump slab.
           const qty = chargeBasis === 'PER_NIGHT' ? nights : 1;
@@ -69327,8 +69329,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-catering-pick-menu',
+    commit_marker: 'room-upgrade-gst-and-print-fix',
     code_features: [
+      'room-upgrade-gst-and-print-fix  Found in a browser test of the room upgrade on RESTO-1003. (1) The upgrade charge followed the property-wide rates include GST setting while the room nights follow the booking own room_rate_gst_exclusive flag, so on one bill a 1500 night carried GST on top and a 500 upgrade had it taken out. The upgrade now reads the booking flag exactly like check-in does, and the upgrade window says plus GST or GST included. (2) The folio line used an arrow between the two rooms, which the invoice PDF font cannot draw and printed as garbage; it now reads Room upgrade: A to B. TC-HOTEL-UPGRADE-CHARGE now requires the booking tax treatment and no arrow.',
       'event-catering-pick-menu  Owner request for event catering packages: a section can now say how many dishes the guest chooses (pick, for example 3 starters of 8) and an optional extra price per plate for each dish chosen beyond that. Owner decisions: extras are allowed with a surcharge, an incomplete menu warns but never blocks confirming the event, and staff make the choices. Package sections store pick and extra_price inside the existing menu_json, so a package without them behaves exactly as before. On a booking, Choose menu opens the sections as dish chips with a live chosen-of-pick counter; a section with no extra price cannot go over its limit. The server rebuilds the line from the package on every save (buildCateringMenuSelection): menu_snapshot becomes the chosen menu with a (N more to choose) marker while short, so the invoice, quotation and function sheet print it with no change of their own, and extra_per_plate is folded into line_total so the bill, analytics and ledger include it unchanged. The raw choices are kept in menu_selection_json and re-sent by the editor, because the booking PUT rewrites catering lines and would otherwise drop the menu on a guest-count change. Two nullable columns added in createEventTables. A line saved without a selection is stored exactly as before. Strings localized in English, Hindi, Tamil, Kannada and Telugu. tsc and vite build clean.',
       'room-upgrade-charge  Owner request: the post check-in Upgrade room action only ever did a complimentary upgrade and always wrote Complimentary upgrade on the folio. It now asks for an upgrade charge (default 0) charged per night for the nights left or one-time. A charge above 0 is added to the open folio as ROOM_CHARGE lines worded Room upgrade: old room to new room, one line per night like the room nights themselves, so the checkout GST re-slab tests each night at its own value; the typed amount follows the property rates include GST setting via rateBreakdown and the room slab via gstRateForTariff, exactly like the early check-in fee, and it reaches the ledger at checkout with every other room line. A zero charge keeps the existing 0 value note, now worded Room upgrade with no charge. A charged upgrade is refused with 409 before anyone is moved when the booking has no open folio, so a charge can never be silently dropped. The route path is unchanged and the charge fields are optional, so existing callers behave exactly as before. room_changes and the booking audit history record the charge. tsc and vite build clean.',
       'folio-list-weekday-sort-fix  The folios list sorted newest first with String(created_at).localeCompare, but a pg TIMESTAMP is a JS Date whose string starts with the weekday, so a newer Monday folio sorted below an older Saturday one. It now orders by _tsMs epoch ms. The same weekday bug was fixed in the inventory stock-movement log merge (recorded_at TIMESTAMP mixed with legacy hotel movement_date DATE) and the hotel booking search tie-break (check_in_date DATE). Remaining localeCompare calls compare text such as names, TO_CHAR periods and already normalised YYYY-MM-DD keys. tsc and vite build clean.',

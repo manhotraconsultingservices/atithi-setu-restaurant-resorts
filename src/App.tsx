@@ -37484,6 +37484,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       ? (upgradeRoom.basis === 'PER_NIGHT'
                           ? `${tr('Adds to the folio')}: ₹${amt.toLocaleString('en-IN')} × ${nights} ${nights === 1 ? tr('night') : tr('nights')} = ₹${total.toLocaleString('en-IN')}`
                           : `${tr('Adds to the folio')}: ₹${total.toLocaleString('en-IN')}`)
+                        // Taxed the way this booking's room rate is (server reads room_rate_gst_exclusive).
+                        + ` · ${Number(upgradeRoom.booking?.room_rate_gst_exclusive ?? 1) === 0 ? tr('GST included') : tr('plus GST')}`
                       : tr('No charge. The folio shows the room upgrade with ₹0.')}
                   </p>
                 </div>
