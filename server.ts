@@ -2175,6 +2175,15 @@ function buildCateringMenuSelection(menuJson: any, selection: any): { snapshot: 
   return { snapshot, selection: sel, extraPerPlate: Math.round(extra * 100) / 100, pending: pendingTotal };
 }
 
+// A date for a message a person reads: "28-Sep-2026". pg returns DATE columns as JS
+// Date objects, and interpolating one into a string prints
+// "Mon Sep 28 2026 00:00:00 GMT+0000 (Coordinated Universal Time)".
+function _humanDate(v: any): string {
+  const iso = normaliseDateIso(v);
+  if (!iso) return String(v ?? '');
+  const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${iso.slice(8, 10)}-${M[Number(iso.slice(5, 7)) - 1]}-${iso.slice(0, 4)}`;
+}
 function normaliseDateIso(v: any): string {
   if (v == null || v === '') return '';
   if (v instanceof Date) {
@@ -5111,7 +5120,7 @@ async function validateBookingRequest(
     const c = conflicts[0];
     return {
       ok: false, status: 409,
-      error: `Room is already booked for "${c.guest_name}" (${c.status}) from ${c.check_in_date} to ${c.check_out_date}. Pick a different room or date range.`,
+      error: `Room is already booked for "${c.guest_name}" (${c.status}) from ${_humanDate(c.check_in_date)} to ${_humanDate(c.check_out_date)}. Pick a different room or date range.`,
     };
   }
 
@@ -5130,7 +5139,7 @@ async function validateBookingRequest(
     const label = String(holdConflict.kind || 'HOLD').toLowerCase().replace(/_/g, ' ');
     return {
       ok: false, status: 409,
-      error: `Room is held for ${label}${holdConflict.reason ? ` (${holdConflict.reason})` : ''} from ${holdConflict.start_date} to ${holdConflict.end_date}. Lift the hold first or pick a different room.`,
+      error: `Room is held for ${label}${holdConflict.reason ? ` (${holdConflict.reason})` : ''} from ${_humanDate(holdConflict.start_date)} to ${_humanDate(holdConflict.end_date)}. Lift the hold first or pick a different room.`,
     };
   }
 
@@ -22514,7 +22523,13 @@ async function startServer() {
       const db = await getTenantDb(req.params.id);
       const run: any = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
       if (!run) return res.status(404).json({ error: 'Run not found' });
-      if (run.status !== 'DRAFT') {
+      // A run that was never computed holds no payslips and posted nothing to the
+      // ledger (the payroll journal skips a zero run), whatever its status says. Such
+      // a run can be removed so the month can be run properly; before approval
+      // required a computed run, an empty one could reach PAID and block the month.
+      const slipCount: any = await db.get("SELECT COUNT(*)::int AS n FROM payslips WHERE payroll_run_id = ?", [req.params.runId]);
+      const neverComputed = !run.computed_at && Number(slipCount?.n || 0) === 0;
+      if (run.status !== 'DRAFT' && !neverComputed) {
         return res.status(409).json({ error: `Only a draft run can be deleted. This run is ${run.status}.` });
       }
       await db.run(
@@ -22523,7 +22538,9 @@ async function startServer() {
         [req.params.runId]
       );
       await db.run("DELETE FROM payslips WHERE payroll_run_id = ?", [req.params.runId]);
-      const del: any = await db.run("DELETE FROM payroll_runs WHERE id = ? AND status = 'DRAFT'", [req.params.runId]);
+      const del: any = neverComputed
+        ? await db.run("DELETE FROM payroll_runs WHERE id = ? AND computed_at IS NULL AND NOT EXISTS (SELECT 1 FROM payslips WHERE payroll_run_id = ?)", [req.params.runId, req.params.runId])
+        : await db.run("DELETE FROM payroll_runs WHERE id = ? AND status = 'DRAFT'", [req.params.runId]);
       if (del && del.changes === 0) return res.status(409).json({ error: 'The run changed while deleting. Refresh and try again.' });
       await writeObjectAudit(db, req, { objectType: 'PAYROLL_RUN', objectId: String(req.params.runId), action: 'DELETED', summary: `Draft run for ${run.year}-${String(run.month).padStart(2, '0')} deleted` });
       res.json({ ok: true });
@@ -22536,6 +22553,15 @@ async function startServer() {
   app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      // Only a computed run with payslips can be approved. Approving an uncomputed
+      // run let it go on to LOCKED and PAID with no employees and zero pay, and one
+      // run per month is allowed, so the month was then blocked.
+      const pre: any = await db.get("SELECT computed_at, status FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!pre) return res.status(404).json({ error: 'Run not found' });
+      const slips: any = await db.get("SELECT COUNT(*)::int AS n FROM payslips WHERE payroll_run_id = ?", [req.params.runId]);
+      if (pre.status === 'DRAFT' && (!pre.computed_at || Number(slips?.n || 0) === 0)) {
+        return res.status(409).json({ error: 'This run has not been computed, so there are no payslips to approve. Compute it first.', code: 'RUN_NOT_COMPUTED' });
+      }
       const stamp = new Date().toISOString();
       const result: any = await db.run(
         `UPDATE payroll_runs
@@ -31954,9 +31980,12 @@ ${data.tenant.name}`;
           );
         }
         // Backfill existing tables that still have NULL qr_code_data
+        // The prefix is a PARAMETER, not a literal: the tenant DB rewrites every "?"
+        // in the SQL into a placeholder, including one inside '?r=', so the literal
+        // version failed with 500 after the tables had already been inserted.
         await db.run(
-          `UPDATE tables SET qr_code_data = '?r=' || ? || '&table=' || id WHERE qr_code_data IS NULL`,
-          [req.params.id]
+          `UPDATE tables SET qr_code_data = ? || id WHERE qr_code_data IS NULL`,
+          [`?r=${req.params.id}&table=`]
         );
       } else if (existing.length > count) {
         // REMOVE extra tables — sort numerically by table name, delete the highest-numbered ones
@@ -69336,8 +69365,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-shows-open-bill-total',
+    commit_marker: 'payroll-guard-tables-sync-conflict-dates',
     code_features: [
+      'payroll-guard-tables-sync-conflict-dates  Three faults found while seeding a new tenant. (1) An uncomputed payroll run could be approved, locked and marked paid with no employees and zero pay, and one run per month is allowed, so the month was blocked. Approve now refuses a run with no payslips (409 RUN_NOT_COMPUTED), and a never-computed run can be deleted whatever its status (it posted nothing, the payroll journal skips a zero run); the Payroll screen shows Delete empty run for it. (2) tables/sync inserted the tables and then returned 500, because its QR backfill had a literal containing a question mark that the tenant DB rewrote into a placeholder; the prefix is now a parameter. (3) Room-conflict and room-hold messages printed pg DATE objects as Mon Sep 28 2026 00:00:00 GMT; they now read 28-Sep-2026 via _humanDate.',
       'booking-shows-open-bill-total  Found by a charges check across every surface: bills, check-out, Guest Bills, master folio and invoice PDFs all showed the right total after a room upgrade, but the booking detail Financials box worked out Outstanding as booking total minus advance, which leaves out GST, room upgrades, room service and every other folio charge (a guest owing 4515 showed 3000). With an open folio the box now shows the room booking, the bill to date, paid and outstanding from the same outstanding endpoint check-out uses; without one it keeps the old estimate. The Reservations list returns open_folio_total and shows Bill X under the total when it differs.',
       'catering-section-row-layout  Owner report with screenshot: in the catering package editor the dishes box of a menu section was squeezed to a sliver and Guest picks ran off the card, so there was no visible place to type the food items. Every input shares a w-full class that beat the w-24 and w-28 widths added for the two number boxes. The section row is now a fixed-column grid (section, dishes, guest picks, extra per plate, delete) with column headings and an example placeholder for the dishes, stacking on phones.',
       'hotel-booking-search-invoice-fix  Found in the room-upgrade browser test: every text search on Hotel Bookings returned 500 column b.invoice_number does not exist, because the search matched an invoice_number column that room_bookings never had. The invoice number is now matched through the booking folios (folios.invoice_number), so name, phone, email, booking id and invoice number search all work again.',

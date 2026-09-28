@@ -70460,7 +70460,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
   async function deleteDraftRun() {
     if (!selectedRunId) return;
     if (!canDeleteTab('HR_PAYROLL')) { setActionError('You need Full access to HR & Payroll to delete a draft run.'); return; }
-    if (!await showConfirm({ title: 'Delete this draft run and its payslips?', danger: true })) return;
+    if (!await showConfirm({ title: 'Delete this run and any payslips in it?', danger: true })) return;
     setBusy(true); setActionError('');
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}`, {
@@ -70471,7 +70471,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
         setActionError(err.error || 'Delete failed');
       } else {
         setSelectedRunId(null);
-        toast.success('Draft run deleted');
+        toast.success('Payroll run deleted');
       }
     } catch { setActionError('Network error — delete failed'); }
     setBusy(false);
@@ -70561,7 +70561,9 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
             <h3 className="font-bold text-[#1a1208]">Run {run.year}-{String(run.month).padStart(2, '0')} · {run.status}</h3>
             <div className="flex gap-2">
               {canEdit && run.status === 'DRAFT' && <button onClick={() => runAction('compute')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-brand text-white text-xs font-bold">Run compute</button>}
-              {canDeleteTab('HR_PAYROLL') && run.status === 'DRAFT' && <button onClick={deleteDraftRun} disabled={busy} className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 text-xs font-bold">Delete draft</button>}
+              {/* A run never computed (no payslips, nothing posted) can be removed in any status,
+                  so an empty run that slipped through to PAID stops blocking its month. */}
+              {canDeleteTab('HR_PAYROLL') && (run.status === 'DRAFT' || (!run.computed_at && Number(run.employee_count || 0) === 0)) && <button onClick={deleteDraftRun} disabled={busy} className="px-3 py-1.5 rounded-xl border border-red-200 text-red-700 text-xs font-bold">{run.status === 'DRAFT' ? 'Delete draft' : 'Delete empty run'}</button>}
               {canEdit && run.status === 'DRAFT' && payslips.length > 0 && <button onClick={() => runAction('approve')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold">Approve</button>}
               {canEdit && run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
               {canEdit && (run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
