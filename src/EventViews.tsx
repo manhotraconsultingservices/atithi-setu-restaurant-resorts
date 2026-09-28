@@ -667,13 +667,25 @@ function EventCatering({ restaurantId, token }: Props) {
 
           <div className="mt-3">
             <label className={LABEL}>{t('events.catering.sections')}</label>
+            {/* A grid, not a flex row: INPUT carries w-full, which beat the w-24/w-28 the two
+                number boxes appended, so Guest picks took the whole row and squeezed the
+                dishes box to nothing. Fixed column tracks sidestep that; phones stack. */}
+            <div className="hidden md:grid grid-cols-[12rem_minmax(0,1fr)_6.5rem_7.5rem_2.25rem] gap-2 mb-1 text-[10px] font-bold uppercase tracking-widest text-[#9d8b7e]">
+              <span>{t('events.catering.colSection')}</span>
+              <span>{t('events.catering.colDishes')}</span>
+              <span>{t('events.catering.pick')}</span>
+              <span>{t('events.catering.extraPrice')}</span>
+              <span />
+            </div>
             {(form.sections || []).map((s: any, i: number) => (
-              <div key={i} className="flex items-center gap-2 mb-1.5">
-                <input className={`${INPUT} md:w-56`} placeholder={t('events.catering.sectionName')} value={s.name} onChange={e => setSection(i, 'name', e.target.value)} />
-                <input className={INPUT} placeholder={t('events.catering.options')} value={s.optionsText} onChange={e => setSection(i, 'optionsText', e.target.value)} />
-                <input type="number" min={0} className={`${INPUT} w-24 shrink-0`} placeholder={t('events.catering.pick')} title={t('events.catering.pickHint')} value={s.pick ?? ''} onChange={e => setSection(i, 'pick', e.target.value)} />
-                <input type="number" min={0} className={`${INPUT} w-28 shrink-0`} placeholder={t('events.catering.extraPrice')} title={t('events.catering.extraPriceHint')} value={s.extraPrice ?? ''} disabled={!(Number(s.pick) > 0)} onChange={e => setSection(i, 'extraPrice', e.target.value)} />
-                <button className={BTN_DANGER} onClick={() => setForm({ ...form, sections: form.sections.filter((_: any, j: number) => j !== i) })}><Trash2 size={13} /></button>
+              <div key={i} className="grid grid-cols-2 md:grid-cols-[12rem_minmax(0,1fr)_6.5rem_7.5rem_2.25rem] gap-2 mb-2 md:mb-1.5 items-center">
+                <input className={`${INPUT} col-span-2 md:col-span-1`} placeholder={t('events.catering.sectionName')} value={s.name} onChange={e => setSection(i, 'name', e.target.value)} />
+                <input className={`${INPUT} col-span-2 md:col-span-1`} placeholder={t('events.catering.dishesPlaceholder')} title={t('events.catering.options')} value={s.optionsText} onChange={e => setSection(i, 'optionsText', e.target.value)} />
+                <input type="number" min={0} className={INPUT} placeholder={t('events.catering.pick')} title={t('events.catering.pickHint')} value={s.pick ?? ''} onChange={e => setSection(i, 'pick', e.target.value)} />
+                <div className="flex items-center gap-2 md:contents">
+                  <input type="number" min={0} className={INPUT} placeholder={t('events.catering.extraPrice')} title={t('events.catering.extraPriceHint')} value={s.extraPrice ?? ''} disabled={!(Number(s.pick) > 0)} onChange={e => setSection(i, 'extraPrice', e.target.value)} />
+                  <button className={BTN_DANGER} onClick={() => setForm({ ...form, sections: form.sections.filter((_: any, j: number) => j !== i) })}><Trash2 size={13} /></button>
+                </div>
               </div>
             ))}
             <button className={BTN_GHOST} onClick={() => setForm({ ...form, sections: [...(form.sections || []), { name: '', optionsText: '', pick: '', extraPrice: '' }] })}>{t('events.catering.addSection')}</button>
