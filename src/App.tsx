@@ -11776,6 +11776,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
   const [actionMenuPos, setActionMenuPos] = useState<{top:number;left:number}|null>(null);
   const [bookingDetailTarget, setBookingDetailTarget] = useState<any>(null);
+  // The booking's open bill, read from the same /outstanding endpoint the check-out
+  // screen uses. booking.total_amount is only the room booking value: it leaves out
+  // GST, room upgrades, room service and any other folio charge, so an Outstanding
+  // worked out from it under-stated what check-out actually asks the guest to pay.
+  const [bookingDetailFolio, setBookingDetailFolio] = useState<any>(null);
+  useEffect(() => {
+    const fid = bookingDetailTarget?.open_folio_id;
+    setBookingDetailFolio(null);
+    if (!fid || !restaurantId || !token) return;
+    let live = true;
+    fetch(`/api/restaurant/${restaurantId}/hotel/folios/${fid}/outstanding`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (live && d && d.folio) setBookingDetailFolio(d); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [bookingDetailTarget?.id, bookingDetailTarget?.open_folio_id]);
   const [roomDetailTarget, setRoomDetailTarget] = useState<any>(null);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
@@ -25388,6 +25404,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {colOn('total') && (
                           <td className="px-4 py-3 text-right">
                             <div className="font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</div>
+                            {b.open_folio_id && b.open_folio_total != null && Math.abs(Number(b.open_folio_total) - Number(b.total_amount || 0)) > 0.5 && (
+                              <div className="text-[9px] font-bold whitespace-nowrap mt-0.5 text-[#6b5d52]" title={tr('Current bill including GST, upgrades and other charges')}>
+                                {tr('Bill')} ₹{Number(b.open_folio_total).toLocaleString('en-IN')}
+                              </div>
+                            )}
                             {Number(b.room_rate || 0) > 0 && (
                               <div className="text-[9px] font-bold whitespace-nowrap mt-0.5">
                                 <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded">
@@ -36895,6 +36916,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             return (!isNaN(ci)&&!isNaN(co)&&co>ci) ? Math.round((co-ci)/86400000) : 1;
           })();
           const outstanding = Math.max(0, Number(bd.total_amount||0) - Number(bd.advance_paid||0));
+          // Open bill (same figures as check-out) when this booking has one; else the old estimate.
+          const bdFolio = bookingDetailFolio && bookingDetailFolio.folio?.id === bd.open_folio_id ? bookingDetailFolio : null;
           const STATUS_LABEL: Record<string,string> = { BOOKED:'Confirmed', CHECKED_IN:'Checked In', CHECKING_OUT:'Checking Out', CHECKED_OUT:'Checked Out', CANCELLED:'Cancelled', ASSIGNED:'Assigned' };
           const STATUS_CLS: Record<string,string> = { BOOKED:'bg-blue-100 text-blue-800', CHECKED_IN:'bg-emerald-100 text-emerald-800', CHECKING_OUT:'bg-amber-100 text-amber-800', CHECKED_OUT:'bg-slate-100 text-slate-700', CANCELLED:'bg-stone-100 text-stone-500', ASSIGNED:'bg-rose-100 text-rose-700' };
           // Derived, booking-related attributes surfaced in the enriched overview.
@@ -37072,15 +37095,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div className="divide-y divide-brand/5">
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room rate / night</span><span className="font-mono font-bold">{inr(bd.room_rate)}</span></div>
                       {bdFnb > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room-service F&amp;B</span><span className="font-mono font-bold">{inr(bdFnb)}{bdFnbUnpaid>0 && <span className="text-rose-600"> ({inr(bdFnbUnpaid)} unpaid)</span>}</span></div>}
-                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Total</span><span className="font-mono font-bold">{inr(bd.total_amount)}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">{bdFolio ? tr('Room booking') : 'Total'}</span><span className="font-mono font-bold">{inr(bd.total_amount)}</span></div>
                       {bdCommission > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">OTA commission{bd.commission_pct?` (${Number(bd.commission_pct)}%)`:''}</span><span className="font-mono font-bold text-rose-600">− {inr(bdCommission)}</span></div>}
                       {bdCommission > 0 && bdNet > 0 && <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Net to property</span><span className="font-mono font-bold">{inr(bdNet)}</span></div>}
                       {/* An event room is paid on the event invoice: show the event's money, never a hotel "outstanding". */}
                       {String(bd.booking_source || '').toUpperCase() === 'EVENT' ? (
                         <EventRoomBilling restaurantId={restaurantId} token={token} bookingId={bd.id} />
                       ) : (<>
+                      {bdFolio ? (<>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">{tr('Bill to date (incl. GST & extras)')}</span><span className="font-mono font-bold">{inr(bdFolio.folio.grand_total)}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">{tr('Paid')}</span><span className="font-mono font-bold text-emerald-700">{inr(Number(bdFolio.total_paid || 0) - Number(bdFolio.total_refunded || 0))}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', Number(bdFolio.outstanding) > 0 ? 'text-rose-600' : 'text-emerald-700')}>{inr(bdFolio.outstanding)}</span></div>
+                      </>) : (<>
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Advance paid</span><span className="font-mono font-bold text-emerald-700">{inr(bd.advance_paid)}</span></div>
                       <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', outstanding>0?'text-rose-600':'text-emerald-700')}>{inr(outstanding)}</span></div>
+                      </>)}
                       </>)}
                     </div>
                   </div>

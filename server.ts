@@ -44839,6 +44839,11 @@ ${data.tenant.name}`;
                         (SELECT f.id FROM folios f
                          WHERE f.booking_id = b.id AND f.status = 'open'
                          ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id,
+                        -- The open bill's total (GST, upgrades, room service included), so the
+                        -- list can show it beside the room booking value, which leaves those out.
+                        (SELECT f.grand_total FROM folios f
+                         WHERE f.booking_id = b.id AND f.status = 'open'
+                         ORDER BY f.created_at DESC LIMIT 1) AS open_folio_total,
                         -- RESTAURANT-BILL (16 Jun 2026): the guest's room-service
                         -- F&B total + how much is still unpaid (not yet settled
                         -- in the room), so the booking row can show the
@@ -69331,8 +69336,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'catering-section-row-layout',
+    commit_marker: 'booking-shows-open-bill-total',
     code_features: [
+      'booking-shows-open-bill-total  Found by a charges check across every surface: bills, check-out, Guest Bills, master folio and invoice PDFs all showed the right total after a room upgrade, but the booking detail Financials box worked out Outstanding as booking total minus advance, which leaves out GST, room upgrades, room service and every other folio charge (a guest owing 4515 showed 3000). With an open folio the box now shows the room booking, the bill to date, paid and outstanding from the same outstanding endpoint check-out uses; without one it keeps the old estimate. The Reservations list returns open_folio_total and shows Bill X under the total when it differs.',
       'catering-section-row-layout  Owner report with screenshot: in the catering package editor the dishes box of a menu section was squeezed to a sliver and Guest picks ran off the card, so there was no visible place to type the food items. Every input shares a w-full class that beat the w-24 and w-28 widths added for the two number boxes. The section row is now a fixed-column grid (section, dishes, guest picks, extra per plate, delete) with column headings and an example placeholder for the dishes, stacking on phones.',
       'hotel-booking-search-invoice-fix  Found in the room-upgrade browser test: every text search on Hotel Bookings returned 500 column b.invoice_number does not exist, because the search matched an invoice_number column that room_bookings never had. The invoice number is now matched through the booking folios (folios.invoice_number), so name, phone, email, booking id and invoice number search all work again.',
       'room-upgrade-gst-and-print-fix  Found in a browser test of the room upgrade on RESTO-1003. (1) The upgrade charge followed the property-wide rates include GST setting while the room nights follow the booking own room_rate_gst_exclusive flag, so on one bill a 1500 night carried GST on top and a 500 upgrade had it taken out. The upgrade now reads the booking flag exactly like check-in does, and the upgrade window says plus GST or GST included. (2) The folio line used an arrow between the two rooms, which the invoice PDF font cannot draw and printed as garbage; it now reads Room upgrade: A to B. TC-HOTEL-UPGRADE-CHARGE now requires the booking tax treatment and no arrow.',
