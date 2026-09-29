@@ -476,6 +476,87 @@ const persistPrivateHrFile = (tenantId: string, plain: Buffer) => persistPrivate
 const readPrivateHrFile = (storage: string, key: string) => readPrivateFile('hr-private', storage, key);
 const deletePrivateHrFile = (storage: string, key: string) => deletePrivateFile('hr-private', storage, key);
 
+// ── Signed offer letters and expense receipts (29 Sep 2026) ─────────────────
+// The signed copy of an offer letter (name, CTC, signature) and expense claim
+// receipts used to go through the disk `upload` to public/uploads with a
+// guessable Date.now() name, served to anyone by GET /uploads/:filename. They
+// are now encrypted into hr-private like employee documents. The row keeps
+// <prefix>_storage + <prefix>_file_key (+ file name, mime type and, after a
+// move, migrated_from = the old uploads name); signed_pdf_url / receipt_url
+// hold the signed-in route, never a storage URL. Rows saved before then point
+// at /uploads/<name>; the file routes still read those, and
+// POST /api/admin/hr-files/migrate moves them and deletes the public copy.
+type HrAttachmentKind = 'OFFER_SIGNED' | 'EXPENSE_RECEIPT';
+const _HR_ATTACHMENT_COLS: Record<HrAttachmentKind, { table: string; prefix: string; urlCol: string }> = {
+  OFFER_SIGNED:    { table: 'offer_letters',       prefix: 'signed',  urlCol: 'signed_pdf_url' },
+  EXPENSE_RECEIPT: { table: 'expense_claim_items', prefix: 'receipt', urlCol: 'receipt_url' },
+};
+function _offerSignedFileRoute(tenantId: string, offerId: string): string {
+  const e = encodeURIComponent;
+  return `/api/restaurant/${e(tenantId)}/hr/offer-letters/${e(offerId)}/signed-file`;
+}
+function _expenseReceiptRoute(tenantId: string, claimId: string, itemId: string): string {
+  const e = encodeURIComponent;
+  return `/api/restaurant/${e(tenantId)}/hr/expenses/${e(claimId)}/items/${e(itemId)}/receipt`;
+}
+/** The disk path of a file the old `upload` saved (/uploads/<name>); null for anything else. */
+function _legacyUploadPath(url: any): string | null {
+  const m = String(url || '').match(/^\/uploads\/([\w.\-]+)$/);
+  if (!m || m[1].startsWith('.')) return null;
+  return path.join(process.cwd(), "public", "uploads", m[1]);
+}
+const _LEGACY_EXT_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.heic': 'image/heic', '.heif': 'image/heif',
+};
+/** Bytes, content type and download name of an HR attachment row, or null when there is no readable file. */
+async function readHrAttachment(kind: HrAttachmentKind, row: any): Promise<{ bytes: Buffer; mime: string; name: string } | null> {
+  const p = _HR_ATTACHMENT_COLS[kind].prefix;
+  if (row?.[`${p}_file_key`]) {
+    const bytes = await readPrivateFile('hr-private', row[`${p}_storage`], row[`${p}_file_key`]);
+    return bytes ? { bytes, mime: String(row[`${p}_mime_type`] || ''), name: String(row[`${p}_file_name`] || '') } : null;
+  }
+  const legacy = _legacyUploadPath(row?.[_HR_ATTACHMENT_COLS[kind].urlCol]);
+  if (!legacy || !fs.existsSync(legacy)) return null;
+  const base = path.basename(legacy);
+  return { bytes: fs.readFileSync(legacy), mime: _LEGACY_EXT_MIME[path.extname(base).toLowerCase()] || '', name: base.replace(/^\d{10,}-/, '') };
+}
+function sendHrAttachment(req: any, res: Response, f: { bytes: Buffer; mime: string; name: string }): void {
+  const mime = f.mime.toLowerCase();
+  res.setHeader('Content-Type', GENERAL_ALLOWED_MIMES.has(mime) ? mime : 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${req.query?.download ? 'attachment' : 'inline'}; filename="${safeDownloadName(f.name || 'document')}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(f.bytes);
+}
+/** Offer letter as the browser sees it: signed_pdf_url is the signed-in route, storage details stay here. */
+function _publicOfferRow(tenantId: string, row: any): any {
+  if (!row) return row;
+  const { signed_storage, signed_file_key, signed_migrated_from, ...rest } = row;
+  const has = !!(signed_file_key || row.signed_pdf_url);
+  return { ...rest, signed_pdf_url: has ? _offerSignedFileRoute(tenantId, row.id) : null, has_signed_copy: has };
+}
+/** Expense line as the browser sees it; receipt_url is the signed-in route. */
+function _publicExpenseItem(tenantId: string, item: any): any {
+  if (!item) return item;
+  const { receipt_storage, receipt_file_key, receipt_migrated_from, ...rest } = item;
+  const has = !!(receipt_file_key || item.receipt_url);
+  return { ...rest, receipt_url: has ? _expenseReceiptRoute(tenantId, item.claim_id, item.id) : null, has_receipt: has };
+}
+// Once per tenant per process, like _ensureGuestDocPrivateCols; marked done
+// only when every ALTER worked (a tenant without the HR tables retries).
+const _hrAttachmentColsEnsured = new WeakSet<any>();
+async function _ensureHrAttachmentCols(db: any): Promise<void> {
+  if (_hrAttachmentColsEnsured.has(db)) return;
+  let ok = true;
+  for (const { table, prefix } of Object.values(_HR_ATTACHMENT_COLS)) {
+    for (const c of ['storage', 'file_key', 'file_name', 'mime_type', 'migrated_from']) {
+      ok = (await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${prefix}_${c} TEXT`).then(() => true).catch(() => false)) && ok;
+    }
+  }
+  if (ok) _hrAttachmentColsEnsured.add(db);
+}
+
 /**
  * Persists an uploaded menu image either to Cloudflare R2 or to the local
  * filesystem, depending on UPLOAD_BACKEND. Returns the URL that should be
@@ -20898,11 +20979,13 @@ async function startServer() {
       return perms ? Number(perms.HR_SENSITIVE || 0) : 0;
     } catch { return 0; }
   }
-  function _hrLogSensitive(db: DbInterface, req: AuthRequest, staffId: string | null, action: string, detail: string) {
+  // Resolves true when the row was written, for callers that must not
+  // proceed unlogged (opening a signed offer letter or a receipt).
+  function _hrLogSensitive(db: DbInterface, req: AuthRequest, staffId: string | null, action: string, detail: string): Promise<boolean> {
     return db.run(
       "INSERT INTO hr_sensitive_access_log (id, staff_id, action, detail, actor_id, actor_email, actor_role) VALUES (?, ?, ?, ?, ?, ?, ?)",
       [randomUUID(), staffId, action, detail, req.user?.id || null, req.user?.email || null, req.user?.role || null]
-    ).catch((e: any) => console.error('[hr] sensitive access not logged:', e?.message || e));
+    ).then(() => true).catch((e: any) => { console.error('[hr] sensitive access not logged:', e?.message || e); return false; });
   }
 
   // ── HR history, settings and employee codes (HRMS-R1A) ─────────────────
@@ -23084,10 +23167,10 @@ You can also view all your payslips in the employee portal.
           LIMIT 500`,
         args
       );
-      // hydrate items
+      // hydrate items (receipt_url is the signed-in route, never a file address)
       for (const r of rows) {
         const items = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ? ORDER BY expense_date", [r.id]);
-        r.items = items;
+        r.items = items.map((i: any) => _publicExpenseItem(req.params.id, i));
       }
       res.json({ claims: rows });
     } catch (err: any) {
@@ -23118,33 +23201,77 @@ You can also view all your payslips in the employee portal.
           `INSERT INTO expense_claim_items (id, claim_id, category, description, amount, expense_date, receipt_url, gst_amount)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [randomUUID(), claim_id, String(i.category || 'OTHER').toUpperCase(), i.description || '',
-            Number(i.amount) || 0, i.expense_date || null, i.receipt_url || null, Number(i.gst_amount) || 0]
+            Number(i.amount) || 0, i.expense_date || null, null, Number(i.gst_amount) || 0]
         );
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
       await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: claim_id, action: 'CREATED', summary: `Claim ${claim_number}: ₹${total} across ${items.length} line${items.length === 1 ? '' : 's'}` });
       const claimItems = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ?", [claim_id]);
-      res.json({ claim: { ...claim, items: claimItems } });
+      res.json({ claim: { ...claim, items: claimItems.map((i: any) => _publicExpenseItem(req.params.id, i)) } });
     } catch (err: any) {
       console.error('hr/expenses create error:', err);
       res.status(500).json({ error: err?.message || 'Create failed' });
     }
   });
 
-  // Receipt upload (multipart)
-  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  // Receipt upload (multipart). Encrypted into hr-private and opened only
+  // through GET .../items/:itemId/receipt (see the note near _HR_ATTACHMENT_COLS).
+  // Line items take a receipt only through here: a receipt_url sent with a
+  // claim is ignored, so a row can never point at somebody else's file.
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const item_id = String(req.body?.item_id || '').trim();
       if (!item_id) return res.status(400).json({ error: 'item_id required' });
-      const url = `/uploads/${req.file.filename}`;
       const db = await getTenantDb(req.params.id);
-      await db.run("UPDATE expense_claim_items SET receipt_url = ? WHERE id = ? AND claim_id = ?",
-        [url, item_id, req.params.claimId]);
+      await _ensureHrAttachmentCols(db);
+      const item: any = await db.get("SELECT id, receipt_url, receipt_storage, receipt_file_key FROM expense_claim_items WHERE id = ? AND claim_id = ?", [item_id, req.params.claimId]);
+      if (!item) return res.status(404).json({ error: 'Expense line not found on this claim' });
+      const stored = await persistPrivateFile('hr-private', req.params.id, req.file.buffer);
+      const url = _expenseReceiptRoute(req.params.id, req.params.claimId, item_id);
+      try {
+        await db.run(
+          `UPDATE expense_claim_items SET receipt_url = ?, receipt_storage = ?, receipt_file_key = ?, receipt_file_name = ?, receipt_mime_type = ?, receipt_migrated_from = NULL
+            WHERE id = ? AND claim_id = ?`,
+          [url, stored.storage, stored.key, req.file.originalname || null, req.file.mimetype || null, item_id, req.params.claimId]);
+      } catch (e) {
+        await deletePrivateFile('hr-private', stored.storage, stored.key).catch(() => {});
+        throw e;
+      }
+      // The receipt it replaces goes too, private or (saved before) public.
+      if (item.receipt_file_key) await deletePrivateFile('hr-private', item.receipt_storage, item.receipt_file_key).catch(() => {});
+      const oldPublic = _legacyUploadPath(item.receipt_url);
+      if (oldPublic && fs.existsSync(oldPublic)) { try { fs.unlinkSync(oldPublic); } catch {} }
+      await writeObjectAudit(db, req, { objectType: 'EXPENSE_CLAIM', objectId: String(req.params.claimId), action: 'RECEIPT_UPLOADED', summary: `Receipt attached to a line${req.file.originalname ? ` (${req.file.originalname})` : ''}` });
       res.json({ ok: true, url });
     } catch (err: any) {
       console.error('hr/expenses receipt upload error:', err);
       res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  // Opens a receipt: HR_PAYROLL read, decrypted and sent not cached. Each
+  // opening is written to the HR sensitive access log (DOCUMENT_OPENED, under
+  // the claimant); if it cannot be, nothing is sent.
+  app.get("/api/restaurant/:id/hr/expenses/:claimId/items/:itemId/receipt", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureHrAttachmentCols(db);
+      const item: any = await db.get(
+        `SELECT i.id, i.description, i.receipt_url, i.receipt_storage, i.receipt_file_key, i.receipt_file_name, i.receipt_mime_type,
+                c.staff_id, c.claim_number
+           FROM expense_claim_items i JOIN expense_claims c ON c.id = i.claim_id
+          WHERE i.id = ? AND i.claim_id = ?`, [req.params.itemId, req.params.claimId]);
+      if (!item || !(item.receipt_file_key || item.receipt_url)) return res.status(404).json({ error: 'No receipt on this expense line' });
+      const f = await readHrAttachment('EXPENSE_RECEIPT', item);
+      if (!f) return res.status(404).json({ error: 'The stored file could not be read.' });
+      const logged = await _hrLogSensitive(db, req, item.staff_id || null, 'DOCUMENT_OPENED',
+        `Opened the receipt for ${item.claim_number || 'an expense claim'}${item.description ? ` (${item.description})` : ''}${req.query.download ? ', downloaded' : ''}`);
+      if (!logged) return res.status(503).json({ error: 'The opening could not be recorded in the access log, so the file was not sent. Try again.' });
+      sendHrAttachment(req, res, f);
+    } catch (err: any) {
+      console.error('hr/expenses receipt open error:', err?.message || err);
+      res.status(500).json({ error: 'Failed to open the receipt' });
     }
   });
 
@@ -23395,7 +23522,7 @@ You can also view all your payslips in the employee portal.
         `SELECT * FROM offer_letters ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC LIMIT 500`,
         args
       );
-      res.json({ offers: rows });
+      res.json({ offers: rows.map((r: any) => _publicOfferRow(req.params.id, r)) });
     } catch (err: any) {
       console.error('hr/offer-letters list error:', err);
       res.status(500).json({ error: err?.message || 'List failed' });
@@ -23435,7 +23562,7 @@ You can also view all your payslips in the employee portal.
       );
       const row: any = await db.get("SELECT * FROM offer_letters WHERE id = ?", [id]);
       await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: id, action: 'CREATED', summary: `Offer ${row?.offer_number || ''} to ${row?.candidate_name || ''} for ${row?.designation || ''}, CTC ₹${row?.ctc || 0}` });
-      res.json({ offer: row });
+      res.json({ offer: _publicOfferRow(req.params.id, row) });
     } catch (err: any) {
       console.error('hr/offer-letters create error:', err);
       res.status(500).json({ error: err?.message || 'Create failed' });
@@ -23564,11 +23691,11 @@ ${data.tenant.name}`;
       );
       if (result && result.changes === 0) {
         const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-        return res.status(409).json({ error: `Cannot accept ${fresh?.status} offer`, offer: fresh });
+        return res.status(409).json({ error: `Cannot accept ${fresh?.status} offer`, offer: _publicOfferRow(req.params.id, fresh) });
       }
       await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'ACCEPTED', summary: 'Marked accepted' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-      res.json({ offer });
+      res.json({ offer: _publicOfferRow(req.params.id, offer) });
     } catch (err: any) {
       console.error('hr/offer-letters accept error:', err);
       res.status(500).json({ error: err?.message || 'Accept failed' });
@@ -23586,30 +23713,70 @@ ${data.tenant.name}`;
       );
       if (result && result.changes === 0) {
         const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-        return res.status(409).json({ error: `Cannot decline ${fresh?.status} offer`, offer: fresh });
+        return res.status(409).json({ error: `Cannot decline ${fresh?.status} offer`, offer: _publicOfferRow(req.params.id, fresh) });
       }
       await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'DECLINED', summary: 'Marked declined' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-      res.json({ offer });
+      res.json({ offer: _publicOfferRow(req.params.id, offer) });
     } catch (err: any) {
       console.error('hr/offer-letters decline error:', err);
       res.status(500).json({ error: err?.message || 'Decline failed' });
     }
   });
 
-  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  // Signed copy (name, CTC, signature): encrypted into hr-private and opened
+  // only through GET .../signed-file below (see the note near _HR_ATTACHMENT_COLS).
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-      const url = `/uploads/${req.file.filename}`;
       const db = await getTenantDb(req.params.id);
-      await db.run("UPDATE offer_letters SET signed_pdf_url = ?, updated_at = ? WHERE id = ?",
-        [url, new Date().toISOString(), req.params.offerId]);
+      await _ensureHrAttachmentCols(db);
+      const prior: any = await db.get("SELECT id, signed_pdf_url, signed_storage, signed_file_key FROM offer_letters WHERE id = ?", [req.params.offerId]);
+      if (!prior) return res.status(404).json({ error: 'Offer not found' });
+      const stored = await persistPrivateFile('hr-private', req.params.id, req.file.buffer);
+      try {
+        await db.run(
+          `UPDATE offer_letters SET signed_pdf_url = ?, signed_storage = ?, signed_file_key = ?, signed_file_name = ?, signed_mime_type = ?, signed_migrated_from = NULL, updated_at = ?
+            WHERE id = ?`,
+          [_offerSignedFileRoute(req.params.id, req.params.offerId), stored.storage, stored.key, req.file.originalname || null, req.file.mimetype || null, new Date().toISOString(), req.params.offerId]);
+      } catch (e) {
+        await deletePrivateFile('hr-private', stored.storage, stored.key).catch(() => {});
+        throw e;
+      }
+      // The copy it replaces goes too, private or (saved before) public.
+      if (prior.signed_file_key) await deletePrivateFile('hr-private', prior.signed_storage, prior.signed_file_key).catch(() => {});
+      const oldPublic = _legacyUploadPath(prior.signed_pdf_url);
+      if (oldPublic && fs.existsSync(oldPublic)) { try { fs.unlinkSync(oldPublic); } catch {} }
       await writeObjectAudit(db, req, { objectType: 'OFFER_LETTER', objectId: String(req.params.offerId), action: 'SIGNED_COPY_UPLOADED', summary: 'Signed copy uploaded' });
       const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-      res.json({ offer });
+      res.json({ offer: _publicOfferRow(req.params.id, offer) });
     } catch (err: any) {
       console.error('hr/offer-letters upload-signed error:', err);
       res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  // Opens the signed offer letter: HR_PAYROLL read plus HR Sensitive Data at
+  // View (like /hr/documents/:docId/file). Each opening is written to the HR
+  // sensitive access log (DOCUMENT_OPENED); if it cannot be, nothing is sent.
+  app.get("/api/restaurant/:id/hr/offer-letters/:offerId/signed-file", authenticate, workforceStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      if ((await _hrSensitiveLevel(req)) < 1) return res.status(403).json({ error: 'Opening a signed offer letter needs HR Sensitive Data at View.', code: 'HR_SENSITIVE_REQUIRED' });
+      const db = await getTenantDb(req.params.id);
+      await _ensureHrAttachmentCols(db);
+      const offer: any = await db.get(
+        `SELECT id, offer_number, candidate_name, created_staff_id, signed_pdf_url, signed_storage, signed_file_key, signed_file_name, signed_mime_type
+           FROM offer_letters WHERE id = ?`, [req.params.offerId]);
+      if (!offer || !(offer.signed_file_key || offer.signed_pdf_url)) return res.status(404).json({ error: 'No signed copy on this offer' });
+      const f = await readHrAttachment('OFFER_SIGNED', offer);
+      if (!f) return res.status(404).json({ error: 'The stored file could not be read.' });
+      const logged = await _hrLogSensitive(db, req, offer.created_staff_id || null, 'DOCUMENT_OPENED',
+        `Opened the signed offer letter ${offer.offer_number || offer.id} (${offer.candidate_name || 'candidate'})${req.query.download ? ', downloaded' : ''}`);
+      if (!logged) return res.status(503).json({ error: 'The opening could not be recorded in the access log, so the file was not sent. Try again.' });
+      sendHrAttachment(req, res, f);
+    } catch (err: any) {
+      console.error('hr/offer-letters signed-file error:', err?.message || err);
+      res.status(500).json({ error: 'Failed to open the signed copy' });
     }
   });
 
@@ -23704,7 +23871,7 @@ ${data.tenant.name}`;
       );
       for (const r of rows) {
         const items = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ? ORDER BY expense_date", [r.id]);
-        r.items = items;
+        r.items = items.map((i: any) => _publicExpenseItem(req.params.id, i));
       }
       res.json({ claims: rows });
     } catch (err: any) {
@@ -23732,7 +23899,7 @@ ${data.tenant.name}`;
           `INSERT INTO expense_claim_items (id, claim_id, category, description, amount, expense_date, receipt_url, gst_amount)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [randomUUID(), claim_id, String(i.category || 'OTHER').toUpperCase(), i.description || '',
-            Number(i.amount) || 0, i.expense_date || null, i.receipt_url || null, Number(i.gst_amount) || 0]
+            Number(i.amount) || 0, i.expense_date || null, null, Number(i.gst_amount) || 0]
         );
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
@@ -55993,6 +56160,126 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Move signed offer letters and expense receipts saved before private
+  // storage (29 Sep 2026) ────────────────────────────────────────────────────
+  // Until then they were written unencrypted to public/uploads/<Date.now()-name>
+  // and served to anyone by /uploads/:filename. For each row still pointing at
+  // /uploads/<name>: read the file, encrypt it into hr-private, read the private
+  // copy back and compare byte for byte, repoint the row (<prefix>_storage,
+  // _file_key, _file_name, _mime_type, the signed-in route, _migrated_from =
+  // the old name), and only then delete the plaintext file. A file two rows
+  // point at is deleted only once neither row still needs it. Safe to repeat:
+  // moved rows are skipped, and a plaintext copy left by a failed delete is
+  // removed on the next run. dryRun is the DEFAULT: a live run needs
+  // { "dryRun": false }. Stops after budgetMs (default 60 s) with truncated:
+  // true; run again to continue.
+  app.post("/api/admin/hr-files/migrate", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const dryRun = req.body?.dryRun !== false;
+    const onlyTenant = req.body?.tenantId ? String(req.body.tenantId) : null;
+    const budgetMs = Math.min(Math.max(Number(req.body?.budgetMs) || 60000, 5000), 85000);
+    const started = Date.now();
+    const overBudget = () => Date.now() - started > budgetMs;
+    const zero = () => ({ rows: 0, already_private: 0, to_migrate: 0, migrated: 0, missing: 0, unrecognised: 0, failed: 0, public_copies_removed: 0, public_copies_left: 0 });
+    const report: any = { dryRun, truncated: false, totals: zero(), by_kind: { OFFER_SIGNED: zero(), EXPENSE_RECEIPT: zero() }, shared_files: 0, tenants: [] as any[] };
+    const bump = (t: any, kind: HrAttachmentKind, k: string, detail?: any) => {
+      report.totals[k]++; report.by_kind[kind][k]++; t.counts[k]++;
+      if (detail !== undefined) (t[k === 'failed' ? 'failures' : k] ||= []).push(detail);
+    };
+    try {
+      const tenantIds: string[] = onlyTenant ? [onlyTenant]
+        : (await centralDb.query("SELECT id FROM restaurants ORDER BY id")).map((r: any) => String(r.id));
+      // Pass 1: every row of every tenant, so a file name two rows share
+      // (possible while claims could carry a caller-supplied receipt_url) is
+      // deleted only after the last of them has moved.
+      const work: { tenantId: string; db: any; t: any; rows: any[] }[] = [];
+      const pendingRefs = new Map<string, number>();
+      for (const tenantId of tenantIds) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) continue;
+        let db: any;
+        try { db = await getTenantDb(tenantId); } catch { continue; }
+        const rows: any[] = [];
+        for (const kind of Object.keys(_HR_ATTACHMENT_COLS) as HrAttachmentKind[]) {
+          const { table, prefix: p, urlCol } = _HR_ATTACHMENT_COLS[kind];
+          try {
+            await db.query(`SELECT id FROM ${table} LIMIT 0`);   // only tenants that have the table
+            await _ensureHrAttachmentCols(db);
+            const idCols = kind === 'EXPENSE_RECEIPT' ? 'claim_id, ' : '';
+            const r = await db.query(`SELECT id, ${idCols}${urlCol} AS url, ${p}_file_key AS file_key, ${p}_migrated_from AS migrated_from
+                                        FROM ${table} WHERE ${urlCol} IS NOT NULL OR ${p}_file_key IS NOT NULL`);
+            for (const x of r) rows.push({ ...x, kind });
+          } catch { /* no HR tables on this tenant */ }
+        }
+        if (!rows.length) continue;
+        for (const row of rows) {
+          const legacy = row.file_key ? null : _legacyUploadPath(row.url);
+          if (legacy) pendingRefs.set(legacy, (pendingRefs.get(legacy) || 0) + 1);
+        }
+        work.push({ tenantId, db, rows, t: { tenant: tenantId, counts: zero() } });
+      }
+      report.shared_files = [...pendingRefs.values()].filter(n => n > 1).length;
+      const uploadsDir = path.join(process.cwd(), "public", "uploads");
+      const removePlain = (p: string) => { if (fs.existsSync(p)) fs.unlinkSync(p); };
+
+      // Pass 2: move.
+      for (const { tenantId, db, rows, t } of work) {
+        for (const row of rows) {
+          const kind: HrAttachmentKind = row.kind;
+          const { table, prefix: p, urlCol } = _HR_ATTACHMENT_COLS[kind];
+          bump(t, kind, 'rows');
+          if (row.file_key) {
+            bump(t, kind, 'already_private');
+            const from = String(row.migrated_from || '');
+            if (!/^[\w.\-]+$/.test(from) || from.startsWith('.')) continue;
+            const plain = path.join(uploadsDir, from);
+            if (!fs.existsSync(plain) || (pendingRefs.get(plain) || 0) > 0) continue;
+            // Moved earlier, but the plaintext copy survived a failed delete.
+            if (dryRun || overBudget()) { bump(t, kind, 'public_copies_left'); if (!dryRun) report.truncated = true; continue; }
+            try { removePlain(plain); bump(t, kind, 'public_copies_removed'); }
+            catch (e: any) { bump(t, kind, 'public_copies_left'); bump(t, kind, 'failed', { id: row.id, kind, step: 'delete public copy', error: e?.message || String(e) }); }
+            continue;
+          }
+          const legacy = _legacyUploadPath(row.url);
+          if (!legacy) { bump(t, kind, 'unrecognised', { id: row.id, kind, url: String(row.url || '').slice(0, 80) }); continue; }
+          if (!fs.existsSync(legacy)) { bump(t, kind, 'missing', { id: row.id, kind }); pendingRefs.set(legacy, (pendingRefs.get(legacy) || 1) - 1); continue; }
+          bump(t, kind, 'to_migrate');
+          if (dryRun) continue;
+          if (overBudget()) { report.truncated = true; continue; }
+          let stored: { storage: 'R2' | 'DISK'; key: string } | null = null;
+          try {
+            const bytes = fs.readFileSync(legacy);
+            stored = await persistPrivateFile('hr-private', tenantId, bytes);
+            const back = await readPrivateFile('hr-private', stored.storage, stored.key);
+            if (!back || !back.equals(bytes)) throw new Error('private copy did not read back identical');
+            const name = path.basename(legacy);
+            const mime = _LEGACY_EXT_MIME[path.extname(name).toLowerCase()] || null;
+            const newUrl = kind === 'OFFER_SIGNED' ? _offerSignedFileRoute(tenantId, row.id) : _expenseReceiptRoute(tenantId, row.claim_id, row.id);
+            const upd = await db.run(
+              `UPDATE ${table} SET ${p}_storage = ?, ${p}_file_key = ?, ${p}_file_name = ?, ${p}_mime_type = ?, ${p}_migrated_from = ?, ${urlCol} = ?
+                WHERE id = ? AND ${p}_file_key IS NULL AND ${urlCol} = ?`,
+              [stored.storage, stored.key, name.replace(/^\d{10,}-/, ''), mime, name, newUrl, row.id, row.url]);
+            if (!upd?.changes) throw new Error('row changed during the move (another run or a new upload?)');
+            stored = null;   // the row owns the private copy now
+            bump(t, kind, 'migrated');
+            const left = (pendingRefs.get(legacy) || 1) - 1;
+            pendingRefs.set(legacy, left);
+            if (left > 0) { bump(t, kind, 'public_copies_left'); continue; }   // another row still needs it
+            try { removePlain(legacy); bump(t, kind, 'public_copies_removed'); }
+            catch (e: any) { bump(t, kind, 'public_copies_left'); bump(t, kind, 'failed', { id: row.id, kind, step: 'delete public copy', error: e?.message || String(e) }); }
+          } catch (e: any) {
+            bump(t, kind, 'failed', { id: row.id, kind, step: 'move', error: e?.message || String(e) });
+            if (stored) await deletePrivateFile('hr-private', stored.storage, stored.key).catch(() => {});
+          }
+        }
+        report.tenants.push(t);
+      }
+      report.elapsed_ms = Date.now() - started;
+      res.json(report);
+    } catch (err: any) {
+      console.error('[hr-files migrate]', err);
+      res.status(500).json({ error: err?.message || 'Migration failed', partial: report });
+    }
+  });
+
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
   // Check a room reserved for an EVENT in, without the desk. Used when the event
   // starts and by the hourly job for later nights of a multi-day event.
@@ -69763,8 +70050,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'online-checkin-verification',
+    commit_marker: 'private-hr-files',
     code_features: [
+      'private-hr-files  Security fix from the 29 Sep survey. Signed offer letters (POST /hr/offer-letters/:offerId/upload-signed: candidate name, CTC, signature) and expense receipts (POST /hr/expenses/:claimId/receipt) went through the disk upload to public/uploads with a guessable Date.now() name and were served to anyone by GET /uploads/:filename. Both now use the memory upload and persistPrivateFile(hr-private) (AES-256-GCM); rows keep signed_/receipt_ storage, file_key, file_name, mime_type, migrated_from (added once per tenant by _ensureHrAttachmentCols, and in the db.ts DDL); signed_pdf_url / receipt_url hold the signed-in route. GET /hr/offer-letters/:offerId/signed-file needs HR_PAYROLL read plus HR_SENSITIVE View; GET /hr/expenses/:claimId/items/:itemId/receipt needs HR_PAYROLL read; both send private, no-store, nosniff and write DOCUMENT_OPENED to hr_sensitive_access_log first (_hrLogSensitive now resolves true or false; 503 and no file when the log fails). Every offer and expense response goes through _publicOfferRow / _publicExpenseItem (no storage key), and a receipt_url sent with a new claim (HR or self-service) is ignored, so a row cannot point at another file. Replacing a file deletes the old copy. POST /api/admin/hr-files/migrate (SUPER_ADMIN, dryRun by default, time-budgeted, idempotent) encrypts each legacy /uploads file, reads it back byte for byte, repoints the row and only then deletes the plaintext; a file two rows share is deleted after the last one moves. No screen links these files yet. TC-HRFILE-*.',
       'online-checkin-verification  Security fix from the 29 Sep survey. The public online check-in POST (/api/public/restaurant/:id/hotel/checkin/:bookingId) is keyed by the raw booking id (BK-<ms>-XXXX, printed on confirmations, not a secret) and only checked the phone when the caller chose to send verify_phone, so anyone holding a booking id could overwrite the ID number, email, nationality, state and special requests of any BOOKED booking. Verification is now mandatory: the signed token on the emailed pre-arrival link (?t=, HMAC tenant|booking|expiry, 30 days, CHECKIN_TOKEN_SECRET else JWT_SECRET-derived) or at least the last 4 digits of the phone on file; a booking with no phone can only be saved through the link; 5 wrong phone tries lock that booking for 30 minutes. The page asked for the last 4 digits while the server compared 10, so honest guests were being refused; the server now compares the trailing digits both sides have. Every save writes a ROOM_BOOKING audit row (ONLINE_CHECKIN), replacing an ID number already on file is logged first as ONLINE_CHECKIN_ID_REPLACED with the numbers masked and the save refused if that row cannot be written, blanks never wipe held values, and fields are length-capped. The GET only pre-fills special requests for the link holder. TC-HOTEL-CHECKIN-VERIFY.',
       'private-guest-documents  Security fix from the 29 Sep fit-gap review. Guest ID proofs (guest_documents: passport, Aadhaar, visa from check-in) and the Documents node files on Hotel, Event and Spa bookings (object_documents) were stored unencrypted at a public R2 URL (documents/...) and opened with no sign-in; deleting a document left the file public. New files are AES-256-GCM encrypted (the HR file helper, now persistPrivateFile with an area: hr-private or private-docs) and rows keep storage + file_key; file_url is the signed-in route GET .../documents/:docId/file (hotel: hotelStaff + HOTEL_BOOKINGS read; events: EV_READ_BOOKINGS; spa: SPA_APPOINTMENTS), which decrypts and sends the file with Cache-Control private, no-store, and writes DOCUMENT_VIEWED to the booking Audit log first (writeObjectAudit now resolves true or false; if the row cannot be written the file is not sent, 503). List routes never return a storage URL. Legacy rows still open through the same route (read from R2 by key). POST /api/admin/private-documents/migrate (SUPER_ADMIN, dryRun by default) moves every legacy file into private-docs, reads it back byte for byte, repoints the row (migrated_from keeps the old key) and only then deletes the public object; objects no row points at are kept encrypted in orphaned_documents before deletion; idempotent, time-budgeted. Also fixed GET /uploads/:filename path traversal: Express decodes %2F, so documents%2F<file> or %2E%2E%2F reached subfolders and public/; it now accepts one plain [\w.-] name. Frontend: GuestDocumentsWidget, the booking document lightbox and ObjectDetail DocumentsView fetch with the token into a blob URL (src/privateFile.ts); ID thumbnails became typed tiles so an ID image is fetched, and logged, only when opened. TC-DOC-PRIVATE-*.',
       'payroll-guard-tables-sync-conflict-dates  Three faults found while seeding a new tenant. (1) An uncomputed payroll run could be approved, locked and marked paid with no employees and zero pay, and one run per month is allowed, so the month was blocked. Approve now refuses a run with no payslips (409 RUN_NOT_COMPUTED), and a never-computed run can be deleted whatever its status (it posted nothing, the payroll journal skips a zero run); the Payroll screen shows Delete empty run for it. (2) tables/sync inserted the tables and then returned 500, because its QR backfill had a literal containing a question mark that the tenant DB rewrote into a placeholder; the prefix is now a parameter. (3) Room-conflict and room-hold messages printed pg DATE objects as Mon Sep 28 2026 00:00:00 GMT; they now read 28-Sep-2026 via _humanDate.',

@@ -3208,7 +3208,12 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       description   TEXT,
       amount        NUMERIC DEFAULT 0,
       expense_date  DATE,
-      receipt_url   TEXT,                                  -- /uploads/<file> from multer
+      receipt_url   TEXT,                                  -- the signed-in receipt route; before 29 Sep 2026 /uploads/<file>
+      receipt_storage TEXT,                                -- receipt_* columns: private encrypted copy (see _HR_ATTACHMENT_COLS in server.ts)
+      receipt_file_key TEXT,
+      receipt_file_name TEXT,
+      receipt_mime_type TEXT,
+      receipt_migrated_from TEXT,
       gst_amount    NUMERIC DEFAULT 0,
       created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -3242,7 +3247,12 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       joining_date        DATE,
       template_id         TEXT,
       pdf_url             TEXT,
-      signed_pdf_url      TEXT,
+      signed_pdf_url      TEXT,                             -- the signed-in signed-file route; before 29 Sep 2026 /uploads/<file>
+      signed_storage      TEXT,                             -- signed_* columns: private encrypted copy (see _HR_ATTACHMENT_COLS in server.ts)
+      signed_file_key     TEXT,
+      signed_file_name    TEXT,
+      signed_mime_type    TEXT,
+      signed_migrated_from TEXT,
       status              TEXT DEFAULT 'DRAFT',             -- DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED
       sent_at             TIMESTAMP,
       accepted_at         TIMESTAMP,
