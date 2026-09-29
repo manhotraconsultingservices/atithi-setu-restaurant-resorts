@@ -93,7 +93,7 @@ import { sealSecret, openSecret, secretKeySource, needsReseal } from "./paymentS
 import { setWhatsAppPlatformConfig, whatsAppCreds } from "./whatsappConfig.ts";
 import multer from "multer";
 import cron from "node-cron";
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 // ── Multi-platform delivery integration ──────────────────────────────────
 import {
@@ -291,39 +291,89 @@ function getR2Client(): S3Client {
 
 const useR2ForMenuImages = () => process.env.UPLOAD_BACKEND === "r2";
 
-// ── Generic booking documents (PMS / Events / Spa "Documents" tree node) ─────
-// Staff can attach any file (photo, PDF, contract, ID scan, ...) to a Hotel
-// room booking, an Event booking, or a Spa appointment from that object's
-// ObjectDetail tree menu — not just the ID-proof-specific flow the hotel
-// check-in wizard already had (guest_documents, kept as-is: compliance-
-// sensitive, auto-locks at check-in). Same storage convention (R2 under
-// documents/ or local disk uploads/documents) as the existing hotel route,
-// factored out so Events and Spa don't duplicate it. One shared table across
-// all three object types (mirrors how object_audit_log is one shared table
-// read through different per-module routes) — object-scoped, not booking-
-// table-scoped, so it needs no per-module migration.
-async function persistObjectDocumentFile(tenantId: string, objectType: string, objectId: string, file: Express.Multer.File): Promise<string> {
-  if (useR2ForMenuImages()) {
-    const bucket = process.env.R2_BUCKET;
-    const baseUrl = process.env.R2_PUBLIC_BASE_URL;
-    if (!bucket || !baseUrl) throw new Error("R2 misconfigured (R2_BUCKET / R2_PUBLIC_BASE_URL)");
-    const ext = (file.originalname.match(/\.[a-zA-Z0-9]+$/)?.[0] || '').toLowerCase();
-    const key = `documents/${tenantId}/${objectType}/${objectId}/${randomUUID()}${ext}`;
-    await getR2Client().send(new PutObjectCommand({
-      Bucket: bucket, Key: key, Body: file.buffer,
-      ContentType: file.mimetype || 'application/octet-stream',
-      CacheControl: 'private, max-age=3600',
-    }));
-    return `${baseUrl.replace(/\/$/, '')}/${key}`;
-  }
-  const uploadDir = path.join(process.cwd(), "public", "uploads", "documents");
-  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-  const safeName = file.originalname.replace(/[^\w.\-]+/g, '_');
-  const filename = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
-  fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
-  return `/uploads/documents/${filename}`;
+// ── Booking documents (guest ID proofs + the "Documents" tree node) ─────────
+// Two tables hold files staff attach to a booking: guest_documents (hotel ID
+// proofs from the check-in wizard: passport, Aadhaar, visa; auto-locks at
+// check-in) and object_documents (the Documents node on Hotel, Event and Spa
+// bookings; one shared table keyed by object_type + object_id, like
+// object_audit_log). Both hold identity or health papers, so since 29 Sep 2026
+// new files are encrypted into the private-docs area (persistPrivateFile) and
+// the row keeps storage + file_key. file_url is the signed-in route the file
+// opens through, never a storage URL. Rows saved before then point at a public
+// R2 object under documents/ (or a disk file under uploads/documents); the
+// file route still reads those, and POST /api/admin/private-documents/migrate
+// moves them into private storage and deletes the public copy.
+type BookingDocKind = 'ROOM_BOOKING' | 'EVENT_BOOKING' | 'SPA_APPOINTMENT';
+/** The signed-in route a booking document opens through. */
+function _bookingDocFileRoute(tenantId: string, kind: BookingDocKind, objectId: string, docId: string): string {
+  const e = encodeURIComponent;
+  const base = kind === 'ROOM_BOOKING' ? `hotel/bookings/${e(objectId)}`
+    : kind === 'EVENT_BOOKING' ? `events/bookings/${e(objectId)}`
+    : `spa/appointments/${e(objectId)}`;
+  return `/api/restaurant/${e(tenantId)}/${base}/documents/${e(docId)}/file`;
 }
+/** Where a document saved before private storage lives; null when file_url is not one of ours. */
+function _legacyDocLocation(fileUrl: any): { kind: 'R2'; key: string } | { kind: 'DISK'; path: string } | null {
+  const u = String(fileUrl || '');
+  // Any host: R2_PUBLIC_BASE_URL may have changed since the row was written.
+  const m = u.match(/^https?:\/\/[^/]+\/(documents\/[A-Za-z0-9_\-./]+)$/);
+  if (m && !m[1].includes('..')) return { kind: 'R2', key: m[1] };
+  const d = u.match(/^\/uploads\/documents\/([\w.\-]+)$/);
+  if (d && d[1] !== '.' && d[1] !== '..') return { kind: 'DISK', path: path.join(process.cwd(), "public", "uploads", "documents", d[1]) };
+  return null;
+}
+async function _readLegacyDocument(fileUrl: any): Promise<Buffer | null> {
+  const loc = _legacyDocLocation(fileUrl);
+  if (!loc) return null;
+  if (loc.kind === 'R2') return _readR2Object(loc.key);
+  return fs.existsSync(loc.path) ? fs.readFileSync(loc.path) : null;
+}
+async function _deleteLegacyDocument(fileUrl: any): Promise<void> {
+  const loc = _legacyDocLocation(fileUrl);
+  if (!loc) return;
+  if (loc.kind === 'R2') {
+    const bucket = process.env.R2_BUCKET;
+    if (!bucket) throw new Error("R2_BUCKET is not set");
+    await getR2Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: loc.key }));
+  } else if (fs.existsSync(loc.path)) fs.unlinkSync(loc.path);
+}
+/** The document's original bytes: private files decrypted, legacy files read from where they were saved. */
+async function readBookingDocument(doc: any): Promise<Buffer | null> {
+  if (doc?.file_key) return readPrivateFile('private-docs', doc.storage, doc.file_key);
+  return _readLegacyDocument(doc?.file_url);
+}
+/** Sends a booking document to a signed-in caller; false when the file cannot be read. */
+async function sendBookingDocument(req: any, res: Response, doc: any): Promise<boolean> {
+  const bytes = await readBookingDocument(doc);
+  if (!bytes) return false;
+  const mime = String(doc.mime_type || '').toLowerCase();
+  res.setHeader('Content-Type', GENERAL_ALLOWED_MIMES.has(mime) ? mime : 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${req.query?.download ? 'attachment' : 'inline'}; filename="${safeDownloadName(doc.file_name)}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(bytes);
+  return true;
+}
+/** List rows as the browser sees them: file_url is the signed-in route, storage details stay on the server. */
+function _publicBookingDocRow(tenantId: string, kind: BookingDocKind, objectId: string, row: any): any {
+  const { storage, file_key, migrated_from, ...rest } = row || {};
+  return { ...rest, file_url: _bookingDocFileRoute(tenantId, kind, objectId, row.id), is_private: !!file_key };
+}
+// Once per tenant per process (keyed on the cached tenant db), like
+// _ensureOrderCols; marked done only when the ALTERs worked, so a tenant whose
+// table is created later by the self-heal still gets the columns.
+const _guestDocColsEnsured = new WeakSet<any>();
+async function _ensureGuestDocPrivateCols(db: any): Promise<void> {
+  if (_guestDocColsEnsured.has(db)) return;
+  let ok = true;
+  for (const c of ["storage TEXT", "file_key TEXT", "migrated_from TEXT"]) {
+    ok = (await db.exec(`ALTER TABLE guest_documents ADD COLUMN IF NOT EXISTS ${c}`).then(() => true).catch(() => false)) && ok;
+  }
+  if (ok) _guestDocColsEnsured.add(db);
+}
+const _objectDocsEnsured = new WeakSet<any>();
 async function ensureObjectDocumentsTable(tenantDb: DbInterface): Promise<void> {
+  if (_objectDocsEnsured.has(tenantDb)) return;
   await tenantDb.exec(`
     CREATE TABLE IF NOT EXISTS object_documents (
       id           TEXT PRIMARY KEY,
@@ -336,24 +386,35 @@ async function ensureObjectDocumentsTable(tenantDb: DbInterface): Promise<void> 
       label        TEXT,
       uploaded_by       TEXT,
       uploaded_by_name  TEXT,
+      storage      TEXT,
+      file_key     TEXT,
+      migrated_from TEXT,
       created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_object_documents ON object_documents(object_type, object_id, created_at DESC);
   `);
+  for (const c of ["storage TEXT", "file_key TEXT", "migrated_from TEXT"]) {
+    await tenantDb.exec(`ALTER TABLE object_documents ADD COLUMN IF NOT EXISTS ${c}`);
+  }
+  _objectDocsEnsured.add(tenantDb);
 }
-
-// ── Private HR files (HRMS-R1C) ──────────────────────────────────────────────
-// Employee documents are encrypted before they are stored (encryptFileBuffer)
-// and read back only through the signed-in HR document route. On R2 they go
-// under hr-private/, a key never sent to a browser; the bucket's public domain
-// would serve only ciphertext. On disk they sit in hr-private/ inside the
-// persisted uploads volume, which /uploads/:filename cannot reach (one path
-// segment). HR_PRIVATE_DIR moves the disk folder.
-const _HR_PRIVATE_KEY_RE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f-]{36}\.bin$/;
-function _hrPrivateDiskDir(): string {
-  return process.env.HR_PRIVATE_DIR || path.join(process.cwd(), "public", "uploads", "hr-private");
+// ── Private encrypted files (HRMS-R1C, then guest ID documents) ─────────────
+// Files holding identity or health data are encrypted before they are stored
+// (encryptFileBuffer, AES-256-GCM) and read back only through a signed-in
+// route that checks the owning record's permission. Each kind has its own
+// area: hr-private for employee documents, private-docs for guest ID proofs
+// and booking attachments. On R2 an area is a key prefix never sent to a
+// browser; the bucket's public domain would serve only ciphertext. On disk
+// the area is a folder inside the persisted uploads volume, which
+// /uploads/:filename cannot reach (one path segment). HR_PRIVATE_DIR and
+// PRIVATE_DOCS_DIR move the disk folders.
+type PrivateFileArea = 'hr-private' | 'private-docs';
+const _PRIVATE_FILE_KEY_RE = /^[A-Za-z0-9_-]{1,64}\/[0-9a-f-]{36}\.bin$/;
+function _privateFileDiskDir(area: PrivateFileArea): string {
+  const override = area === 'hr-private' ? process.env.HR_PRIVATE_DIR : process.env.PRIVATE_DOCS_DIR;
+  return override || path.join(process.cwd(), "public", "uploads", area);
 }
-async function persistPrivateHrFile(tenantId: string, plain: Buffer): Promise<{ storage: 'R2' | 'DISK'; key: string }> {
+async function persistPrivateFile(area: PrivateFileArea, tenantId: string, plain: Buffer): Promise<{ storage: 'R2' | 'DISK'; key: string }> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new Error("Invalid tenant id for file storage");
   const key = `${tenantId}/${randomUUID()}.bin`;
   const body = encryptFileBuffer(plain);
@@ -361,55 +422,59 @@ async function persistPrivateHrFile(tenantId: string, plain: Buffer): Promise<{ 
     const bucket = process.env.R2_BUCKET;
     if (!bucket) throw new Error("R2 is enabled but R2_BUCKET is not set");
     await getR2Client().send(new PutObjectCommand({
-      Bucket: bucket, Key: `hr-private/${key}`, Body: body,
+      Bucket: bucket, Key: `${area}/${key}`, Body: body,
       ContentType: 'application/octet-stream', CacheControl: 'private, no-store',
     }));
     return { storage: 'R2', key };
   }
-  const dir = path.join(_hrPrivateDiskDir(), tenantId);
+  const dir = path.join(_privateFileDiskDir(area), tenantId);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(_hrPrivateDiskDir(), key), body);
+  fs.writeFileSync(path.join(_privateFileDiskDir(area), key), body);
   return { storage: 'DISK', key };
 }
-/** The original bytes, or null when the file is missing or cannot be decrypted. */
-async function readPrivateHrFile(storage: string, key: string): Promise<Buffer | null> {
-  if (!_HR_PRIVATE_KEY_RE.test(String(key || ''))) return null;
-  let stored: Buffer;
-  if (storage === 'R2') {
-    const bucket = process.env.R2_BUCKET;
-    if (!bucket) throw new Error("R2_BUCKET is not set");
-    let out: any;
-    try {
-      out = await getR2Client().send(new GetObjectCommand({ Bucket: bucket, Key: `hr-private/${key}` }));
-    } catch (e: any) {
-      if (e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
-      throw e;
-    }
-    const bodyStream: any = out?.Body;
-    if (bodyStream && typeof bodyStream.transformToByteArray === 'function') {
-      stored = Buffer.from(await bodyStream.transformToByteArray());
-    } else {
-      const chunks: Buffer[] = [];
-      for await (const chunk of bodyStream) chunks.push(Buffer.from(chunk));
-      stored = Buffer.concat(chunks);
-    }
-  } else {
-    const p = path.join(_hrPrivateDiskDir(), key);
-    if (!fs.existsSync(p)) return null;
-    stored = fs.readFileSync(p);
+async function _readR2Object(key: string): Promise<Buffer | null> {
+  const bucket = process.env.R2_BUCKET;
+  if (!bucket) throw new Error("R2_BUCKET is not set");
+  let out: any;
+  try {
+    out = await getR2Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  } catch (e: any) {
+    if (e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404) return null;
+    throw e;
   }
-  return decryptFileBuffer(stored);
+  const bodyStream: any = out?.Body;
+  if (bodyStream && typeof bodyStream.transformToByteArray === 'function') {
+    return Buffer.from(await bodyStream.transformToByteArray());
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of bodyStream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
 }
-async function deletePrivateHrFile(storage: string, key: string): Promise<void> {
-  if (!_HR_PRIVATE_KEY_RE.test(String(key || ''))) return;
+/** The original bytes, or null when the file is missing or cannot be decrypted. */
+async function readPrivateFile(area: PrivateFileArea, storage: string, key: string): Promise<Buffer | null> {
+  if (!_PRIVATE_FILE_KEY_RE.test(String(key || ''))) return null;
+  let stored: Buffer | null;
+  if (storage === 'R2') {
+    stored = await _readR2Object(`${area}/${key}`);
+  } else {
+    const p = path.join(_privateFileDiskDir(area), key);
+    stored = fs.existsSync(p) ? fs.readFileSync(p) : null;
+  }
+  return stored ? decryptFileBuffer(stored) : null;
+}
+async function deletePrivateFile(area: PrivateFileArea, storage: string, key: string): Promise<void> {
+  if (!_PRIVATE_FILE_KEY_RE.test(String(key || ''))) return;
   if (storage === 'R2') {
     const bucket = process.env.R2_BUCKET;
-    if (bucket) await getR2Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: `hr-private/${key}` }));
+    if (bucket) await getR2Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: `${area}/${key}` }));
     return;
   }
-  const p = path.join(_hrPrivateDiskDir(), key);
+  const p = path.join(_privateFileDiskDir(area), key);
   if (fs.existsSync(p)) fs.unlinkSync(p);
 }
+const persistPrivateHrFile = (tenantId: string, plain: Buffer) => persistPrivateFile('hr-private', tenantId, plain);
+const readPrivateHrFile = (storage: string, key: string) => readPrivateFile('hr-private', storage, key);
+const deletePrivateHrFile = (storage: string, key: string) => deletePrivateFile('hr-private', storage, key);
 
 /**
  * Persists an uploaded menu image either to Cloudflare R2 or to the local
@@ -1412,7 +1477,7 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE TABLE IF NOT EXISTS guest_documents (
       id           TEXT PRIMARY KEY,
       booking_id   TEXT NOT NULL,
-      file_url     TEXT NOT NULL,         -- R2 https URL or /uploads/<filename>
+      file_url     TEXT NOT NULL,         -- the signed-in /file route; before 29 Sep 2026 a public R2 URL (storage, file_key, migrated_from are added by _ensureGuestDocPrivateCols)
       file_name    TEXT,                  -- original filename (for download UX)
       mime_type    TEXT,
       size_bytes   INT,
@@ -33646,12 +33711,14 @@ ${data.tenant.name}`;
   // ── Object audit log (per the CLAUDE.md "Object Detail" convention) ─────────
   // Append-only trail feeding the "Audit History" tree node of Event bookings,
   // quotations, and folios. Defensive CREATE so any tenant gets it lazily; a
-  // failed write never breaks the underlying business action.
+  // failed write never breaks the underlying business action. Resolves true
+  // when the row was written, for callers that must not proceed unlogged
+  // (opening a guest ID document).
   const writeObjectAudit = async (
     tenantDb: DbInterface,
     req: AuthRequest | null,
     a: { objectType: string; objectId: string; action: string; summary?: string; before?: any; after?: any }
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     try {
       await tenantDb.exec(`
         CREATE TABLE IF NOT EXISTS object_audit_log (
@@ -33687,8 +33754,10 @@ ${data.tenant.name}`;
         [mkEventId('OAL'), a.objectType, a.objectId, a.action, req?.user?.email || null, req?.user?.role || null, actorName,
          a.summary || null, a.before ? JSON.stringify(a.before) : null, a.after ? JSON.stringify(a.after) : null]
       );
+      return true;
     } catch (err: any) {
       console.error('[object_audit] write failed:', err?.message || err);
+      return false;
     }
   };
 
@@ -37889,7 +37958,10 @@ ${data.tenant.name}`;
   });
 
   // ── Documents — staff can attach any file to an event booking ────────────
-  // (object_documents is the shared table — see persistObjectDocumentFile).
+  // (object_documents is the shared table. Files are encrypted into private
+  // storage and open only through the signed-in /file route below, which
+  // writes DOCUMENT_VIEWED to the audit log; see the booking documents note
+  // near persistPrivateFile.)
   app.get("/api/restaurant/:id/events/bookings/:bid/documents", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -37897,12 +37969,26 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       await ensureObjectDocumentsTable(db);
       const rows = await db.query(
-        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at
+        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at, storage, file_key
            FROM object_documents WHERE object_type = 'EVENT_BOOKING' AND object_id = ? ORDER BY created_at DESC`,
         [req.params.bid]
       );
-      res.json(rows);
+      res.json(rows.map((r: any) => _publicBookingDocRow(req.params.id, 'EVENT_BOOKING', req.params.bid, r)));
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch documents" }); }
+  });
+
+  app.get("/api/restaurant/:id/events/bookings/:bid/documents/:docId/file", authenticate, eventsStaff, requireEventsAny(EV_READ_BOOKINGS), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureObjectDocumentsTable(db);
+      const doc: any = await db.get("SELECT id, file_url, file_name, mime_type, label, storage, file_key FROM object_documents WHERE id = ? AND object_type = 'EVENT_BOOKING' AND object_id = ?", [req.params.docId, req.params.bid]);
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      const logged = await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'DOCUMENT_VIEWED', summary: `Viewed document "${doc.label || doc.file_name || doc.id}"${req.query.download ? ' (downloaded)' : ''}`, after: { document_id: doc.id } });
+      if (!logged) return res.status(503).json({ error: "The view could not be recorded in the audit log, so the document was not opened. Try again." });
+      if (!(await sendBookingDocument(req, res, doc))) return res.status(404).json({ error: "The stored file could not be read." });
+    } catch (err: any) { res.status(500).json({ error: "Failed to open the document" }); }
   });
 
   app.post("/api/restaurant/:id/events/bookings/:bid/documents", authenticate, eventsStaff, requireTabAction('EVENTS_BOOKINGS', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
@@ -37914,19 +38000,20 @@ ${data.tenant.name}`;
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name 'file' expected)" });
       await ensureObjectDocumentsTable(db);
-      const fileUrl = await persistObjectDocumentFile(req.params.id, 'EVENT_BOOKING', req.params.bid, req.file);
+      const stored = await persistPrivateFile('private-docs', req.params.id, req.file.buffer);
       const docId = mkEventId('DOC');
+      const fileUrl = _bookingDocFileRoute(req.params.id, 'EVENT_BOOKING', req.params.bid, docId);
       const uploaderName = req.user?.id ? (await db.get("SELECT name FROM attendance_staff WHERE id = ?", [req.user.id]).catch(() => null))?.name : null;
       await db.run(
-        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name)
-         VALUES (?, 'EVENT_BOOKING', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, storage, file_key)
+         VALUES (?, 'EVENT_BOOKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [docId, req.params.bid, fileUrl, req.file.originalname || null, req.file.mimetype || null, req.file.size || null,
-         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null]
+         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null, stored.storage, stored.key]
       );
       const summary = `Added document "${req.body?.label || req.file.originalname || docId}"`;
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'DOCUMENT_ADDED', summary, after: { file_name: req.file.originalname, label: req.body?.label || null } });
       const row = await db.get(`SELECT * FROM object_documents WHERE id = ?`, [docId]);
-      res.status(201).json(row);
+      res.status(201).json(_publicBookingDocRow(req.params.id, 'EVENT_BOOKING', req.params.bid, row));
     } catch (err: any) {
       console.error('Event document upload failed:', err);
       res.status(500).json({ error: err?.message || "Failed to upload document" });
@@ -39566,7 +39653,10 @@ ${data.tenant.name}`;
   });
 
   // ── Documents — staff can attach any file to a spa appointment ───────────
-  // (object_documents is the shared table — see persistObjectDocumentFile).
+  // (object_documents is the shared table. Files are encrypted into private
+  // storage and open only through the signed-in /file route below, which
+  // writes DOCUMENT_VIEWED to the audit log; see the booking documents note
+  // near persistPrivateFile.)
   app.get("/api/restaurant/:id/spa/appointments/:aid/documents", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -39574,12 +39664,26 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       await ensureObjectDocumentsTable(db);
       const rows = await db.query(
-        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at
+        `SELECT id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, created_at, storage, file_key
            FROM object_documents WHERE object_type = 'SPA_APPOINTMENT' AND object_id = ? ORDER BY created_at DESC`,
         [req.params.aid]
       );
-      res.json(rows);
+      res.json(rows.map((r: any) => _publicBookingDocRow(req.params.id, 'SPA_APPOINTMENT', req.params.aid, r)));
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch documents" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/appointments/:aid/documents/:docId/file", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await ensureObjectDocumentsTable(db);
+      const doc: any = await db.get("SELECT id, file_url, file_name, mime_type, label, storage, file_key FROM object_documents WHERE id = ? AND object_type = 'SPA_APPOINTMENT' AND object_id = ?", [req.params.docId, req.params.aid]);
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      const logged = await writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'DOCUMENT_VIEWED', summary: `Viewed document "${doc.label || doc.file_name || doc.id}"${req.query.download ? ' (downloaded)' : ''}`, after: { document_id: doc.id } });
+      if (!logged) return res.status(503).json({ error: "The view could not be recorded in the audit log, so the document was not opened. Try again." });
+      if (!(await sendBookingDocument(req, res, doc))) return res.status(404).json({ error: "The stored file could not be read." });
+    } catch (err: any) { res.status(500).json({ error: "Failed to open the document" }); }
   });
 
   app.post("/api/restaurant/:id/spa/appointments/:aid/documents", authenticate, spaStaff, requireTabAction('SPA_APPOINTMENTS', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
@@ -39591,19 +39695,20 @@ ${data.tenant.name}`;
       if (!a) return res.status(404).json({ error: "Appointment not found" });
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name 'file' expected)" });
       await ensureObjectDocumentsTable(db);
-      const fileUrl = await persistObjectDocumentFile(req.params.id, 'SPA_APPOINTMENT', req.params.aid, req.file);
+      const stored = await persistPrivateFile('private-docs', req.params.id, req.file.buffer);
       const docId = mkEventId('DOC');
+      const fileUrl = _bookingDocFileRoute(req.params.id, 'SPA_APPOINTMENT', req.params.aid, docId);
       const uploaderName = req.user?.id ? (await db.get("SELECT name FROM attendance_staff WHERE id = ?", [req.user.id]).catch(() => null))?.name : null;
       await db.run(
-        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name)
-         VALUES (?, 'SPA_APPOINTMENT', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO object_documents (id, object_type, object_id, file_url, file_name, mime_type, size_bytes, label, uploaded_by, uploaded_by_name, storage, file_key)
+         VALUES (?, 'SPA_APPOINTMENT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [docId, req.params.aid, fileUrl, req.file.originalname || null, req.file.mimetype || null, req.file.size || null,
-         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null]
+         req.body?.label || null, req.user?.email || req.user?.id || null, uploaderName || req.user?.email || null, stored.storage, stored.key]
       );
       const summary = `Added document "${req.body?.label || req.file.originalname || docId}"`;
       await writeObjectAudit(db, req, { objectType: 'SPA_APPOINTMENT', objectId: req.params.aid, action: 'DOCUMENT_ADDED', summary, after: { file_name: req.file.originalname, label: req.body?.label || null } });
       const row = await db.get(`SELECT * FROM object_documents WHERE id = ?`, [docId]);
-      res.status(201).json(row);
+      res.status(201).json(_publicBookingDocRow(req.params.id, 'SPA_APPOINTMENT', req.params.aid, row));
     } catch (err: any) {
       console.error('Spa document upload failed:', err);
       res.status(500).json({ error: err?.message || "Failed to upload document" });
@@ -55448,17 +55553,49 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      await _ensureGuestDocPrivateCols(tenantDb);
       const rows = await tenantDb.query(
         `SELECT id, booking_id, file_url, file_name, mime_type, size_bytes,
-                label, doc_type, uploaded_by, uploaded_at, locked_at
+                label, doc_type, uploaded_by, uploaded_at, locked_at, storage, file_key
            FROM guest_documents
           WHERE booking_id = ?
           ORDER BY uploaded_at DESC`,
         [req.params.bookingId]
       );
-      res.json(rows);
+      // file_url is rewritten to the signed-in file route, so a stored
+      // (possibly still public) storage URL never reaches the browser.
+      res.json(rows.map((r: any) => _publicBookingDocRow(req.params.id, 'ROOM_BOOKING', req.params.bookingId, r)));
     } catch {
       res.status(500).json({ error: "Failed to fetch documents" });
+    }
+  });
+
+  // Opens one guest document: decrypted and sent only to a signed-in caller
+  // with the booking's own read permission, and every opening is written to
+  // the booking's Audit log (DOCUMENT_VIEWED). If the audit row cannot be
+  // written the file is not sent.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/documents/:docId/file", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensureGuestDocPrivateCols(tenantDb);
+      const doc: any = await tenantDb.get(
+        `SELECT id, file_url, file_name, mime_type, label, doc_type, storage, file_key
+           FROM guest_documents WHERE id = ? AND booking_id = ?`,
+        [req.params.docId, req.params.bookingId]
+      );
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      const logged = await writeObjectAudit(tenantDb, req, {
+        objectType: 'ROOM_BOOKING', objectId: req.params.bookingId, action: 'DOCUMENT_VIEWED',
+        summary: `Viewed document "${doc.label || doc.file_name || doc.id}"${req.query.download ? ' (downloaded)' : ''}`,
+        after: { document_id: doc.id, doc_type: doc.doc_type || null },
+      });
+      if (!logged) return res.status(503).json({ error: "The view could not be recorded in the audit log, so the document was not opened. Try again." });
+      if (!(await sendBookingDocument(req, res, doc))) return res.status(404).json({ error: "The stored file could not be read." });
+    } catch (err: any) {
+      console.error('Guest document open failed:', err?.message || err);
+      res.status(500).json({ error: "Failed to open the document" });
     }
   });
 
@@ -55496,30 +55633,10 @@ ${data.tenant.name}`;
           return res.status(413).json({ error: "File too large (max 10 MB)." });
         }
 
-        // Persist to R2 or local disk via the existing helper, but under
-        // a "documents/" prefix so it's distinct from menu images.
-        let fileUrl: string;
-        if (useR2ForMenuImages()) {
-          const bucket = process.env.R2_BUCKET;
-          const baseUrl = process.env.R2_PUBLIC_BASE_URL;
-          if (!bucket || !baseUrl) throw new Error("R2 misconfigured (R2_BUCKET / R2_PUBLIC_BASE_URL)");
-          const ext = (req.file.originalname.match(/\.[a-zA-Z0-9]+$/)?.[0] || '').toLowerCase();
-          const key = `documents/${req.params.id}/${req.params.bookingId}/${randomUUID()}${ext}`;
-          await getR2Client().send(new PutObjectCommand({
-            Bucket: bucket, Key: key,
-            Body: req.file.buffer,
-            ContentType: req.file.mimetype || 'application/octet-stream',
-            CacheControl: 'private, max-age=3600',
-          }));
-          fileUrl = `${baseUrl.replace(/\/$/, '')}/${key}`;
-        } else {
-          const uploadDir = path.join(process.cwd(), "public", "uploads", "documents");
-          if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-          const safeName = req.file.originalname.replace(/[^\w.\-]+/g, '_');
-          const filename = `${Date.now()}-${safeName}`;
-          fs.writeFileSync(path.join(uploadDir, filename), req.file.buffer);
-          fileUrl = `/uploads/documents/${filename}`;
-        }
+        // Encrypted into private storage (see the booking documents note
+        // near persistPrivateFile); the row's file_url is the signed-in route.
+        await _ensureGuestDocPrivateCols(tenantDb);
+        const stored = await persistPrivateFile('private-docs', req.params.id, req.file.buffer);
 
         const docId = `DOC-${Date.now()}-${randomUUID().slice(0, 8)}`;
         // Auto-lock if booking is already CHECKED_IN / CHECKED_OUT — see header comment.
@@ -55528,16 +55645,17 @@ ${data.tenant.name}`;
 
         await tenantDb.run(
           `INSERT INTO guest_documents
-             (id, booking_id, file_url, file_name, mime_type, size_bytes, label, doc_type, uploaded_by, locked_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [docId, req.params.bookingId, fileUrl,
+             (id, booking_id, file_url, file_name, mime_type, size_bytes, label, doc_type, uploaded_by, locked_at, storage, file_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [docId, req.params.bookingId, _bookingDocFileRoute(req.params.id, 'ROOM_BOOKING', req.params.bookingId, docId),
            req.file.originalname || null,
            req.file.mimetype || null,
            req.file.size || null,
            req.body?.label || null,
            req.body?.doc_type || null,
            req.user?.id || null,
-           lockedAt]
+           lockedAt,
+           stored.storage, stored.key]
         );
         const row = await tenantDb.get(`SELECT * FROM guest_documents WHERE id = ?`, [docId]);
         // Booking-level audit — "who added the document, and when" (the
@@ -55548,7 +55666,7 @@ ${data.tenant.name}`;
           summary: `Added document "${req.body?.label || req.file.originalname || docId}"`,
           after: { file_name: req.file.originalname, label: req.body?.label || null, doc_type: req.body?.doc_type || null },
         });
-        res.status(201).json(row);
+        res.status(201).json(_publicBookingDocRow(req.params.id, 'ROOM_BOOKING', req.params.bookingId, row));
       } catch (err: any) {
         console.error('Document upload failed:', err);
         res.status(500).json({ error: err?.message || "Failed to upload document" });
@@ -55592,6 +55710,183 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete document" });
+    }
+  });
+
+  // ── Move booking documents saved before private storage (29 Sep 2026) ──────
+  // Until then guest ID proofs (guest_documents) and Hotel/Event/Spa booking
+  // attachments (object_documents) were written unencrypted to a public R2
+  // URL under documents/ (or disk uploads/documents). This moves each one:
+  // read the public copy, encrypt it into private-docs, read the private copy
+  // back and compare byte for byte, point the row at it (storage, file_key,
+  // file_url = the signed-in route, migrated_from = the old key), and only then
+  // delete the public copy. Objects under documents/<tenant>/ that no row
+  // points at (files of documents staff removed; the DELETE routes never
+  // deleted the file) are kept encrypted in that tenant's orphaned_documents
+  // table before the public copy goes. Nothing is deleted that has not been
+  // stored privately and read back first. Safe to repeat: migrated rows are
+  // skipped, and a public copy left behind by a failed delete is removed on the
+  // next run. dryRun is the DEFAULT: a live run needs { "dryRun": false }.
+  // Stops after budgetMs (default 60 s, below the proxy timeout) and reports
+  // truncated: true; run again to continue.
+  app.post("/api/admin/private-documents/migrate", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const dryRun = req.body?.dryRun !== false;
+    const onlyTenant = req.body?.tenantId ? String(req.body.tenantId) : null;
+    const budgetMs = Math.min(Math.max(Number(req.body?.budgetMs) || 60000, 5000), 85000);
+    const started = Date.now();
+    const overBudget = () => Date.now() - started > budgetMs;
+    const bucket = process.env.R2_BUCKET;
+    const r2 = useR2ForMenuImages() && !!bucket;
+    const report: any = {
+      dryRun, storage: r2 ? 'R2' : 'DISK', truncated: false,
+      totals: { documents: 0, already_private: 0, to_migrate: 0, migrated: 0, missing: 0, failed: 0, orphans: 0, orphans_secured: 0, public_copies_removed: 0, public_copies_left: 0 },
+      tenants: [] as any[], public_objects_listed: 0, unknown_tenant_objects: 0, unknown_tenant_prefixes: [] as string[], disk_files_remaining: 0,
+    };
+    try {
+      // Every public object under documents/, listed once.
+      const objects = new Map<string, number>();
+      if (r2) {
+        let token: string | undefined;
+        do {
+          const out: any = await getR2Client().send(new ListObjectsV2Command({ Bucket: bucket, Prefix: 'documents/', ContinuationToken: token }));
+          for (const o of out.Contents || []) if (o.Key) objects.set(o.Key, Number(o.Size || 0));
+          token = out.IsTruncated ? out.NextContinuationToken : undefined;
+        } while (token);
+      }
+      report.public_objects_listed = objects.size;
+      const tenantIds: string[] = onlyTenant ? [onlyTenant]
+        : (await centralDb.query("SELECT id FROM restaurants ORDER BY id")).map((r: any) => String(r.id));
+      const referenced = new Set<string>();   // R2 keys a row points at, now or before its move
+      const diskDir = path.join(process.cwd(), "public", "uploads", "documents");
+      const legacyStillThere = (from: string): boolean => from.startsWith('disk:')
+        ? fs.existsSync(path.join(diskDir, from.slice(5))) : objects.has(from);
+      const removeLegacy = async (from: string) => {
+        if (from.startsWith('disk:')) { const p = path.join(diskDir, from.slice(5)); if (fs.existsSync(p)) fs.unlinkSync(p); return; }
+        await getR2Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: from }));
+        objects.delete(from);
+      };
+
+      for (const tenantId of tenantIds) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) continue;
+        const t: any = { tenant: tenantId, documents: 0, already_private: 0, to_migrate: 0, migrated: 0, missing: [] as string[], failed: [] as any[], orphans: 0, orphans_secured: 0, public_copies_removed: 0, public_copies_left: 0 };
+        let db: any;
+        try { db = await getTenantDb(tenantId); } catch { continue; }
+        const rows: any[] = [];
+        try {
+          await _ensureGuestDocPrivateCols(db);
+          const g = await db.query("SELECT id, booking_id AS object_id, file_url, file_key, migrated_from FROM guest_documents");
+          for (const r of g) rows.push({ ...r, table: 'guest_documents', kind: 'ROOM_BOOKING' });
+        } catch { /* no hotel tables on this tenant */ }
+        try {
+          await db.query("SELECT id FROM object_documents LIMIT 0");   // only tenants that have the table
+          await ensureObjectDocumentsTable(db);
+          const o = await db.query("SELECT id, object_type, object_id, file_url, file_key, migrated_from FROM object_documents");
+          for (const r of o) rows.push({ ...r, table: 'object_documents', kind: r.object_type });
+        } catch { /* no booking documents table on this tenant */ }
+        t.documents = rows.length;
+
+        for (const row of rows) {
+          if (row.file_key) {
+            t.already_private++;
+            const from = String(row.migrated_from || '');
+            if (!from) continue;
+            if (!from.startsWith('disk:')) referenced.add(from);
+            if (!legacyStillThere(from)) continue;
+            // Moved earlier, but the public copy survived a failed delete.
+            if (dryRun || overBudget()) { t.public_copies_left++; if (!dryRun) report.truncated = true; continue; }
+            try { await removeLegacy(from); t.public_copies_removed++; }
+            catch (e: any) { t.public_copies_left++; t.failed.push({ id: row.id, step: 'delete public copy', error: e?.message || String(e) }); }
+            continue;
+          }
+          const loc = _legacyDocLocation(row.file_url);
+          if (!loc) { t.failed.push({ id: row.id, step: 'locate', error: 'file_url is not a documents/ object or an uploads/documents file' }); continue; }
+          const from = loc.kind === 'R2' ? loc.key : `disk:${path.basename(loc.path)}`;
+          if (loc.kind === 'R2') referenced.add(loc.key);
+          if (loc.kind === 'R2' && !r2) { t.failed.push({ id: row.id, step: 'locate', error: 'row points at R2 but R2 is not configured here' }); continue; }
+          const exists = loc.kind === 'R2' ? objects.has(loc.key) : fs.existsSync(loc.path);
+          if (!exists) { t.missing.push(row.id); continue; }
+          t.to_migrate++;
+          if (dryRun) continue;
+          if (overBudget()) { report.truncated = true; continue; }
+          let stored: { storage: 'R2' | 'DISK'; key: string } | null = null;
+          try {
+            const bytes = await _readLegacyDocument(row.file_url);
+            if (!bytes) { t.missing.push(row.id); continue; }
+            stored = await persistPrivateFile('private-docs', tenantId, bytes);
+            const back = await readPrivateFile('private-docs', stored.storage, stored.key);
+            if (!back || !back.equals(bytes)) throw new Error('private copy did not read back identical');
+            const newUrl = _bookingDocFileRoute(tenantId, row.kind as BookingDocKind, row.object_id, row.id);
+            const upd = await db.run(`UPDATE ${row.table} SET storage = ?, file_key = ?, file_url = ?, migrated_from = ? WHERE id = ? AND file_key IS NULL`,
+              [stored.storage, stored.key, newUrl, from, row.id]);
+            if (!upd?.changes) throw new Error('row changed during the move (another run?)');
+            stored = null;   // the row owns the private copy now
+            t.migrated++;
+            try { await removeLegacy(from); t.public_copies_removed++; }
+            catch (e: any) { t.public_copies_left++; t.failed.push({ id: row.id, step: 'delete public copy', error: e?.message || String(e) }); }
+          } catch (e: any) {
+            t.failed.push({ id: row.id, step: 'move', error: e?.message || String(e) });
+            if (stored) await deletePrivateFile('private-docs', stored.storage, stored.key).catch(() => {});
+          }
+        }
+
+        // Public objects of this tenant that no row points at.
+        if (r2) {
+          const prefix = `documents/${tenantId}/`;
+          const orphanKeys = [...objects.keys()].filter(k => k.startsWith(prefix) && !referenced.has(k));
+          t.orphans = orphanKeys.length;
+          if (!dryRun && orphanKeys.length) {
+            await db.exec(`CREATE TABLE IF NOT EXISTS orphaned_documents (
+              id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, storage TEXT NOT NULL, file_key TEXT NOT NULL,
+              size_bytes INTEGER, secured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+            for (const key of orphanKeys) {
+              if (overBudget()) { report.truncated = true; break; }
+              let stored: { storage: 'R2' | 'DISK'; key: string } | null = null;
+              try {
+                const prior: any = await db.get("SELECT id FROM orphaned_documents WHERE source_key = ?", [key]);
+                if (!prior) {
+                  const bytes = await _readR2Object(key);
+                  if (!bytes) continue;
+                  stored = await persistPrivateFile('private-docs', tenantId, bytes);
+                  const back = await readPrivateFile('private-docs', stored.storage, stored.key);
+                  if (!back || !back.equals(bytes)) throw new Error('private copy did not read back identical');
+                  await db.run("INSERT INTO orphaned_documents (id, source_key, storage, file_key, size_bytes) VALUES (?, ?, ?, ?, ?)",
+                    [`ORPH-${Date.now()}-${randomUUID().slice(0, 8)}`, key, stored.storage, stored.key, bytes.length]);
+                  stored = null;
+                }
+                t.orphans_secured++;
+                await removeLegacy(key);
+                t.public_copies_removed++;
+              } catch (e: any) {
+                t.failed.push({ id: key, step: 'secure orphan', error: e?.message || String(e) });
+                if (stored) await deletePrivateFile('private-docs', stored.storage, stored.key).catch(() => {});
+              }
+            }
+          }
+        }
+
+        for (const k of ['documents', 'already_private', 'to_migrate', 'migrated', 'orphans', 'orphans_secured', 'public_copies_removed', 'public_copies_left']) report.totals[k] += t[k];
+        report.totals.missing += t.missing.length;
+        report.totals.failed += t.failed.length;
+        if (t.documents || t.orphans) report.tenants.push(t);
+      }
+
+      // Objects whose tenant segment matches no tenant: reported, never touched.
+      if (r2 && !onlyTenant) {
+        const known = new Set(tenantIds);
+        const prefixes = new Set<string>();
+        for (const k of objects.keys()) {
+          const seg = k.split('/')[1] || '';
+          if (!known.has(seg)) { report.unknown_tenant_objects++; prefixes.add(seg); }
+        }
+        report.unknown_tenant_prefixes = [...prefixes].slice(0, 50);
+      }
+      // Disk names carry no tenant, so files left here are only counted.
+      if (fs.existsSync(diskDir)) report.disk_files_remaining = fs.readdirSync(diskDir).length;
+      report.elapsed_ms = Date.now() - started;
+      res.json(report);
+    } catch (err: any) {
+      console.error('[private-documents migrate]', err);
+      res.status(500).json({ error: err?.message || 'Migration failed', partial: report });
     }
   });
 
@@ -69365,8 +69660,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'payroll-guard-tables-sync-conflict-dates',
+    commit_marker: 'private-guest-documents',
     code_features: [
+      'private-guest-documents  Security fix from the 29 Sep fit-gap review. Guest ID proofs (guest_documents: passport, Aadhaar, visa from check-in) and the Documents node files on Hotel, Event and Spa bookings (object_documents) were stored unencrypted at a public R2 URL (documents/...) and opened with no sign-in; deleting a document left the file public. New files are AES-256-GCM encrypted (the HR file helper, now persistPrivateFile with an area: hr-private or private-docs) and rows keep storage + file_key; file_url is the signed-in route GET .../documents/:docId/file (hotel: hotelStaff + HOTEL_BOOKINGS read; events: EV_READ_BOOKINGS; spa: SPA_APPOINTMENTS), which decrypts and sends the file with Cache-Control private, no-store, and writes DOCUMENT_VIEWED to the booking Audit log first (writeObjectAudit now resolves true or false; if the row cannot be written the file is not sent, 503). List routes never return a storage URL. Legacy rows still open through the same route (read from R2 by key). POST /api/admin/private-documents/migrate (SUPER_ADMIN, dryRun by default) moves every legacy file into private-docs, reads it back byte for byte, repoints the row (migrated_from keeps the old key) and only then deletes the public object; objects no row points at are kept encrypted in orphaned_documents before deletion; idempotent, time-budgeted. Also fixed GET /uploads/:filename path traversal: Express decodes %2F, so documents%2F<file> or %2E%2E%2F reached subfolders and public/; it now accepts one plain [\w.-] name. Frontend: GuestDocumentsWidget, the booking document lightbox and ObjectDetail DocumentsView fetch with the token into a blob URL (src/privateFile.ts); ID thumbnails became typed tiles so an ID image is fetched, and logged, only when opened. TC-DOC-PRIVATE-*.',
       'payroll-guard-tables-sync-conflict-dates  Three faults found while seeding a new tenant. (1) An uncomputed payroll run could be approved, locked and marked paid with no employees and zero pay, and one run per month is allowed, so the month was blocked. Approve now refuses a run with no payslips (409 RUN_NOT_COMPUTED), and a never-computed run can be deleted whatever its status (it posted nothing, the payroll journal skips a zero run); the Payroll screen shows Delete empty run for it. (2) tables/sync inserted the tables and then returned 500, because its QR backfill had a literal containing a question mark that the tenant DB rewrote into a placeholder; the prefix is now a parameter. (3) Room-conflict and room-hold messages printed pg DATE objects as Mon Sep 28 2026 00:00:00 GMT; they now read 28-Sep-2026 via _humanDate.',
       'booking-shows-open-bill-total  Found by a charges check across every surface: bills, check-out, Guest Bills, master folio and invoice PDFs all showed the right total after a room upgrade, but the booking detail Financials box worked out Outstanding as booking total minus advance, which leaves out GST, room upgrades, room service and every other folio charge (a guest owing 4515 showed 3000). With an open folio the box now shows the room booking, the bill to date, paid and outstanding from the same outstanding endpoint check-out uses; without one it keeps the old estimate. The Reservations list returns open_folio_total and shows Bill X under the total when it differs.',
       'catering-section-row-layout  Owner report with screenshot: in the catering package editor the dishes box of a menu section was squeezed to a sliver and Guest picks ran off the card, so there was no visible place to type the food items. Every input shares a w-full class that beat the w-24 and w-28 widths added for the two number boxes. The section row is now a fixed-column grid (section, dishes, guest picks, extra per plate, delete) with column headings and an example placeholder for the dishes, stacking on phones.',
@@ -73584,7 +73880,12 @@ ${data.tenant.name}`;
 
   // Static uploads route with Google Drive fallback
   app.get("/uploads/:filename", async (req, res) => {
-    const filename = req.params.filename;
+    const filename = String(req.params.filename || '');
+    // One plain file name only. Express decodes the parameter, so a %2F, %5C or
+    // dot segment would otherwise reach folders under uploads (documents/,
+    // hr-private/, private-docs/) or climb out of it. Every name this app
+    // writes (multer, menu images, Drive backups) is [\w.-].
+    if (!/^[\w.\-]+$/.test(filename) || filename.startsWith('.')) return res.status(404).send("File not found");
     const localPath = path.join(process.cwd(), "public", "uploads", filename);
 
     if (fs.existsSync(localPath)) {

@@ -6,6 +6,7 @@ export const ta: Record<string, string> = {
   'common.saved': 'சேமிக்கப்பட்டது',
   'common.cancel': 'ரத்து செய்',
   'common.delete': 'நீக்கு',
+  'documents.openFailed': 'ஆவணத்தைத் திறக்க முடியவில்லை',
   'common.edit': 'திருத்து',
   'common.add': 'சேர்',
   'common.close': 'மூடு',

@@ -6,6 +6,7 @@ export const te: Record<string, string> = {
   'common.saved': 'సేవ్ చేయబడింది',
   'common.cancel': 'రద్దు చేయి',
   'common.delete': 'తొలగించు',
+  'documents.openFailed': 'పత్రాన్ని తెరవలేకపోయాము',
   'common.edit': 'సవరించు',
   'common.add': 'జోడించు',
   'common.close': 'మూసివేయి',

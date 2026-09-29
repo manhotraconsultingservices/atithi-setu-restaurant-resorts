@@ -6,6 +6,7 @@ export const bn: Record<string, string> = {
   'common.saved': 'সংরক্ষিত হয়েছে',
   'common.cancel': 'বাতিল',
   'common.delete': 'মুছুন',
+  'documents.openFailed': 'নথি খোলা যায়নি',
   'common.edit': 'সম্পাদনা',
   'common.add': 'যোগ করুন',
   'common.close': 'বন্ধ করুন',

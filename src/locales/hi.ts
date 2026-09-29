@@ -6,6 +6,7 @@ export const hi: Record<string, string> = {
   'common.saved': 'सहेजा गया',
   'common.cancel': 'रद्द करें',
   'common.delete': 'हटाएँ',
+  'documents.openFailed': 'दस्तावेज़ नहीं खुल सका',
   'common.edit': 'संपादित करें',
   'common.add': 'जोड़ें',
   'common.close': 'बंद करें',

@@ -24,6 +24,7 @@ import { DataTable, type ColDef } from './DataTable';
 // Pure localStorage read, no React context needed — safe to call from the
 // resolver factory below (which builds props outside any component render).
 import { canWriteTab } from '../perm';
+import { openPrivateFile } from '../privateFile';
 
 type Node = 'OVERVIEW' | 'AUDIT' | 'CHECKLIST' | 'WHERE_USED' | 'DOCUMENTS';
 
@@ -311,9 +312,11 @@ function DocumentsView({ url, token, canManage = true, nonce, onChanged }: { url
 
   const columns: ColDef<any>[] = [
     { key: 'label', label: 'Document', sortable: true, searchable: true, getValue: r => r.label || r.file_name || '', render: r => (
-      <a href={r.file_url} target="_blank" rel="noopener noreferrer" className="font-semibold text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1">
+      // file_url is the signed-in file route (documents are stored encrypted),
+      // so it is fetched with the token rather than linked.
+      <button type="button" onClick={() => openPrivateFile(r.file_url, token).catch(e => setErr(e.message))} className="font-semibold text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 text-left">
         <Download size={12} className="shrink-0" />{r.label || r.file_name || 'Document'}
-      </a>
+      </button>
     ) },
     // Only shows a value when a custom label was given (so this adds real
     // information — the actual filename behind the label). When no label was

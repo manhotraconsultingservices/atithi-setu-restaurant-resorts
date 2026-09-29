@@ -6,6 +6,7 @@ export const gu: Record<string, string> = {
   'common.saved': 'સાચવ્યું',
   'common.cancel': 'રદ કરો',
   'common.delete': 'કાઢી નાખો',
+  'documents.openFailed': 'દસ્તાવેજ ખોલી શકાયો નહીં',
   'common.edit': 'સંપાદિત કરો',
   'common.add': 'ઉમેરો',
   'common.close': 'બંધ કરો',

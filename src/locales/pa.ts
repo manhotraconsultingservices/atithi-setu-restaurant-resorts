@@ -6,6 +6,7 @@ export const pa: Record<string, string> = {
   'common.saved': 'ਸੰਭਾਲਿਆ ਗਿਆ',
   'common.cancel': 'ਰੱਦ ਕਰੋ',
   'common.delete': 'ਮਿਟਾਓ',
+  'documents.openFailed': 'ਦਸਤਾਵੇਜ਼ ਨਹੀਂ ਖੁੱਲ੍ਹ ਸਕਿਆ',
   'common.edit': 'ਸੋਧੋ',
   'common.add': 'ਸ਼ਾਮਲ ਕਰੋ',
   'common.close': 'ਬੰਦ ਕਰੋ',

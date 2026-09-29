@@ -523,6 +523,7 @@ function parseCsv(text: string): { headers: string[]; rows: Record<string, strin
   return { headers, rows };
 }
 import { cn, todayIST } from './lib/utils';
+import { fetchPrivateFileUrl, openPrivateFile } from './privateFile';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
   BarChart,
@@ -12696,6 +12697,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // UI-3 — Preview lightbox state. Holds the document row currently
   // being previewed (image rendered full-size, PDF iframe-embedded).
   const [docPreview, setDocPreview] = useState<any>(null);
+  // Guest documents are stored encrypted and open through a signed-in route,
+  // so the lightbox shows a blob: URL fetched with the token (docPreview.src),
+  // released again when the preview closes or changes.
+  const openDocPreview = async (doc: any) => {
+    try { setDocPreview({ ...doc, src: await fetchPrivateFileUrl(doc.file_url, token) }); }
+    catch (e: any) { toast.error(e.message); }
+  };
+  useEffect(() => () => { if (docPreview?.src) URL.revokeObjectURL(docPreview.src); }, [docPreview]);
   // RBAC-6 — Tenant-scoped Staff Access matrix. role → { tabId: level }.
   // Levels: 0=None, 1=View, 2=Edit, 3=Full. Empty object = no restriction.
   const [staffAccess, setStaffAccess] = useState<Record<string, Record<string, number>>>({});
@@ -36859,7 +36868,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   bookingStatus={editingBooking.status || 'BOOKED'}
                   restaurantId={restaurantId}
                   token={token}
-                  onPreview={(doc: any) => setDocPreview(doc)}
+                  onPreview={openDocPreview}
                 />
               )}
 
@@ -37200,7 +37209,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             mealPlans={tariffData.meal_plans}
             tariffModel={tariffData.tariff_model}
             isEarly={isEarly}
-            onPreview={(doc: any) => setDocPreview(doc)}
+            onPreview={openDocPreview}
             onCancel={() => setCheckInChecklistTarget(null)}
             onSaved={(patched: any) => {
               // Optimistically merge saved fields back into the bookings list
@@ -37254,7 +37263,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 bookingStatus={b.status || 'BOOKED'}
                 restaurantId={restaurantId}
                 token={token}
-                onPreview={(doc: any) => setDocPreview(doc)}
+                onPreview={openDocPreview}
               />
               <div className="mt-4 flex justify-end">
                 <button
@@ -37293,7 +37302,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </p>
                 </div>
                 <a
-                  href={docPreview.file_url}
+                  href={docPreview.src}
                   download={docPreview.file_name || true}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -37309,14 +37318,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex-1 bg-stone-900 rounded-b-2xl overflow-auto flex items-center justify-center min-h-[60vh]">
                 {isImage && (
                   <img
-                    src={docPreview.file_url}
+                    src={docPreview.src}
                     alt={docPreview.file_name || 'document'}
                     className="max-w-full max-h-[80vh] object-contain"
                   />
                 )}
                 {isPdf && (
                   <iframe
-                    src={docPreview.file_url}
+                    src={docPreview.src}
                     title={docPreview.file_name || 'document'}
                     className="w-full h-[80vh] bg-white"
                   />
@@ -37325,7 +37334,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div className="text-center p-12 text-white/80">
                     <p className="text-sm">Preview not supported for {docPreview.mime_type || 'this file type'}.</p>
                     <a
-                      href={docPreview.file_url}
+                      href={docPreview.src}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="mt-3 inline-block underline text-saffron"
@@ -43790,12 +43799,14 @@ const GuestDocumentsWidget: React.FC<{
                     PDFs and others get a typed icon tile. */}
                 <button
                   type="button"
-                  onClick={() => onPreview ? onPreview(d) : window.open(d.file_url, '_blank', 'noopener,noreferrer')}
+                  onClick={() => onPreview ? onPreview(d) : openPrivateFile(d.file_url, token).catch((e: any) => setError(e.message))}
                   className="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center bg-white border border-brand/10 hover:ring-2 hover:ring-brand/30 transition-all shrink-0"
                   title="Preview"
                 >
+                  {/* A typed tile, not a thumbnail: an ID image is fetched
+                      (and its viewing logged) only when staff open it. */}
                   {isImage ? (
-                    <img src={d.file_url} alt="" className="w-full h-full object-cover" loading="lazy" />
+                    <span className="text-base">🖼️</span>
                   ) : isPdf ? (
                     <span className="text-base">📕</span>
                   ) : (
@@ -43806,9 +43817,9 @@ const GuestDocumentsWidget: React.FC<{
                 {/* Filename — also clickable to preview */}
                 <button
                   type="button"
-                  onClick={() => onPreview ? onPreview(d) : window.open(d.file_url, '_blank', 'noopener,noreferrer')}
+                  onClick={() => onPreview ? onPreview(d) : openPrivateFile(d.file_url, token).catch((e: any) => setError(e.message))}
                   className="font-bold text-[#1a1208] truncate hover:underline flex-1 text-left"
-                  title={d.file_name || d.file_url}
+                  title={d.file_name || 'document'}
                 >
                   {d.file_name || 'document'}
                   {d.label && <span className="block text-[10px] font-normal text-[#9c8e85] truncate">{d.label}</span>}
