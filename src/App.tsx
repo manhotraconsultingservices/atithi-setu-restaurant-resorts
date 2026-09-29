@@ -70810,6 +70810,42 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
   // The signed copy holds the candidate's signature and CTC: the server asks
   // for HR Sensitive Data at View and logs each opening, so hide it otherwise.
   const canOpenSigned = tabLevel('HR_SENSITIVE') >= 1;
+  const showConfirm = useConfirm();
+  // One hidden file input serves every row; signedTarget is the offer it is for.
+  const signedInput = useRef<HTMLInputElement>(null);
+  const [signedTarget, setSignedTarget] = useState<any | null>(null);
+  const [uploadingSigned, setUploadingSigned] = useState<string | null>(null);
+  async function pickSignedCopy(o: any) {
+    // Replacing deletes the copy on file (server side), so ask first.
+    if (o.has_signed_copy && !await showConfirm({
+      title: tr('hr.offer.replaceSignedTitle'),
+      body: tr('hr.offer.replaceSignedBody', { number: o.offer_number || '' }),
+      danger: true,
+    })) return;
+    setSignedTarget(o);
+    signedInput.current?.click();
+  }
+  async function uploadSignedCopy(file: File) {
+    const o = signedTarget;
+    if (!o) return;
+    setUploadingSigned(o.id);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters/${o.id}/upload-signed`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(body.error || `Upload failed (HTTP ${res.status})`); return; }
+      toast.success(tr('hr.offer.signedUploaded'));
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.message || 'Upload failed');
+    } finally {
+      setUploadingSigned(null);
+      setSignedTarget(null);
+    }
+  }
   const [offers, setOffers] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
   const [offerHistory, setOfferHistory] = useState<any | null>(null);
@@ -70891,6 +70927,11 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
                     {o.has_signed_copy && o.signed_pdf_url && canOpenSigned && (
                       <button onClick={() => openPrivateFile(o.signed_pdf_url, token).catch((e: any) => toast.error(e.message))} className="text-[10px] text-emerald-700 hover:underline">{tr('hr.offer.viewSignedCopy')}</button>
                     )}
+                    {canEdit && o.status !== 'DECLINED' && o.status !== 'EXPIRED' && (
+                      <button onClick={() => pickSignedCopy(o)} disabled={!!uploadingSigned} className="text-[10px] text-[#6b5d52] hover:underline disabled:opacity-50">
+                        {uploadingSigned === o.id ? tr('hr.offer.uploadingSigned') : tr(o.has_signed_copy ? 'hr.offer.replaceSignedCopy' : 'hr.offer.uploadSignedCopy')}
+                      </button>
+                    )}
                     <button onClick={() => setOfferHistory(o)} className="text-[10px] text-[#6b5d52] hover:underline">History</button>
                     {canEdit && (o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
                   </td>
@@ -70899,6 +70940,8 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
             </tbody>
           </table>
         }
+        <input ref={signedInput} type="file" accept="application/pdf,image/*" className="hidden"
+          onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadSignedCopy(f); else setSignedTarget(null); }} />
       </div>
       {creating && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto" onClick={() => setCreating(false)}>
