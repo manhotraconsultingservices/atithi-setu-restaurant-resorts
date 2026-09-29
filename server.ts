@@ -48,7 +48,7 @@ import {
 import {
   HR_MASTER_KINDS, HR_MASTER_LINKS, EMPLOYMENT_TYPES, HR_SETTINGS_DEFAULTS, HR_FIELD_LABELS,
   normaliseMasterCode, wouldCreateManagerCycle, nextEmployeeCodeFrom, diffFields,
-  HR_ENCRYPTED_FIELDS, encryptSensitive, decryptSensitive, isEncryptedSensitive, hrDataKeySource,
+  HR_ENCRYPTED_FIELDS, encryptSensitive, decryptSensitive, isEncryptedSensitive, hrDataKeySource, sealGuestIdProof,
   HR_DOCUMENT_TYPES, HR_DOCUMENT_TYPE_LABELS, normaliseDocType, isYmd, ymdOf, addDaysYmd, daysBetweenYmd,
   documentExpiryStage, documentNeedsAlert, encryptFileBuffer, decryptFileBuffer, safeDownloadName,
   type HrMasterKind,
@@ -18243,7 +18243,7 @@ async function startServer() {
               status, booking_source, room_rate, total_amount, special_requests, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
-          [b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email, b.guest_id_proof,
+          [b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email, sealGuestIdProof(b.guest_id_proof),
             b.guest_nationality, b.guest_state, b.num_guests,
             b.check_in_date, b.check_out_date,
             (b as any).actual_checkin_at || null, (b as any).actual_checkout_at || null,
@@ -28021,9 +28021,55 @@ ${data.tenant.name}`;
       const phone = (req.body?.phone as string) || '';
       if (!phone) return res.status(400).json({ error: "phone is required" });
       const stamp = `ERASED-${Date.now()}`;
+      const stats: Record<string, number> = {};
+
+      // ID papers first, while the phone still finds the guest's bookings: a
+      // failure leaves everything matchable, so the same request can be sent
+      // again. The uploaded ID files (guest_documents: passport, Aadhaar, visa)
+      // are deleted outright; no retention rule needs a copy of the document.
+      const bookingIds: string[] = [];
+      try {
+        const rb: any[] = await tenantDb.query("SELECT id FROM room_bookings WHERE guest_phone = ?", [phone]);
+        const gg: any[] = await tenantDb.query("SELECT booking_id FROM group_guests WHERE guest_phone = ?", [phone]).catch(() => []);
+        for (const r of [...rb.map(x => x.id), ...gg.map(x => x.booking_id)]) if (r && !bookingIds.includes(String(r))) bookingIds.push(String(r));
+      } catch { /* no hotel tables on this tenant */ }
+      let docsDeleted = 0;
+      const docsFailed: string[] = [];
+      if (bookingIds.length) {
+        const docs: any[] = await tenantDb.query(
+          "SELECT id, booking_id, storage, file_key, file_url FROM guest_documents WHERE booking_id = ANY(?)", [bookingIds]
+        ).catch(async () => {
+          // storage / file_key are added on first use; a tenant without them has legacy rows only.
+          return tenantDb.query("SELECT id, booking_id, file_url FROM guest_documents WHERE booking_id = ANY(?)", [bookingIds]).catch(() => []);
+        });
+        for (const d of docs) {
+          try {
+            if (d.file_key) await deletePrivateFile('private-docs', d.storage, d.file_key);
+            else await _deleteLegacyDocument(d.file_url);
+            await tenantDb.run("DELETE FROM guest_documents WHERE id = ?", [d.id]);
+            docsDeleted++;
+          } catch (e: any) {
+            console.error(`[dpdp erase] could not delete guest document ${d.id}:`, e?.message || e);
+            docsFailed.push(d.id);
+          }
+        }
+        if (docsFailed.length) {
+          return res.status(502).json({
+            error: `Could not delete ${docsFailed.length} ID document(s) from storage. Nothing else was changed; send the erasure again.`,
+            id_documents_deleted: docsDeleted, id_documents_failed: docsFailed.length,
+          });
+        }
+        for (const bid of bookingIds) {
+          await writeObjectAudit(tenantDb, req, {
+            objectType: 'ROOM_BOOKING', objectId: bid, action: 'DPDP_ERASED',
+            summary: `Guest data erased on a DPDP request: name, phone, email and ID number cleared, ID documents deleted. Stamp=${stamp}`,
+          });
+        }
+      }
+      stats['guest_documents'] = docsDeleted;
+
       // Anonymise — keep the row for accounting reconciliation but wipe
       // anything that can identify the natural person.
-      const stats: Record<string, number> = {};
       const sweep = async (table: string, phoneCol: string, nameCols: string[], emailCol: string | null) => {
         const cols = [
           `${phoneCol} = ?`,
@@ -28046,6 +28092,21 @@ ${data.tenant.name}`;
       };
       await sweep('orders', 'customer_phone', ['customer_name'], 'customer_email');
       await sweep('room_bookings', 'guest_phone', ['guest_name'], 'guest_email');
+      // The ID number goes too, matched by booking id since the phone is now the stamp.
+      if (bookingIds.length) {
+        try {
+          const r: any = await tenantDb.run("UPDATE room_bookings SET guest_id_proof = NULL WHERE id = ANY(?) AND guest_id_proof IS NOT NULL", [bookingIds]);
+          stats['room_bookings_id_proof'] = Number(r?.changes || 0);
+        } catch { stats['room_bookings_id_proof'] = 0; }
+        try {
+          const r: any = await tenantDb.run(
+            `UPDATE group_guests SET guest_name = 'ERASED', guest_phone = ?, guest_email = ?, guest_id_proof = NULL
+              WHERE booking_id = ANY(?) OR guest_phone = ?`,
+            [stamp, `${stamp}@erased.invalid`, bookingIds, phone]
+          );
+          stats['group_guests'] = Number(r?.changes || 0);
+        } catch { stats['group_guests'] = 0; }
+      }
       await sweep('feedback', 'customer_phone', ['customer_name'], 'customer_email');
       await sweep('table_sessions', 'customer_phone', ['customer_name'], null);
       await sweep('bookings', 'customer_phone', ['customer_name'], 'customer_email');
@@ -46957,7 +47018,7 @@ ${data.tenant.name}`;
           day_use_start_time, day_use_end_time)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, resolvedRoomId, roomLocked, guest_name, guest_phone || null, guest_email || null,
-         guest_id_proof || null, guest_nationality || null, guest_state || null,
+         sealGuestIdProof(guest_id_proof), guest_nationality || null, guest_state || null,
          effectiveNumGuests, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,
          meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat, numAdultsToStore,
@@ -53087,7 +53148,7 @@ ${data.tenant.name}`;
         const setStr = changed.map(k => `${k} = ?`).join(', ');
         await tenantDb.run(
           `UPDATE room_bookings SET ${setStr} WHERE id = ?`,
-          [...changed.map(k => patch[k]), b.id]
+          [...changed.map(k => (k === 'guest_id_proof' ? sealGuestIdProof(patch[k]) : patch[k])), b.id]
         );
       }
       if (!idReplaced) await writeObjectAudit(tenantDb, guestActor, audit);
@@ -54116,13 +54177,13 @@ ${data.tenant.name}`;
       if (existing) {
         await db.run(
           "UPDATE group_guests SET guest_name=?, guest_phone=?, guest_email=?, guest_id_proof=?, guest_nationality=?, updated_at=? WHERE booking_id=?",
-          [guest_name||null, guest_phone||null, guest_email||null, guest_id_proof||null, guest_nationality||'Indian', new Date().toISOString(), bookingId]
+          [guest_name||null, guest_phone||null, guest_email||null, sealGuestIdProof(guest_id_proof), guest_nationality||'Indian', new Date().toISOString(), bookingId]
         );
       } else {
         const ggId = `GG-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
         await db.run(
           "INSERT INTO group_guests (id,group_id,booking_id,guest_name,guest_phone,guest_email,guest_id_proof,guest_nationality) VALUES (?,?,?,?,?,?,?,?)",
-          [ggId, groupId, bookingId, guest_name||null, guest_phone||null, guest_email||null, guest_id_proof||null, guest_nationality||'Indian']
+          [ggId, groupId, bookingId, guest_name||null, guest_phone||null, guest_email||null, sealGuestIdProof(guest_id_proof), guest_nationality||'Indian']
         );
       }
       // Also sync back to room_bookings so existing folio / invoice paths see the name.
@@ -55294,7 +55355,8 @@ ${data.tenant.name}`;
       }
 
       const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
-      await tenantDb.run(`UPDATE room_bookings SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.bookingId]);
+      await tenantDb.run(`UPDATE room_bookings SET ${setStr} WHERE id = ?`,
+        [...Object.keys(patch).map(k => (k === 'guest_id_proof' ? sealGuestIdProof(patch[k]) : patch[k])), req.params.bookingId]);
       // Return the room name (JOIN) so the booking table reflects the reassigned
       // room immediately on the optimistic merge, not just after a refetch.
       const updated: any = await tenantDb.get(
@@ -56161,6 +56223,63 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete document" });
+    }
+  });
+
+  // ── Encrypt guest ID numbers saved before encryption (29 Sep 2026) ─────────
+  // room_bookings.guest_id_proof and group_guests.guest_id_proof were plain
+  // text; new values are sealed on write (sealGuestIdProof). This seals the
+  // old ones in place. Each value is encrypted, decrypted back and compared
+  // before it is written, and the UPDATE only lands if the row still holds
+  // the value that was read, so a concurrent edit is never overwritten.
+  // SUPER_ADMIN only; dryRun is the DEFAULT (a live run needs { "dryRun": false });
+  // safe to repeat; stops after budgetMs and reports truncated: true. The
+  // report carries counts only, never a value.
+  app.post("/api/admin/guest-id-proof/encrypt-existing", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    if (req.user?.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Super admin only' });
+    const dryRun = req.body?.dryRun !== false;
+    const onlyTenant = req.body?.tenantId ? String(req.body.tenantId) : null;
+    const budgetMs = Math.min(Math.max(Number(req.body?.budgetMs) || 60000, 5000), 85000);
+    const started = Date.now();
+    const report: any = {
+      dryRun, key: hrDataKeySource(), truncated: false,
+      totals: { plain: 0, encrypted: 0, already_encrypted: 0, changed_meanwhile: 0, failed: 0 },
+      tenants: [] as any[],
+    };
+    try {
+      const tenantIds: string[] = onlyTenant ? [onlyTenant]
+        : (await centralDb.query("SELECT id FROM restaurants ORDER BY id")).map((r: any) => String(r.id));
+      outer:
+      for (const tenantId of tenantIds) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) continue;
+        let db: DbInterface;
+        try { db = await getTenantDb(tenantId); } catch { continue; }
+        const t: any = { tenant: tenantId, plain: 0, encrypted: 0, already_encrypted: 0, changed_meanwhile: 0, failed: 0 };
+        for (const table of ['room_bookings', 'group_guests']) {
+          let rows: any[];
+          try {
+            rows = await db.query(`SELECT id, guest_id_proof FROM ${table} WHERE guest_id_proof IS NOT NULL AND guest_id_proof <> ''`, [], { raw: true });
+          } catch { continue; /* no hotel tables on this tenant */ }
+          for (const r of rows) {
+            if (isEncryptedSensitive(r.guest_id_proof)) { t.already_encrypted++; continue; }
+            t.plain++;
+            if (dryRun) continue;
+            if (Date.now() - started > budgetMs) { report.truncated = true; report.tenants.push(t); break outer; }
+            try {
+              const sealed = sealGuestIdProof(r.guest_id_proof);
+              if (!sealed || decryptSensitive(sealed) !== String(r.guest_id_proof).trim()) { t.failed++; continue; }
+              const u = await db.run(`UPDATE ${table} SET guest_id_proof = ? WHERE id = ? AND guest_id_proof = ?`, [sealed, r.id, r.guest_id_proof]);
+              if (Number(u?.changes || 0) === 1) t.encrypted++; else t.changed_meanwhile++;
+            } catch { t.failed++; }
+          }
+        }
+        if (t.plain || t.already_encrypted) report.tenants.push(t);
+      }
+      for (const t of report.tenants) for (const k of Object.keys(report.totals)) report.totals[k] += t[k] || 0;
+      res.json(report);
+    } catch (err: any) {
+      console.error("guest-id-proof encrypt-existing error:", err);
+      res.status(500).json({ error: "Failed to encrypt existing guest ID numbers", partial: report });
     }
   });
 
@@ -61564,6 +61683,13 @@ ${data.tenant.name}`;
         },
         referenceNumber: latest?.id,
       });
+      // The PDF carries the full passport number, so each one made is recorded
+      // like an ID document view; no record, no PDF.
+      const logged = await writeObjectAudit(tenantDb, req, {
+        objectType: 'ROOM_BOOKING', objectId: booking.id, action: 'FORM_C_PDF_GENERATED',
+        summary: `Form-C PDF generated${booking.guest_id_proof ? ` (passport ••••${String(booking.guest_id_proof).trim().slice(-4)})` : ''}`,
+      });
+      if (!logged) return res.status(503).json({ error: "Could not record this Form-C download. Please try again." });
       const safeName = String(booking.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="FormC-${safeName}-${booking.id}.pdf"`);
@@ -69478,7 +69604,7 @@ ${data.tenant.name}`;
             String(r.guest_name),
             r.guest_phone || null,
             r.guest_email || null,
-            r.guest_id_proof || null,
+            sealGuestIdProof(r.guest_id_proof),
             r.guest_nationality || null,
             r.guest_state || null,
             Number(r.num_guests) || 1,
@@ -69815,7 +69941,8 @@ ${data.tenant.name}`;
         db = await getTenantDb(String(tenantId));
       }
 
-      const rows = await db.query(trimmed);
+      // raw: guest ID numbers stay encrypted here; the console is not a way to read them.
+      const rows = await db.query(trimmed, [], { raw: true });
       const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
       return res.json({ success: true, columns, rows, rowCount: rows.length });
     } catch (err: any) {
@@ -70343,8 +70470,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-idempotent-retry',
+    commit_marker: 'guest-id-proof-encrypted',
     code_features: [
+      'guest-id-proof-encrypted  Security fix from the 29 Sep review. room_bookings.guest_id_proof and group_guests.guest_id_proof (the passport / Aadhaar number; Form-C prints it) were plain TEXT. Every write now seals it with sealGuestIdProof (encryptSensitive, AES-256-GCM hr1: values, HR_DATA_KEY or derived from JWT_SECRET): booking create, PATCH, online check-in, group guest upsert, SA booking import, demo seed. Reads are opened in one place, PostgresDb.query, for any column named *id_proof, so Form-C, the booking screens and reports get the plain number; a value that cannot be decrypted reads as null, never ciphertext. The SQL console reads raw (query opts.raw). POST /api/admin/guest-id-proof/encrypt-existing (SUPER_ADMIN, dryRun by default, compare-and-set, time-budgeted, counts only) seals values saved before. Form-C PDF generation now writes FORM_C_PDF_GENERATED to the booking audit log first (503 and no PDF if it cannot). DPDP erase (POST /dpdp/erase) now also deletes the guest ID documents of the matched bookings (private or legacy storage, then the row), clears guest_id_proof on them and anonymises group_guests, writes DPDP_ERASED on each booking, and does the document deletes first so a storage failure (502) leaves the request repeatable. TC-GUESTID-*.',
       'public-booking-idempotent-retry  The public hotel and spa booking pages now get the same protection as the event enquiry form. A shared postWithRetry helper (src/lib/postWithRetry.ts) retries a gateway error or dropped connection twice with ONE Idempotency-Key per click; a new publicIdempotency middleware on the three public POST routes stores the first successful reply in a tenant table public_request_replay (created once per tenant per process) and answers a repeat of the key with that same reply and an Idempotent-Replay header, so a retry after a lost reply returns the same booking and payment link instead of a second booking or a slot that looks just taken. Replies are kept in the database, not memory, because a server restart is the case being handled. Non-JSON replies (a gateway error page) show a clear message instead of Unexpected token. TC-PUBLIC-REPLAY-HOTEL, TC-PUBLIC-REPLAY-INQUIRY.',
       'event-inquiry-retry-idempotent  Owner reported the public Enquire Now form showing Failed to submit. The endpoint and form were working when reproduced; the report came during a run of deploys, and a deploy restart answers 502 for 10-20 seconds, which the form turned into a lost enquiry. The guest page now retries a gateway error or dropped connection twice (after about 2 and 5 seconds) before showing a message, and the message says the server could not be reached and the details are still filled in. The inquiry endpoint answers a repeat of the same phone, date and venue within 15 minutes with the existing enquiry (duplicate true), so a retry never creates two. TC-EVT-INQUIRY-IDEMPOTENT.',
       'offer-letter-delete-removed  The DELETE /hr/offer-letters/:offerId route added as offer-letter-delete was taken out again at the owner request: offer letters are never deleted from the system (decline or let them expire instead).',

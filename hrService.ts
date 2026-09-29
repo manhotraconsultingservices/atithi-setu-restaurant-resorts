@@ -289,6 +289,24 @@ export function decryptSensitive(stored: any): string | null {
   return null;
 }
 
+// ─────────────── guest ID numbers at rest (room_bookings, group_guests) ───────────────
+// guest_id_proof holds the passport / Aadhaar number typed at booking, group
+// check-in or online check-in; Form-C prints it as the passport number. It is
+// stored with encryptSensitive (hr1: values, same key as the HR fields). Every
+// write site seals it with sealGuestIdProof. Reads need no change: PostgresDb.query
+// opens any column named *id_proof (guest_id_proof, gg_id_proof aliases), because
+// room_bookings has close to 200 readers and a reader missed one by one would show
+// ciphertext on Form-C. The SQL console reads raw. Values saved before this are
+// plain and read as they are; POST /api/admin/guest-id-proof/encrypt-existing seals them.
+export const isIdProofColumn = (name: string): boolean => /(^|_)id_proof$/.test(name);
+
+/** The value to store in guest_id_proof: trimmed and encrypted; null when blank. */
+export function sealGuestIdProof(v: any): string | null {
+  if (v == null || typeof v === 'object') return null;
+  const s = String(v).trim();
+  return s ? encryptSensitive(s) : null;
+}
+
 /** Plain labels for employee fields, used in history summaries. */
 export const HR_FIELD_LABELS: Record<string, string> = {
   name: 'name', phone: 'phone', email: 'email', role: 'role', login_id: 'login ID', is_active: 'active status',

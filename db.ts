@@ -1,6 +1,6 @@
 import { Pool, PoolClient, types as pgTypes } from "pg";
 import { TAX_YEAR_SEED } from "./statutoryRules.ts";
-import { createHrTables } from "./hrService.ts";
+import { createHrTables, isIdProofColumn, isEncryptedSensitive, decryptSensitive } from "./hrService.ts";
 
 // UAT F-A1 (Sep 2026) — money columns are NUMERIC(14,2) (gl_entries was REAL and
 // summed in float4: ₹607,577.20 read back as ₹607,577.25). node-postgres returns
@@ -26,7 +26,8 @@ const pgPool = new Pool({
 const _schemaEnsured = new Set<string>(['public']);
 
 export interface DbInterface {
-  query: (sql: string, params?: any[]) => Promise<any[]>;
+  /** opts.raw: return guest ID numbers as stored (encrypted), for the SQL console. */
+  query: (sql: string, params?: any[], opts?: { raw?: boolean }) => Promise<any[]>;
   get: (sql: string, params?: any[]) => Promise<any>;
   run: (sql: string, params?: any[]) => Promise<{ changes: number }>;
   exec: (sql: string) => Promise<void>;
@@ -182,9 +183,20 @@ class PostgresDb implements DbInterface {
     }
   }
 
-  async query(sql: string, params: any[] = []): Promise<any[]> {
+  async query(sql: string, params: any[] = [], opts?: { raw?: boolean }): Promise<any[]> {
     return this.withClient(async (client) => {
       const res = await client.query(this.toPositional(sql), params);
+      // Guest ID numbers are stored encrypted (see sealGuestIdProof in
+      // hrService.ts); open them here so every reader gets the plain number.
+      // A value that cannot be decrypted reads as null, never as ciphertext.
+      if (!opts?.raw && res.fields?.length) {
+        const cols = res.fields.map(f => f.name).filter(isIdProofColumn);
+        if (cols.length) {
+          for (const row of res.rows) {
+            for (const c of cols) if (isEncryptedSensitive(row[c])) row[c] = decryptSensitive(row[c]);
+          }
+        }
+      }
       return res.rows;
     });
   }
