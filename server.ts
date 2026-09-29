@@ -42636,6 +42636,21 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "Name and phone are required" });
       }
       if (!b.event_date) return res.status(400).json({ error: "Event date is required" });
+      // The guest page retries a submit that hit a gateway error (a deploy restart
+      // answers 502 for a few seconds, which lost enquiries as "Failed to submit").
+      // A retry can arrive after the first attempt did land, so the same phone, date
+      // and venue within 15 minutes is the same enquiry: answer with the one we have.
+      const dup: any = await db.get(
+        `SELECT id FROM event_bookings
+          WHERE booking_source = 'PUBLIC_INQUIRY' AND status = 'INQUIRY'
+            AND customer_phone = ? AND event_date = ? AND COALESCE(venue_id, '') = ?
+            AND created_at > NOW() - INTERVAL '15 minutes'
+          ORDER BY created_at DESC LIMIT 1`,
+        [String(b.customer_phone), String(b.event_date), String(b.venue_id || '')]
+      ).catch(() => null);
+      if (dup?.id) {
+        return res.status(201).json({ success: true, inquiry_id: dup.id, duplicate: true, message: "Thank you! We'll get back to you shortly with a quotation." });
+      }
       const id = `EVT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
         `INSERT INTO event_bookings
@@ -70284,8 +70299,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'offer-letter-delete-removed',
+    commit_marker: 'event-inquiry-retry-idempotent',
     code_features: [
+      'event-inquiry-retry-idempotent  Owner reported the public Enquire Now form showing Failed to submit. The endpoint and form were working when reproduced; the report came during a run of deploys, and a deploy restart answers 502 for 10-20 seconds, which the form turned into a lost enquiry. The guest page now retries a gateway error or dropped connection twice (after about 2 and 5 seconds) before showing a message, and the message says the server could not be reached and the details are still filled in. The inquiry endpoint answers a repeat of the same phone, date and venue within 15 minutes with the existing enquiry (duplicate true), so a retry never creates two. TC-EVT-INQUIRY-IDEMPOTENT.',
       'offer-letter-delete-removed  The DELETE /hr/offer-letters/:offerId route added as offer-letter-delete was taken out again at the owner request: offer letters are never deleted from the system (decline or let them expire instead).',
       'private-procurement-files  Follow-up to private-hr-files. Supplier PAN / MSME / GST certificates (POST /procurement/suppliers/:supplierId/upload-doc) and GRN bill photos (POST /api/inventory/grn/:id/upload-bill) went to public/uploads with a guessable name, open to anyone. Both now use the memory upload and persistPrivateFile(private-docs); the storage key lives in a new private_attachments table (owner_type SUPPLIER slot PAN|MSME|GST, GRN slot BILL; created once per tenant), never on the supplier or GRN row, which many SELECT * routes return. The URL columns hold the signed-in route: GET /procurement/suppliers/:supplierId/documents/:docType/file (PROCUREMENT read) and GET /api/inventory/grn/:id/bill (inventoryReadStaff, as the GRN detail); both send private, no-store, nosniff and write DOCUMENT_VIEWED to object_audit_log first (503 and no file if that fails). The doc URL columns are no longer accepted by supplier create or edit. receipt-ocr reads the bill from memory and no longer saves it. Replacing a file deletes the old copy. POST /api/admin/procurement-files/migrate (SUPER_ADMIN, dryRun default) moves legacy files and deletes a plaintext file only if no other row names it (every tenant table plus the central restaurants row). Frontend: GRN bill and supplier certificate links fetch with the token (openStoredFile); the bill is a button, not an inline image. TC-PROCFILE-*.',
       'private-hr-files  Security fix from the 29 Sep survey. Signed offer letters (POST /hr/offer-letters/:offerId/upload-signed: candidate name, CTC, signature) and expense receipts (POST /hr/expenses/:claimId/receipt) went through the disk upload to public/uploads with a guessable Date.now() name and were served to anyone by GET /uploads/:filename. Both now use the memory upload and persistPrivateFile(hr-private) (AES-256-GCM); rows keep signed_/receipt_ storage, file_key, file_name, mime_type, migrated_from (added once per tenant by _ensureHrAttachmentCols, and in the db.ts DDL); signed_pdf_url / receipt_url hold the signed-in route. GET /hr/offer-letters/:offerId/signed-file needs HR_PAYROLL read plus HR_SENSITIVE View; GET /hr/expenses/:claimId/items/:itemId/receipt needs HR_PAYROLL read; both send private, no-store, nosniff and write DOCUMENT_OPENED to hr_sensitive_access_log first (_hrLogSensitive now resolves true or false; 503 and no file when the log fails). Every offer and expense response goes through _publicOfferRow / _publicExpenseItem (no storage key), and a receipt_url sent with a new claim (HR or self-service) is ignored, so a row cannot point at another file. Replacing a file deletes the old copy. POST /api/admin/hr-files/migrate (SUPER_ADMIN, dryRun by default, time-budgeted, idempotent) encrypts each legacy /uploads file, reads it back byte for byte, repoints the row and only then deletes the plaintext; a file two rows share is deleted after the last one moves. No screen links these files yet. TC-HRFILE-*.',

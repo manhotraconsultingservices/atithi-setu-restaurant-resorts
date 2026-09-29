@@ -49,6 +49,8 @@ export const en: Record<string, string> = {
   'events.catering.sectionName': 'Section (e.g. Salad, Main Course, Sweet)',
   'events.catering.options': 'Options (comma-separated)',
   'events.catering.addSection': '+ Add section',
+  'events.public.serverBusy': "We couldn't reach our server just now. Your details are still here, please press Submit again in a minute.",
+  'events.public.offline': 'You seem to be offline. Your details are still here, check your connection and press Submit again.',
   'events.catering.colSection': 'Section',
   'events.catering.colDishes': 'Dishes (separate with commas)',
   'events.catering.dishesPlaceholder': 'e.g. Paneer Tikka, Veg Spring Roll, Hara Bhara Kebab',

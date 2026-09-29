@@ -43,6 +43,8 @@ export const ta: Record<string, string> = {
   'events.catering.sectionName': 'பிரிவு (எ.கா. சாலட், முதன்மை உணவு, இனிப்பு)',
   'events.catering.options': 'விருப்பங்கள் (கமாவால் பிரிக்கவும்)',
   'events.catering.addSection': '+ பிரிவு சேர்',
+  'events.public.serverBusy': 'இப்போது எங்கள் சர்வரை அணுக முடியவில்லை. உங்கள் விவரங்கள் இங்கே உள்ளன, ஒரு நிமிடம் கழித்து மீண்டும் சமர்ப்பிக்கவும்.',
+  'events.public.offline': 'நீங்கள் இணைப்பில் இல்லை போல் தெரிகிறது. உங்கள் விவரங்கள் இங்கே உள்ளன, இணைப்பைச் சரிபார்த்து மீண்டும் சமர்ப்பிக்கவும்.',
   'events.catering.colSection': 'பிரிவு',
   'events.catering.colDishes': 'உணவுகள் (காற்புள்ளியால் பிரிக்கவும்)',
   'events.catering.dishesPlaceholder': 'எ.கா. பனீர் டிக்கா, வெஜ் ஸ்பிரிங் ரோல், ஹரா பரா கபாப்',

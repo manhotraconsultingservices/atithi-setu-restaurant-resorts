@@ -43,6 +43,8 @@ export const kn: Record<string, string> = {
   'events.catering.sectionName': 'ವಿಭಾಗ (ಉದಾ. ಸಲಾಡ್, ಮುಖ್ಯ ಆಹಾರ, ಸಿಹಿ)',
   'events.catering.options': 'ಆಯ್ಕೆಗಳು (ಅಲ್ಪವಿರಾಮದಿಂದ ಪ್ರತ್ಯೇಕಿಸಿ)',
   'events.catering.addSection': '+ ವಿಭಾಗ ಸೇರಿಸಿ',
+  'events.public.serverBusy': 'ಈಗ ನಮ್ಮ ಸರ್ವರ್ ಅನ್ನು ತಲುಪಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ. ನಿಮ್ಮ ವಿವರಗಳು ಇಲ್ಲೇ ಇವೆ, ಒಂದು ನಿಮಿಷದ ನಂತರ ಮತ್ತೆ ಸಲ್ಲಿಸಿ.',
+  'events.public.offline': 'ನೀವು ಆಫ್‌ಲೈನ್‌ನಲ್ಲಿರುವಂತೆ ತೋರುತ್ತದೆ. ನಿಮ್ಮ ವಿವರಗಳು ಇಲ್ಲೇ ಇವೆ, ಸಂಪರ್ಕ ಪರಿಶೀಲಿಸಿ ಮತ್ತೆ ಸಲ್ಲಿಸಿ.',
   'events.catering.colSection': 'ವಿಭಾಗ',
   'events.catering.colDishes': 'ಖಾದ್ಯಗಳು (ಅಲ್ಪವಿರಾಮದಿಂದ ಬೇರ್ಪಡಿಸಿ)',
   'events.catering.dishesPlaceholder': 'ಉದಾ. ಪನೀರ್ ಟಿಕ್ಕಾ, ವೆಜ್ ಸ್ಪ್ರಿಂಗ್ ರೋಲ್, ಹರಾ ಭರಾ ಕಬಾಬ್',

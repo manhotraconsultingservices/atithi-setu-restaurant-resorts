@@ -43,6 +43,8 @@ export const hi: Record<string, string> = {
   'events.catering.sectionName': 'अनुभाग (जैसे सलाद, मुख्य व्यंजन, मिठाई)',
   'events.catering.options': 'विकल्प (अल्पविराम से अलग)',
   'events.catering.addSection': '+ अनुभाग जोड़ें',
+  'events.public.serverBusy': 'अभी हमारे सर्वर से संपर्क नहीं हो सका। आपकी जानकारी सुरक्षित है, कृपया एक मिनट बाद फिर से सबमिट दबाएँ।',
+  'events.public.offline': 'आप ऑफ़लाइन लगते हैं। आपकी जानकारी सुरक्षित है, कनेक्शन जाँचें और फिर से सबमिट दबाएँ।',
   'events.catering.colSection': 'अनुभाग',
   'events.catering.colDishes': 'व्यंजन (अल्पविराम से अलग करें)',
   'events.catering.dishesPlaceholder': 'जैसे पनीर टिक्का, वेज स्प्रिंग रोल, हरा भरा कबाब',

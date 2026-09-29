@@ -43,6 +43,8 @@ export const te: Record<string, string> = {
   'events.catering.sectionName': 'విభాగం (ఉదా. సలాడ్, మెయిన్ కోర్స్, స్వీట్)',
   'events.catering.options': 'ఎంపికలు (కామాతో వేరు చేయండి)',
   'events.catering.addSection': '+ విభాగం జోడించు',
+  'events.public.serverBusy': 'ఇప్పుడు మా సర్వర్‌ను చేరుకోలేకపోయాం. మీ వివరాలు ఇక్కడే ఉన్నాయి, ఒక నిమిషం తర్వాత మళ్ళీ సమర్పించండి.',
+  'events.public.offline': 'మీరు ఆఫ్‌లైన్‌లో ఉన్నట్లుంది. మీ వివరాలు ఇక్కడే ఉన్నాయి, కనెక్షన్ చూసి మళ్ళీ సమర్పించండి.',
   'events.catering.colSection': 'విభాగం',
   'events.catering.colDishes': 'వంటకాలు (కామాలతో వేరు చేయండి)',
   'events.catering.dishesPlaceholder': 'ఉదా. పనీర్ టిక్కా, వెజ్ స్ప్రింగ్ రోల్, హరా భరా కబాబ్',

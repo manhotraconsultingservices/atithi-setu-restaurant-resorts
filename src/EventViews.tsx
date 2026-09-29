@@ -3778,14 +3778,26 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
     if (!form.customer_name || !form.customer_phone || !form.event_date) { setError('Name, phone and date are required'); return; }
     setBusy(true);
     try {
-      const r = await fetch(`/api/public/restaurant/${encodeURIComponent(tenantId)}/events/inquiry`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, guest_count: Number(form.guest_count || 0) }),
-      });
-      const b = await r.json().catch(() => ({}));
-      if (!r.ok) { setError(b.error || 'Failed to submit'); return; }
+      // A gateway error (502/503/504, e.g. the few seconds of a server restart) or a
+      // dropped connection is retried twice before the guest sees anything, so an
+      // enquiry is not lost. The server treats a repeat of the same phone, date and
+      // venue within 15 minutes as the same enquiry, so a retry never duplicates it.
+      const body = JSON.stringify({ ...form, guest_count: Number(form.guest_count || 0) });
+      let r: Response | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          r = await fetch(`/api/public/restaurant/${encodeURIComponent(tenantId)}/events/inquiry`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+          });
+        } catch { r = null; }
+        if (r && r.status < 500) break;
+        if (attempt < 2) await new Promise(res => setTimeout(res, attempt === 0 ? 2000 : 5000));
+      }
+      if (!r) { setError(t('events.public.offline')); return; }
+      const b = await r.json().catch(() => null);
+      if (!r.ok) { setError((b && b.error) || t('events.public.serverBusy')); return; }
       setDone(true);
-    } catch { setError('Network error'); } finally { setBusy(false); }
+    } finally { setBusy(false); }
   };
 
   if (!data) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{t('common.loading')}</div>;
