@@ -23852,40 +23852,6 @@ ${data.tenant.name}`;
     }
   });
 
-  // Deletes an offer that never became a hire: DRAFT, DECLINED or EXPIRED.
-  // A SENT offer is with the candidate (decline it first) and an ACCEPTED one
-  // is linked to the employee it created, so both are refused (409). The
-  // signed copy goes too (private or, saved before 29 Sep 2026, public), and a
-  // DELETED row with the offer's details stays in the HR history.
-  app.delete("/api/restaurant/:id/hr/offer-letters/:offerId", authenticate, workforceStaff, requireTabAction('HR_PAYROLL', 'DELETE'), async (req: AuthRequest, res: Response) => {
-    try {
-      const db = await getTenantDb(req.params.id);
-      await _ensureHrAttachmentCols(db);
-      const offer: any = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
-      if (!offer) return res.status(404).json({ error: 'Offer not found' });
-      const status = String(offer.status || 'DRAFT').toUpperCase();
-      if (!['DRAFT', 'DECLINED', 'EXPIRED'].includes(status)) {
-        return res.status(409).json({
-          error: status === 'ACCEPTED' ? 'An accepted offer is linked to the employee it created and cannot be deleted.' : `A ${status} offer cannot be deleted; decline it first.`,
-          code: 'OFFER_NOT_DELETABLE', status,
-        });
-      }
-      const del: any = await db.run("DELETE FROM offer_letters WHERE id = ? AND status = ?", [offer.id, offer.status]);
-      if (!del?.changes) return res.status(409).json({ error: 'The offer changed while it was being deleted. Reload and try again.' });
-      if (offer.signed_file_key) await deletePrivateFile('hr-private', offer.signed_storage, offer.signed_file_key).catch(() => {});
-      _dropLegacyUpload(offer.signed_pdf_url);
-      await writeObjectAudit(db, req, {
-        objectType: 'OFFER_LETTER', objectId: offer.id, action: 'DELETED',
-        summary: `Deleted ${status.toLowerCase()} offer ${offer.offer_number || offer.id} to ${offer.candidate_name || 'candidate'}`,
-        before: { offer_number: offer.offer_number, candidate_name: offer.candidate_name, designation: offer.designation, ctc: offer.ctc, status, had_signed_copy: !!(offer.signed_file_key || offer.signed_pdf_url) },
-      });
-      res.json({ ok: true, deleted: offer.id });
-    } catch (err: any) {
-      console.error('hr/offer-letters delete error:', err?.message || err);
-      res.status(500).json({ error: 'Failed to delete the offer' });
-    }
-  });
-
   // ══════════════════════════════════════════════════════════════════════
   // HR-P1 #139 — Employee Self-Service Portal (/me/*)
   // ══════════════════════════════════════════════════════════════════════
@@ -70318,9 +70284,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'offer-letter-delete',
+    commit_marker: 'offer-letter-delete-removed',
     code_features: [
-      'offer-letter-delete  DELETE /hr/offer-letters/:offerId (HR_PAYROLL Delete). Only an offer that never became a hire can go: DRAFT, DECLINED or EXPIRED; SENT (decline it first) and ACCEPTED (linked to the employee it created) get 409 OFFER_NOT_DELETABLE. The signed copy is deleted with it (private hr-private copy, or a legacy /uploads file), and an OFFER_LETTER DELETED row with number, candidate, designation, CTC and status stays in the HR history. The test suite now deletes its throwaway offer instead of leaving a declined one each run. TC-HR-OFFER-DELETE.',
+      'offer-letter-delete-removed  The DELETE /hr/offer-letters/:offerId route added as offer-letter-delete was taken out again at the owner request: offer letters are never deleted from the system (decline or let them expire instead).',
       'private-procurement-files  Follow-up to private-hr-files. Supplier PAN / MSME / GST certificates (POST /procurement/suppliers/:supplierId/upload-doc) and GRN bill photos (POST /api/inventory/grn/:id/upload-bill) went to public/uploads with a guessable name, open to anyone. Both now use the memory upload and persistPrivateFile(private-docs); the storage key lives in a new private_attachments table (owner_type SUPPLIER slot PAN|MSME|GST, GRN slot BILL; created once per tenant), never on the supplier or GRN row, which many SELECT * routes return. The URL columns hold the signed-in route: GET /procurement/suppliers/:supplierId/documents/:docType/file (PROCUREMENT read) and GET /api/inventory/grn/:id/bill (inventoryReadStaff, as the GRN detail); both send private, no-store, nosniff and write DOCUMENT_VIEWED to object_audit_log first (503 and no file if that fails). The doc URL columns are no longer accepted by supplier create or edit. receipt-ocr reads the bill from memory and no longer saves it. Replacing a file deletes the old copy. POST /api/admin/procurement-files/migrate (SUPER_ADMIN, dryRun default) moves legacy files and deletes a plaintext file only if no other row names it (every tenant table plus the central restaurants row). Frontend: GRN bill and supplier certificate links fetch with the token (openStoredFile); the bill is a button, not an inline image. TC-PROCFILE-*.',
       'private-hr-files  Security fix from the 29 Sep survey. Signed offer letters (POST /hr/offer-letters/:offerId/upload-signed: candidate name, CTC, signature) and expense receipts (POST /hr/expenses/:claimId/receipt) went through the disk upload to public/uploads with a guessable Date.now() name and were served to anyone by GET /uploads/:filename. Both now use the memory upload and persistPrivateFile(hr-private) (AES-256-GCM); rows keep signed_/receipt_ storage, file_key, file_name, mime_type, migrated_from (added once per tenant by _ensureHrAttachmentCols, and in the db.ts DDL); signed_pdf_url / receipt_url hold the signed-in route. GET /hr/offer-letters/:offerId/signed-file needs HR_PAYROLL read plus HR_SENSITIVE View; GET /hr/expenses/:claimId/items/:itemId/receipt needs HR_PAYROLL read; both send private, no-store, nosniff and write DOCUMENT_OPENED to hr_sensitive_access_log first (_hrLogSensitive now resolves true or false; 503 and no file when the log fails). Every offer and expense response goes through _publicOfferRow / _publicExpenseItem (no storage key), and a receipt_url sent with a new claim (HR or self-service) is ignored, so a row cannot point at another file. Replacing a file deletes the old copy. POST /api/admin/hr-files/migrate (SUPER_ADMIN, dryRun by default, time-budgeted, idempotent) encrypts each legacy /uploads file, reads it back byte for byte, repoints the row and only then deletes the plaintext; a file two rows share is deleted after the last one moves. No screen links these files yet. TC-HRFILE-*.',
       'online-checkin-verification  Security fix from the 29 Sep survey. The public online check-in POST (/api/public/restaurant/:id/hotel/checkin/:bookingId) is keyed by the raw booking id (BK-<ms>-XXXX, printed on confirmations, not a secret) and only checked the phone when the caller chose to send verify_phone, so anyone holding a booking id could overwrite the ID number, email, nationality, state and special requests of any BOOKED booking. Verification is now mandatory: the signed token on the emailed pre-arrival link (?t=, HMAC tenant|booking|expiry, 30 days, CHECKIN_TOKEN_SECRET else JWT_SECRET-derived) or at least the last 4 digits of the phone on file; a booking with no phone can only be saved through the link; 5 wrong phone tries lock that booking for 30 minutes. The page asked for the last 4 digits while the server compared 10, so honest guests were being refused; the server now compares the trailing digits both sides have. Every save writes a ROOM_BOOKING audit row (ONLINE_CHECKIN), replacing an ID number already on file is logged first as ONLINE_CHECKIN_ID_REPLACED with the numbers masked and the save refused if that row cannot be written, blanks never wipe held values, and fields are length-capped. The GET only pre-fills special requests for the link holder. TC-HOTEL-CHECKIN-VERIFY.',
