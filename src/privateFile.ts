@@ -1,5 +1,5 @@
-// Booking documents (guest ID proofs, Hotel/Event/Spa booking attachments) are
-// stored encrypted and open only through a signed-in route that checks the
+// Booking documents (guest ID proofs, Hotel/Event/Spa booking attachments),
+// HR files, supplier certificates and GRN bills are stored encrypted and open only through a signed-in route that checks the
 // booking's permission and logs the view, so a plain <a href>, <img src> or
 // <iframe src> cannot load them. These fetch the file with the token and give
 // the browser a blob: URL instead.
@@ -13,6 +13,14 @@ export async function fetchPrivateFileUrl(url: string, token: string): Promise<s
     throw new Error(j.error || translate(getAppLanguage(), 'documents.openFailed'));
   }
   return URL.createObjectURL(await r.blob());
+}
+
+/** Opens a stored document URL: a signed-in /api/ file route is fetched with
+ *  the token; anything else (a link someone typed in before) opens as is. */
+export function openStoredFile(url: string, token: string): Promise<void> {
+  if (url.startsWith('/api/')) return openPrivateFile(url, token);
+  window.open(url, '_blank', 'noopener,noreferrer');
+  return Promise.resolve();
 }
 
 /** Opens the file in a new tab. Call it straight from a click: the tab is

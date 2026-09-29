@@ -521,7 +521,7 @@ async function readHrAttachment(kind: HrAttachmentKind, row: any): Promise<{ byt
   const base = path.basename(legacy);
   return { bytes: fs.readFileSync(legacy), mime: _LEGACY_EXT_MIME[path.extname(base).toLowerCase()] || '', name: base.replace(/^\d{10,}-/, '') };
 }
-function sendHrAttachment(req: any, res: Response, f: { bytes: Buffer; mime: string; name: string }): void {
+function sendPrivateFileResponse(req: any, res: Response, f: { bytes: Buffer; mime: string; name: string }): void {
   const mime = f.mime.toLowerCase();
   res.setHeader('Content-Type', GENERAL_ALLOWED_MIMES.has(mime) ? mime : 'application/octet-stream');
   res.setHeader('Content-Disposition', `${req.query?.download ? 'attachment' : 'inline'}; filename="${safeDownloadName(f.name || 'document')}"`);
@@ -555,6 +555,78 @@ async function _ensureHrAttachmentCols(db: any): Promise<void> {
     }
   }
   if (ok) _hrAttachmentColsEnsured.add(db);
+}
+
+// ── Supplier compliance documents and GRN bills (29 Sep 2026) ───────────────
+// Supplier PAN / MSME / GST certificates (suppliers.pan_doc_url, msme_doc_url,
+// gst_doc_url) and GRN bill photos (goods_receipts.bill_image_url) used to go
+// through the disk `upload` to public/uploads with a guessable name, open to
+// anyone. They are now encrypted into private-docs, and the storage key sits
+// in private_attachments (owner_type SUPPLIER with slot PAN|MSME|GST, or GRN
+// with slot BILL), never on the supplier or GRN row: both are read by many
+// SELECT * routes. The URL column holds the signed-in route only. The doc URL
+// columns are no longer accepted from a supplier create or edit, so a row can
+// never point at another file. Rows saved before then point at /uploads/<name>;
+// the file routes still read those, and POST /api/admin/procurement-files/migrate
+// moves them.
+type AttachmentOwner = 'SUPPLIER' | 'GRN';
+const SUPPLIER_DOC_COLS: Record<string, string> = { PAN: 'pan_doc_url', MSME: 'msme_doc_url', GST: 'gst_doc_url' };
+/** The URL column for a PAN / MSME / GST certificate, or null (own keys only: the value goes into SQL). */
+const _supplierDocCol = (docType: string): string | null => Object.prototype.hasOwnProperty.call(SUPPLIER_DOC_COLS, docType) ? SUPPLIER_DOC_COLS[docType] : null;
+function _supplierDocRoute(tenantId: string, supplierId: string, docType: string): string {
+  const e = encodeURIComponent;
+  return `/api/restaurant/${e(tenantId)}/procurement/suppliers/${e(supplierId)}/documents/${e(docType)}/file`;
+}
+function _grnBillRoute(grnId: string): string {
+  return `/api/inventory/grn/${encodeURIComponent(grnId)}/bill`;
+}
+const _privateAttachmentsEnsured = new WeakSet<any>();
+async function _ensurePrivateAttachments(db: any): Promise<void> {
+  if (_privateAttachmentsEnsured.has(db)) return;
+  await db.exec(`CREATE TABLE IF NOT EXISTS private_attachments (
+    id TEXT PRIMARY KEY, owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, slot TEXT NOT NULL,
+    storage TEXT NOT NULL, file_key TEXT NOT NULL, file_name TEXT, mime_type TEXT, size_bytes INTEGER,
+    migrated_from TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (owner_type, owner_id, slot))`);
+  _privateAttachmentsEnsured.add(db);
+}
+/** Encrypts a file into private-docs and makes it the one attachment in (owner, slot); the file it replaces is deleted. */
+async function savePrivateAttachment(db: any, tenantId: string, owner: AttachmentOwner, ownerId: string, slot: string,
+  f: { bytes: Buffer; name: string | null; mime: string | null }, migratedFrom: string | null = null): Promise<void> {
+  await _ensurePrivateAttachments(db);
+  const prior: any = await db.get("SELECT storage, file_key FROM private_attachments WHERE owner_type = ? AND owner_id = ? AND slot = ?", [owner, ownerId, slot]);
+  const stored = await persistPrivateFile('private-docs', tenantId, f.bytes);
+  try {
+    await db.run(
+      `INSERT INTO private_attachments (id, owner_type, owner_id, slot, storage, file_key, file_name, mime_type, size_bytes, migrated_from)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (owner_type, owner_id, slot) DO UPDATE SET storage = EXCLUDED.storage, file_key = EXCLUDED.file_key,
+         file_name = EXCLUDED.file_name, mime_type = EXCLUDED.mime_type, size_bytes = EXCLUDED.size_bytes,
+         migrated_from = EXCLUDED.migrated_from, created_at = CURRENT_TIMESTAMP`,
+      [`PATT-${Date.now()}-${randomUUID().slice(0, 8)}`, owner, ownerId, slot, stored.storage, stored.key, f.name, f.mime, f.bytes.length, migratedFrom]);
+  } catch (e) {
+    await deletePrivateFile('private-docs', stored.storage, stored.key).catch(() => {});
+    throw e;
+  }
+  if (prior?.file_key) await deletePrivateFile('private-docs', prior.storage, prior.file_key).catch(() => {});
+}
+/** The file behind (owner, slot): the private copy, or for a row saved before, the /uploads file its URL names. */
+async function readPrivateAttachment(db: any, owner: AttachmentOwner, ownerId: string, slot: string, url: any): Promise<{ bytes: Buffer; mime: string; name: string } | null> {
+  await _ensurePrivateAttachments(db);
+  const a: any = await db.get("SELECT storage, file_key, file_name, mime_type FROM private_attachments WHERE owner_type = ? AND owner_id = ? AND slot = ?", [owner, ownerId, slot]);
+  if (a?.file_key) {
+    const bytes = await readPrivateFile('private-docs', a.storage, a.file_key);
+    return bytes ? { bytes, mime: String(a.mime_type || ''), name: String(a.file_name || '') } : null;
+  }
+  const legacy = _legacyUploadPath(url);
+  if (!legacy || !fs.existsSync(legacy)) return null;
+  const base = path.basename(legacy);
+  return { bytes: fs.readFileSync(legacy), mime: _LEGACY_EXT_MIME[path.extname(base).toLowerCase()] || '', name: base.replace(/^\d{10,}-/, '') };
+}
+/** Deletes the /uploads file a replaced URL named, if it was one. */
+function _dropLegacyUpload(url: any): void {
+  const p = _legacyUploadPath(url);
+  if (p && fs.existsSync(p)) { try { fs.unlinkSync(p); } catch {} }
 }
 
 /**
@@ -23268,7 +23340,7 @@ You can also view all your payslips in the employee portal.
       const logged = await _hrLogSensitive(db, req, item.staff_id || null, 'DOCUMENT_OPENED',
         `Opened the receipt for ${item.claim_number || 'an expense claim'}${item.description ? ` (${item.description})` : ''}${req.query.download ? ', downloaded' : ''}`);
       if (!logged) return res.status(503).json({ error: 'The opening could not be recorded in the access log, so the file was not sent. Try again.' });
-      sendHrAttachment(req, res, f);
+      sendPrivateFileResponse(req, res, f);
     } catch (err: any) {
       console.error('hr/expenses receipt open error:', err?.message || err);
       res.status(500).json({ error: 'Failed to open the receipt' });
@@ -23773,7 +23845,7 @@ ${data.tenant.name}`;
       const logged = await _hrLogSensitive(db, req, offer.created_staff_id || null, 'DOCUMENT_OPENED',
         `Opened the signed offer letter ${offer.offer_number || offer.id} (${offer.candidate_name || 'candidate'})${req.query.download ? ', downloaded' : ''}`);
       if (!logged) return res.status(503).json({ error: 'The opening could not be recorded in the access log, so the file was not sent. Try again.' });
-      sendHrAttachment(req, res, f);
+      sendPrivateFileResponse(req, res, f);
     } catch (err: any) {
       console.error('hr/offer-letters signed-file error:', err?.message || err);
       res.status(500).json({ error: 'Failed to open the signed copy' });
@@ -26885,17 +26957,44 @@ ${data.tenant.name}`;
   });
 
   // Upload bill image for an existing GRN
-  app.post("/api/inventory/grn/:id/upload-bill", authenticate, inventoryStaff, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+  // Encrypted into private-docs (see the note near private_attachments); the
+  // bill opens only through GET /api/inventory/grn/:id/bill below.
+  app.post("/api/inventory/grn/:id/upload-bill", authenticate, inventoryStaff, idDocUpload.single('bill'), async (req: AuthRequest, res: Response) => {
     if (!(await _requireInvWrite(req, res, await _invModulesOf(req, "SELECT DISTINCT COALESCE(i.module, 'RESTAURANT') AS module FROM goods_receipt_items g JOIN ingredients i ON i.id = g.ingredient_id WHERE g.grn_id = ?", [req.params.id]), 2))) return;
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'bill')" });
-      const db = await getTenantDb(req.user!.restaurantId);
-      const billUrl = `/uploads/${req.file.filename}`;
-      await db.run("UPDATE goods_receipts SET bill_image_url = ? WHERE id = ?", [billUrl, req.params.id]);
+      const tenantId = String(req.user!.restaurantId);
+      const db = await getTenantDb(tenantId);
+      const grn: any = await db.get("SELECT id, bill_image_url FROM goods_receipts WHERE id = ?", [req.params.id]);
+      if (!grn) return res.status(404).json({ error: "GRN not found" });
+      await savePrivateAttachment(db, tenantId, 'GRN', grn.id, 'BILL', { bytes: req.file.buffer, name: req.file.originalname || null, mime: req.file.mimetype || null });
+      const billUrl = _grnBillRoute(grn.id);
+      await db.run("UPDATE goods_receipts SET bill_image_url = ? WHERE id = ?", [billUrl, grn.id]);
+      _dropLegacyUpload(grn.bill_image_url);
+      await writeObjectAudit(db, req, { objectType: 'GRN', objectId: grn.id, action: 'DOCUMENT_ADDED', summary: `Bill uploaded${req.file.originalname ? ` (${req.file.originalname})` : ''}` });
       res.json({ success: true, bill_image_url: billUrl });
     } catch (err) {
       console.error("Upload bill error:", err);
       res.status(500).json({ error: "Failed to upload bill" });
+    }
+  });
+
+  // Opens a GRN's bill: signed in, the same read gate as the GRN itself, sent
+  // private, no-store. Each opening is written to the object audit log
+  // (GRN, DOCUMENT_VIEWED); if it cannot be, nothing is sent.
+  app.get("/api/inventory/grn/:id/bill", authenticate, inventoryReadStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const grn: any = await db.get("SELECT id, bill_number, bill_image_url FROM goods_receipts WHERE id = ?", [req.params.id]);
+      if (!grn || !grn.bill_image_url) return res.status(404).json({ error: "No bill on this GRN" });
+      const f = await readPrivateAttachment(db, 'GRN', grn.id, 'BILL', grn.bill_image_url);
+      if (!f) return res.status(404).json({ error: "The stored file could not be read." });
+      const logged = await writeObjectAudit(db, req, { objectType: 'GRN', objectId: grn.id, action: 'DOCUMENT_VIEWED', summary: `Viewed the bill${grn.bill_number ? ` #${grn.bill_number}` : ''}${req.query.download ? ' (downloaded)' : ''}` });
+      if (!logged) return res.status(503).json({ error: "The view could not be recorded in the audit log, so the file was not sent. Try again." });
+      sendPrivateFileResponse(req, res, f);
+    } catch (err: any) {
+      console.error("GRN bill open error:", err?.message || err);
+      res.status(500).json({ error: "Failed to open the bill" });
     }
   });
 
@@ -30991,8 +31090,8 @@ ${data.tenant.name}`;
         pan_number, msme_registered, udyam_number, msme_class, msme_agreement_days, msme_is_trader,
         vendor_category, credit_limit, tds_category, tds_section,
         contract_start_date, contract_end_date, preferred_status,
-        pan_doc_url, msme_doc_url, gst_doc_url,
       } = req.body;
+      // pan_doc_url, msme_doc_url and gst_doc_url are set only by upload-doc.
       if (!name) return res.status(400).json({ error: "name is required" });
       const db = await getTenantDb(req.params.id);
       const id = `SUP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -31002,9 +31101,8 @@ ${data.tenant.name}`;
            bank_account_number, bank_name, ifsc_code, notes,
            pan_number, msme_registered, udyam_number, msme_class, msme_agreement_days, msme_is_trader,
            vendor_category, credit_limit, tds_category, tds_section,
-           contract_start_date, contract_end_date, preferred_status,
-           pan_doc_url, msme_doc_url, gst_doc_url, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           contract_start_date, contract_end_date, preferred_status, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, name, contact_name || null, phone || null, email || null, address || null,
          gst_number || null, lead_time_days || 0, payment_terms || null,
          credit_days || 0, supplier_type || 'GENERAL',
@@ -31014,8 +31112,7 @@ ${data.tenant.name}`;
          msme_agreement_days != null ? Number(msme_agreement_days) : null, msme_is_trader ? 1 : 0,
          vendor_category || null,
          credit_limit || null, tds_category || 'NIL', tds_section || null,
-         contract_start_date || null, contract_end_date || null, preferred_status || 'PREFERRED',
-         pan_doc_url || null, msme_doc_url || null, gst_doc_url || null]
+         contract_start_date || null, contract_end_date || null, preferred_status || 'PREFERRED']
       );
       const created = await db.query("SELECT * FROM suppliers WHERE id = ?", [id]);
       res.status(201).json(created[0]);
@@ -31034,7 +31131,7 @@ ${data.tenant.name}`;
         'pan_number', 'msme_registered', 'udyam_number', 'msme_class', 'msme_agreement_days', 'msme_is_trader',
         'vendor_category', 'credit_limit', 'tds_category', 'tds_section',
         'contract_start_date', 'contract_end_date', 'preferred_status',
-        'pan_doc_url', 'msme_doc_url', 'gst_doc_url',
+        // pan_doc_url, msme_doc_url, gst_doc_url: set only by upload-doc
       ];
       const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => ALLOWED.includes(k)));
       if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No valid fields to update" });
@@ -31062,18 +31159,47 @@ ${data.tenant.name}`;
   });
 
   // POST /api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc — compliance doc upload
-  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+  // Encrypted into private-docs (see the note near private_attachments); the
+  // certificate opens only through GET .../documents/:docType/file below.
+  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, procurementStaff, requireTabAction('PROCUREMENT', 'CREATE'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
       const docType = String(req.query.type || '').toUpperCase();
-      if (!['PAN', 'MSME', 'GST'].includes(docType)) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
+      const col = _supplierDocCol(docType);
+      if (!col) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-      const col = docType === 'PAN' ? 'pan_doc_url' : docType === 'MSME' ? 'msme_doc_url' : 'gst_doc_url';
-      const url = `/uploads/${req.file.filename}`;
       const db = await getTenantDb(req.params.id);
-      await db.run(`UPDATE suppliers SET ${col} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [url, req.params.supplierId]);
+      const sup: any = await db.get(`SELECT id, ${col} AS url FROM suppliers WHERE id = ?`, [req.params.supplierId]);
+      if (!sup) return res.status(404).json({ error: "Supplier not found" });
+      await savePrivateAttachment(db, req.params.id, 'SUPPLIER', sup.id, docType, { bytes: req.file.buffer, name: req.file.originalname || null, mime: req.file.mimetype || null });
+      const url = _supplierDocRoute(req.params.id, sup.id, docType);
+      await db.run(`UPDATE suppliers SET ${col} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [url, sup.id]);
+      _dropLegacyUpload(sup.url);
+      await writeObjectAudit(db, req, { objectType: 'SUPPLIER', objectId: sup.id, action: 'DOCUMENT_ADDED', summary: `${docType} certificate uploaded${req.file.originalname ? ` (${req.file.originalname})` : ''}` });
       res.json({ url });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to upload document" });
+    }
+  });
+
+  // Opens a supplier certificate: signed in with Procurement read, sent
+  // private, no-store. Each opening is written to the object audit log
+  // (SUPPLIER, DOCUMENT_VIEWED); if it cannot be, nothing is sent.
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/documents/:docType/file", authenticate, procurementStaff, requireTabAccess('PROCUREMENT'), async (req: AuthRequest, res: Response) => {
+    try {
+      const docType = String(req.params.docType || '').toUpperCase();
+      const col = _supplierDocCol(docType);
+      if (!col) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
+      const db = await getTenantDb(req.params.id);
+      const sup: any = await db.get(`SELECT id, name, ${col} AS url FROM suppliers WHERE id = ?`, [req.params.supplierId]);
+      if (!sup || !sup.url) return res.status(404).json({ error: "No such document on this supplier" });
+      const f = await readPrivateAttachment(db, 'SUPPLIER', sup.id, docType, sup.url);
+      if (!f) return res.status(404).json({ error: "The stored file could not be read." });
+      const logged = await writeObjectAudit(db, req, { objectType: 'SUPPLIER', objectId: sup.id, action: 'DOCUMENT_VIEWED', summary: `Viewed the ${docType} certificate of ${sup.name || sup.id}${req.query.download ? ' (downloaded)' : ''}` });
+      if (!logged) return res.status(503).json({ error: "The view could not be recorded in the audit log, so the file was not sent. Try again." });
+      sendPrivateFileResponse(req, res, f);
+    } catch (err: any) {
+      console.error('supplier document open error:', err?.message || err);
+      res.status(500).json({ error: "Failed to open the document" });
     }
   });
 
@@ -31754,11 +31880,12 @@ ${data.tenant.name}`;
   // Returns suggestions the frontend can drop into the GRN line-items form.
   // Falls back gracefully (returns the saved image + manual-entry hint) when
   // GEMINI_API_KEY isn't configured or the model fails.
-  app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), upload.single('bill'), async (req: AuthRequest, res: Response) => {
+  // The bill is read from memory and never saved (it used to be written to
+  // public/uploads and left there); attach it to the GRN with upload-bill.
+  app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), idDocUpload.single('bill'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No bill file uploaded (field: 'bill')" });
-      const billUrl = `/uploads/${req.file.filename}`;
-      const filePath = path.join(process.cwd(), 'public', 'uploads', req.file.filename);
+      const billUrl = null;
 
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
       if (!GEMINI_API_KEY || GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
@@ -31771,12 +31898,7 @@ ${data.tenant.name}`;
       }
 
       // Load the image
-      let imageBytes: Buffer;
-      try {
-        imageBytes = fs.readFileSync(filePath);
-      } catch {
-        return res.status(500).json({ error: "Saved bill image could not be read" });
-      }
+      const imageBytes: Buffer = req.file.buffer;
       const mimeType = req.file.mimetype || 'image/jpeg';
 
       // Ask Gemini Vision to extract line items
@@ -56280,6 +56402,118 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── Move supplier certificates and GRN bills saved before private storage
+  // (29 Sep 2026) ───────────────────────────────────────────────────────────
+  // Same steps as /api/admin/hr-files/migrate: for each supplier PAN / MSME /
+  // GST URL or GRN bill URL still naming /uploads/<name>, encrypt the file into
+  // private-docs (private_attachments), read it back byte for byte, repoint
+  // the URL column to the signed-in route, and only then delete the plaintext.
+  // Supplier doc URLs could be set to ANY string through supplier edit until
+  // now, so before deleting a file this also checks that no other row names it
+  // (every table of the tenant, and the central restaurants row: logos,
+  // watermarks and UPI QRs live in the same folder). A file still named
+  // elsewhere is encrypted and repointed here but left on disk and reported
+  // (kept_referenced). dryRun is the DEFAULT; budgetMs as for the HR mover.
+  app.post("/api/admin/procurement-files/migrate", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const dryRun = req.body?.dryRun !== false;
+    const onlyTenant = req.body?.tenantId ? String(req.body.tenantId) : null;
+    const budgetMs = Math.min(Math.max(Number(req.body?.budgetMs) || 60000, 5000), 85000);
+    const started = Date.now();
+    const overBudget = () => Date.now() - started > budgetMs;
+    const zero = () => ({ rows: 0, already_private: 0, to_migrate: 0, migrated: 0, missing: 0, unrecognised: 0, failed: 0, public_copies_removed: 0, kept_referenced: 0 });
+    const report: any = { dryRun, truncated: false, totals: zero(), by_kind: { SUPPLIER: zero(), GRN: zero() }, tenants: [] as any[] };
+    const bump = (t: any, kind: AttachmentOwner, k: string, detail?: any) => {
+      report.totals[k]++; report.by_kind[kind][k]++; t.counts[k]++;
+      if (detail !== undefined) (t[k === 'failed' ? 'failures' : k] ||= []).push(detail);
+    };
+    // Is /uploads/<name> named anywhere other than private_attachments?
+    const namedElsewhere = async (db: any, name: string): Promise<boolean> => {
+      const needle = `%/uploads/${name}%`;
+      if (await centralDb.get("SELECT 1 AS x FROM restaurants r WHERE r::text LIKE ? LIMIT 1", [needle]).catch(() => null)) return true;
+      const tables: any[] = await db.query("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'");
+      for (const { table_name } of tables) {
+        if (table_name === 'private_attachments' || !/^[a-z0-9_]+$/.test(table_name)) continue;
+        if (await db.get(`SELECT 1 AS x FROM "${table_name}" t WHERE t::text LIKE ? LIMIT 1`, [needle]).catch(() => null)) return true;
+      }
+      return false;
+    };
+    try {
+      const tenantIds: string[] = onlyTenant ? [onlyTenant]
+        : (await centralDb.query("SELECT id FROM restaurants ORDER BY id")).map((r: any) => String(r.id));
+      for (const tenantId of tenantIds) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(tenantId)) continue;
+        let db: any;
+        try { db = await getTenantDb(tenantId); } catch { continue; }
+        const rows: { kind: AttachmentOwner; id: string; slot: string; col: string; table: string; url: string }[] = [];
+        try {
+          const s = await db.query("SELECT id, pan_doc_url, msme_doc_url, gst_doc_url FROM suppliers WHERE COALESCE(pan_doc_url, '') <> '' OR COALESCE(msme_doc_url, '') <> '' OR COALESCE(gst_doc_url, '') <> ''");
+          for (const r of s) for (const [slot, col] of Object.entries(SUPPLIER_DOC_COLS)) if (r[col]) rows.push({ kind: 'SUPPLIER', id: r.id, slot, col, table: 'suppliers', url: String(r[col]) });
+        } catch { /* no procurement tables */ }
+        try {
+          const g = await db.query("SELECT id, bill_image_url FROM goods_receipts WHERE COALESCE(bill_image_url, '') <> ''");
+          for (const r of g) rows.push({ kind: 'GRN', id: r.id, slot: 'BILL', col: 'bill_image_url', table: 'goods_receipts', url: String(r.bill_image_url) });
+        } catch { /* no inventory tables */ }
+        if (!rows.length) continue;
+        await _ensurePrivateAttachments(db);
+        const t: any = { tenant: tenantId, counts: zero() };
+        for (const row of rows) {
+          bump(t, row.kind, 'rows');
+          const att: any = await db.get("SELECT file_key, migrated_from FROM private_attachments WHERE owner_type = ? AND owner_id = ? AND slot = ?", [row.kind, row.id, row.slot]);
+          const legacy = _legacyUploadPath(row.url);
+          if (!legacy) {
+            if (att?.file_key) {
+              bump(t, row.kind, 'already_private');
+              // Moved earlier; a plaintext copy may have been kept or survived a failed delete.
+              const from = String(att.migrated_from || '');
+              const plain = /^[\w.\-]+$/.test(from) && !from.startsWith('.') ? path.join(process.cwd(), "public", "uploads", from) : null;
+              if (plain && fs.existsSync(plain) && !dryRun && !overBudget() && !(await namedElsewhere(db, from))) {
+                try { fs.unlinkSync(plain); bump(t, row.kind, 'public_copies_removed'); } catch {}
+              }
+            } else bump(t, row.kind, 'unrecognised', { id: row.id, slot: row.slot, url: row.url.slice(0, 80) });
+            continue;
+          }
+          if (att?.file_key) { bump(t, row.kind, 'failed', { id: row.id, slot: row.slot, step: 'locate', error: 'a private copy exists but the URL still names /uploads' }); continue; }
+          if (!fs.existsSync(legacy)) { bump(t, row.kind, 'missing', { id: row.id, slot: row.slot }); continue; }
+          bump(t, row.kind, 'to_migrate');
+          if (dryRun) continue;
+          if (overBudget()) { report.truncated = true; continue; }
+          const name = path.basename(legacy);
+          try {
+            const bytes = fs.readFileSync(legacy);
+            await savePrivateAttachment(db, tenantId, row.kind, row.id, row.slot,
+              { bytes, name: name.replace(/^\d{10,}-/, ''), mime: _LEGACY_EXT_MIME[path.extname(name).toLowerCase()] || null }, name);
+            const back = await readPrivateAttachment(db, row.kind, row.id, row.slot, null);
+            if (!back || !back.bytes.equals(bytes)) throw new Error('private copy did not read back identical');
+            const newUrl = row.kind === 'SUPPLIER' ? _supplierDocRoute(tenantId, row.id, row.slot) : _grnBillRoute(row.id);
+            const upd = await db.run(`UPDATE ${row.table} SET ${row.col} = ? WHERE id = ? AND ${row.col} = ?`, [newUrl, row.id, row.url]);
+            if (!upd?.changes) throw new Error('row changed during the move (another run or a new upload?)');
+            bump(t, row.kind, 'migrated');
+            if (await namedElsewhere(db, name)) { bump(t, row.kind, 'kept_referenced', { id: row.id, slot: row.slot, file: name }); continue; }
+            fs.unlinkSync(legacy);
+            bump(t, row.kind, 'public_copies_removed');
+          } catch (e: any) {
+            // Undo a private copy the row does not point at.
+            const cur: any = await db.get(`SELECT ${row.col} AS url FROM ${row.table} WHERE id = ?`, [row.id]).catch(() => null);
+            if (cur && _legacyUploadPath(cur.url)) {
+              const a: any = await db.get("SELECT storage, file_key FROM private_attachments WHERE owner_type = ? AND owner_id = ? AND slot = ?", [row.kind, row.id, row.slot]).catch(() => null);
+              if (a?.file_key) {
+                await db.run("DELETE FROM private_attachments WHERE owner_type = ? AND owner_id = ? AND slot = ?", [row.kind, row.id, row.slot]).catch(() => {});
+                await deletePrivateFile('private-docs', a.storage, a.file_key).catch(() => {});
+              }
+            }
+            bump(t, row.kind, 'failed', { id: row.id, slot: row.slot, step: 'move', error: e?.message || String(e) });
+          }
+        }
+        report.tenants.push(t);
+      }
+      report.elapsed_ms = Date.now() - started;
+      res.json(report);
+    } catch (err: any) {
+      console.error('[procurement-files migrate]', err);
+      res.status(500).json({ error: err?.message || 'Migration failed', partial: report });
+    }
+  });
+
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
   // Check a room reserved for an EVENT in, without the desk. Used when the event
   // starts and by the hourly job for later nights of a multi-day event.
@@ -70050,8 +70284,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'private-hr-files',
+    commit_marker: 'private-procurement-files',
     code_features: [
+      'private-procurement-files  Follow-up to private-hr-files. Supplier PAN / MSME / GST certificates (POST /procurement/suppliers/:supplierId/upload-doc) and GRN bill photos (POST /api/inventory/grn/:id/upload-bill) went to public/uploads with a guessable name, open to anyone. Both now use the memory upload and persistPrivateFile(private-docs); the storage key lives in a new private_attachments table (owner_type SUPPLIER slot PAN|MSME|GST, GRN slot BILL; created once per tenant), never on the supplier or GRN row, which many SELECT * routes return. The URL columns hold the signed-in route: GET /procurement/suppliers/:supplierId/documents/:docType/file (PROCUREMENT read) and GET /api/inventory/grn/:id/bill (inventoryReadStaff, as the GRN detail); both send private, no-store, nosniff and write DOCUMENT_VIEWED to object_audit_log first (503 and no file if that fails). The doc URL columns are no longer accepted by supplier create or edit. receipt-ocr reads the bill from memory and no longer saves it. Replacing a file deletes the old copy. POST /api/admin/procurement-files/migrate (SUPER_ADMIN, dryRun default) moves legacy files and deletes a plaintext file only if no other row names it (every tenant table plus the central restaurants row). Frontend: GRN bill and supplier certificate links fetch with the token (openStoredFile); the bill is a button, not an inline image. TC-PROCFILE-*.',
       'private-hr-files  Security fix from the 29 Sep survey. Signed offer letters (POST /hr/offer-letters/:offerId/upload-signed: candidate name, CTC, signature) and expense receipts (POST /hr/expenses/:claimId/receipt) went through the disk upload to public/uploads with a guessable Date.now() name and were served to anyone by GET /uploads/:filename. Both now use the memory upload and persistPrivateFile(hr-private) (AES-256-GCM); rows keep signed_/receipt_ storage, file_key, file_name, mime_type, migrated_from (added once per tenant by _ensureHrAttachmentCols, and in the db.ts DDL); signed_pdf_url / receipt_url hold the signed-in route. GET /hr/offer-letters/:offerId/signed-file needs HR_PAYROLL read plus HR_SENSITIVE View; GET /hr/expenses/:claimId/items/:itemId/receipt needs HR_PAYROLL read; both send private, no-store, nosniff and write DOCUMENT_OPENED to hr_sensitive_access_log first (_hrLogSensitive now resolves true or false; 503 and no file when the log fails). Every offer and expense response goes through _publicOfferRow / _publicExpenseItem (no storage key), and a receipt_url sent with a new claim (HR or self-service) is ignored, so a row cannot point at another file. Replacing a file deletes the old copy. POST /api/admin/hr-files/migrate (SUPER_ADMIN, dryRun by default, time-budgeted, idempotent) encrypts each legacy /uploads file, reads it back byte for byte, repoints the row and only then deletes the plaintext; a file two rows share is deleted after the last one moves. No screen links these files yet. TC-HRFILE-*.',
       'online-checkin-verification  Security fix from the 29 Sep survey. The public online check-in POST (/api/public/restaurant/:id/hotel/checkin/:bookingId) is keyed by the raw booking id (BK-<ms>-XXXX, printed on confirmations, not a secret) and only checked the phone when the caller chose to send verify_phone, so anyone holding a booking id could overwrite the ID number, email, nationality, state and special requests of any BOOKED booking. Verification is now mandatory: the signed token on the emailed pre-arrival link (?t=, HMAC tenant|booking|expiry, 30 days, CHECKIN_TOKEN_SECRET else JWT_SECRET-derived) or at least the last 4 digits of the phone on file; a booking with no phone can only be saved through the link; 5 wrong phone tries lock that booking for 30 minutes. The page asked for the last 4 digits while the server compared 10, so honest guests were being refused; the server now compares the trailing digits both sides have. Every save writes a ROOM_BOOKING audit row (ONLINE_CHECKIN), replacing an ID number already on file is logged first as ONLINE_CHECKIN_ID_REPLACED with the numbers masked and the save refused if that row cannot be written, blanks never wipe held values, and fields are length-capped. The GET only pre-fills special requests for the link holder. TC-HOTEL-CHECKIN-VERIFY.',
       'private-guest-documents  Security fix from the 29 Sep fit-gap review. Guest ID proofs (guest_documents: passport, Aadhaar, visa from check-in) and the Documents node files on Hotel, Event and Spa bookings (object_documents) were stored unencrypted at a public R2 URL (documents/...) and opened with no sign-in; deleting a document left the file public. New files are AES-256-GCM encrypted (the HR file helper, now persistPrivateFile with an area: hr-private or private-docs) and rows keep storage + file_key; file_url is the signed-in route GET .../documents/:docId/file (hotel: hotelStaff + HOTEL_BOOKINGS read; events: EV_READ_BOOKINGS; spa: SPA_APPOINTMENTS), which decrypts and sends the file with Cache-Control private, no-store, and writes DOCUMENT_VIEWED to the booking Audit log first (writeObjectAudit now resolves true or false; if the row cannot be written the file is not sent, 503). List routes never return a storage URL. Legacy rows still open through the same route (read from R2 by key). POST /api/admin/private-documents/migrate (SUPER_ADMIN, dryRun by default) moves every legacy file into private-docs, reads it back byte for byte, repoints the row (migrated_from keeps the old key) and only then deletes the public object; objects no row points at are kept encrypted in orphaned_documents before deletion; idempotent, time-budgeted. Also fixed GET /uploads/:filename path traversal: Express decodes %2F, so documents%2F<file> or %2E%2E%2F reached subfolders and public/; it now accepts one plain [\w.-] name. Frontend: GuestDocumentsWidget, the booking document lightbox and ObjectDetail DocumentsView fetch with the token into a blob URL (src/privateFile.ts); ID thumbnails became typed tiles so an ID image is fetched, and logged, only when opened. TC-DOC-PRIVATE-*.',

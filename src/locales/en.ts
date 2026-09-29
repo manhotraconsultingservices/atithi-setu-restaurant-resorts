@@ -9,6 +9,7 @@ export const en: Record<string, string> = {
   'common.cancel': 'Cancel',
   'common.delete': 'Delete',
   'documents.openFailed': 'Could not open the document',
+  'documents.openBill': 'Open bill',
   'common.edit': 'Edit',
   'common.add': 'Add',
   'common.close': 'Close',

@@ -523,7 +523,7 @@ function parseCsv(text: string): { headers: string[]; rows: Record<string, strin
   return { headers, rows };
 }
 import { cn, todayIST } from './lib/utils';
-import { fetchPrivateFileUrl, openPrivateFile } from './privateFile';
+import { fetchPrivateFileUrl, openPrivateFile, openStoredFile } from './privateFile';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
   BarChart,
@@ -59969,6 +59969,8 @@ function GRNViewModal({ token, grn, onClose, onBillUploaded }: {
 }) {
   const [billUrl, setBillUrl] = useState(grn.bill_image_url);
   const fileInput = useRef<HTMLInputElement>(null);
+  const toast = useToast();
+  const { t: tr } = useT();
   const [uploading, setUploading] = useState(false);
 
   const handleUpload = async (file: File) => {
@@ -60020,15 +60022,20 @@ function GRNViewModal({ token, grn, onClose, onBillUploaded }: {
         </div>
         <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
           <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Bill Photo</p>
+          {/* The bill is stored encrypted: fetched with the token (and the
+              viewing logged) only when opened, not on every modal open. */}
           {billUrl ? (
-            <img src={billUrl} alt="Bill" className="w-full max-w-md rounded-xl border border-brand/10" />
+            <button type="button" onClick={() => openStoredFile(billUrl, token).catch((e: any) => toast.error(e.message))}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-white border border-brand/10 text-brand hover:ring-2 hover:ring-brand/30">
+              <span className="text-base">🧾</span>{tr('documents.openBill')}
+            </button>
           ) : (
             <p className="text-sm text-[#9c8e85]">No bill photo uploaded</p>
           )}
           <input
             ref={fileInput}
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf"
             className="hidden"
             onChange={e => e.target.files?.[0] && handleUpload(e.target.files[0])}
           />
@@ -69000,9 +69007,10 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   </div>
                   {(supplier360.pan_doc_url || supplier360.msme_doc_url || supplier360.gst_doc_url) && (
                     <div className="flex gap-2 mt-2 flex-wrap">
-                      {supplier360.pan_doc_url && <a href={supplier360.pan_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-brand underline">PAN cert</a>}
-                      {supplier360.msme_doc_url && <a href={supplier360.msme_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-brand underline">MSME cert</a>}
-                      {supplier360.gst_doc_url && <a href={supplier360.gst_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-brand underline">GST cert</a>}
+                      {([['pan_doc_url', 'PAN cert'], ['msme_doc_url', 'MSME cert'], ['gst_doc_url', 'GST cert']] as const).map(([k, label]) => supplier360[k] && (
+                        <button key={k} type="button" onClick={() => openStoredFile(String(supplier360[k]), token).catch((e: any) => toast.error(e.message))}
+                          className="text-[10px] font-bold text-brand underline">{label}</button>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -69231,7 +69239,8 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                           <label className="flex flex-col items-center justify-center gap-1 bg-[#faf7f2] rounded-2xl px-3 py-2.5 cursor-pointer hover:bg-[#f0ebe4] transition-colors">
                             <span className="text-[10px] font-bold text-[#9c8e85]">{dtype} Cert</span>
                             {supForm[urlKey] ? (
-                              <a href={String(supForm[urlKey])} target="_blank" rel="noreferrer" className="text-[10px] text-brand underline" onClick={e => e.stopPropagation()}>View</a>
+                              <button type="button" className="text-[10px] text-brand underline"
+                                onClick={e => { e.preventDefault(); e.stopPropagation(); openStoredFile(String(supForm[urlKey]), token).catch((err: any) => toast.error(err.message)); }}>View</button>
                             ) : (
                               <span className="text-[10px] text-brand">Upload</span>
                             )}
@@ -69243,6 +69252,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                                   const result = await fetch(`/api/restaurant/${restaurantId}/procurement/suppliers/${editSup.id}/upload-doc?type=${dtype}`, {
                                     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
                                   }).then(r => r.json());
+                                  if (!result.url) throw new Error(result.error);
                                   setSupForm(f => ({ ...f, [urlKey]: result.url }));
                                 } catch { toast.error('Upload failed'); }
                               }} />
