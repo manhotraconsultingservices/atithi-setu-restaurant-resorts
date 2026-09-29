@@ -74456,7 +74456,8 @@ function TelegramSetupGuide({ token }: { token: string }) {
 /* ─── OnlineCheckInPage — Sprint P2-F ─────────────────────────────────
    Public route /checkin/:tenantId/:bookingId. Guest pre-fills ID,
    nationality, email, special requests T-3 days before arrival.
-   Soft phone-last-4 verification before submit. No auth.            */
+   A save needs the signed ?t= token from the emailed link or the last
+   4 digits of the booking phone; the server refuses anything else.  */
 function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingId: string }) {
   const toast = useToast();
   const [info, setInfo] = useState<any>(null);
@@ -74464,6 +74465,9 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const checkinToken = useMemo(() => {
+    try { return new URLSearchParams(window.location.search).get('t') || ''; } catch { return ''; }
+  }, []);
   const [form, setForm] = useState({
     verify_phone: '',
     guest_id_proof: '',
@@ -74476,7 +74480,8 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/checkin/${bookingId}`);
+        const q = checkinToken ? `?t=${encodeURIComponent(checkinToken)}` : '';
+        const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/checkin/${bookingId}${q}`);
         if (!res.ok) {
           const e = await res.json().catch(() => ({}));
           throw new Error(e.error || `HTTP ${res.status}`);
@@ -74488,7 +74493,9 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
         setError(err?.message || 'Failed to load booking');
       } finally { setLoading(false); }
     })();
-  }, [tenantId, bookingId]);
+  }, [tenantId, bookingId, checkinToken]);
+  // The emailed link already proves who the guest is; without it the phone is required.
+  const needPhone = !info?.link_verified;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74497,7 +74504,7 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
       const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/checkin/${bookingId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, checkin_token: checkinToken || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -74568,18 +74575,18 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
 
           <form onSubmit={submit} className="px-6 pb-6 space-y-3">
             <p className="text-[11px] text-[#6b5d52] mb-1">
-              Pre-fill these details to skip the paperwork at arrival. We verify with the last 4 digits of the phone you used to book.
+              Pre-fill these details to skip the paperwork at arrival.{needPhone ? ' We verify with the last 4 digits of the phone you used to book.' : ''}
             </p>
-            <div>
+            {needPhone && <div>
               <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone verify (last 4 digits) *</label>
               <input
-                required maxLength={10}
+                required maxLength={13}
                 value={form.verify_phone}
                 onChange={e => setForm({ ...form, verify_phone: e.target.value.replace(/\D/g, '') })}
                 placeholder="e.g. 7011"
                 className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-brand/20 outline-none font-mono"
               />
-            </div>
+            </div>}
             <div>
               <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">ID Proof (Aadhaar / Passport)</label>
               <input
@@ -74630,10 +74637,10 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
             </div>
             <button
               type="submit"
-              disabled={submitting || !form.verify_phone}
+              disabled={submitting || (needPhone && form.verify_phone.length < 4)}
               className={cn(
                 "w-full px-4 py-3 rounded-2xl text-sm font-bold transition-all",
-                form.verify_phone && !submitting
+                (!needPhone || form.verify_phone.length >= 4) && !submitting
                   ? "bg-brand text-white hover:bg-brand-dark"
                   : "bg-brand/30 text-white cursor-not-allowed"
               )}

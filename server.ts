@@ -52564,11 +52564,57 @@ ${data.tenant.name}`;
   // front-desk paperwork at check-in (Form-C reporting now has the
   // data on hand).
   //
-  // The "token" is a stable HMAC-free identifier — the booking id.
-  // Since the URL contains the full id, lookup is direct. To prevent
-  // someone from guessing booking ids and submitting fake data, we
-  // also require the guest_phone to match what's on file as a soft
-  // verification check.
+  // The URL carries the raw booking id (BK-<ms>-XXXX), which is printed on
+  // confirmations and invoices, so it is NOT a secret. A save is accepted only
+  // when the caller proves they are the guest, one of:
+  //   • the signed token on the emailed pre-arrival link (?t=…), or
+  //   • the phone on file — at least its last 4 digits.
+  // A booking with no phone on file can only be saved through the link. Five
+  // wrong phone attempts lock the booking's form for 30 minutes, so the last-4
+  // check cannot be walked through all 10,000 values. Every save writes a
+  // ROOM_BOOKING audit row; replacing an ID number already on file is recorded
+  // as ONLINE_CHECKIN_ID_REPLACED, and the save is refused if that row can't
+  // be written.
+  const CHECKIN_TOKEN_SECRET = process.env.CHECKIN_TOKEN_SECRET || `${process.env.JWT_SECRET || 'atithi-setu'}:online-checkin`;
+  const CHECKIN_TOKEN_TTL_MS = 30 * 24 * 3600 * 1000;
+  const CHECKIN_MAX_FAILS = 5;
+  const CHECKIN_LOCK_MS = 30 * 60 * 1000;
+  const _checkinFails = new Map<string, { n: number; until: number }>();
+
+  function _signCheckinToken(tenantId: string, bookingId: string): string {
+    const payload = `${tenantId}|${bookingId}|${Date.now() + CHECKIN_TOKEN_TTL_MS}`;
+    const b64 = Buffer.from(payload).toString('base64url');
+    return `${b64}.${createHmac('sha256', CHECKIN_TOKEN_SECRET).update(payload).digest('base64url')}`;
+  }
+  function _checkinTokenValid(token: any, tenantId: string, bookingId: string): boolean {
+    try {
+      const [b64, sig] = String(token || '').split('.');
+      if (!b64 || !sig) return false;
+      const payload = Buffer.from(b64, 'base64url').toString();
+      const expected = createHmac('sha256', CHECKIN_TOKEN_SECRET).update(payload).digest('base64url');
+      const a = Buffer.from(sig), b = Buffer.from(expected);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+      const [t, bk, exp] = payload.split('|');
+      return t === tenantId && bk === bookingId && Date.now() <= Number(exp);
+    } catch { return false; }
+  }
+  // The guest may type the last 4 digits or the whole number, with or without
+  // a country code; compare the trailing digits both sides have (at least 4).
+  function _checkinPhoneMatches(onFileRaw: any, givenRaw: any): boolean {
+    const onFile = String(onFileRaw || '').replace(/\D/g, '');
+    const given  = String(givenRaw || '').replace(/\D/g, '');
+    if (onFile.length < 4 || given.length < 4) return false;
+    const n = Math.min(onFile.length, given.length, 10);
+    return onFile.slice(-n) === given.slice(-n);
+  }
+  function _checkinLink(tenantId: string, bookingId: string): string {
+    return `https://app.atithi-setu.com/checkin/${tenantId}/${bookingId}?t=${encodeURIComponent(_signCheckinToken(tenantId, bookingId))}`;
+  }
+  const _maskIdProof = (v: any) => {
+    const s = String(v || '').trim();
+    return s ? `••••${s.slice(-4)}` : '';
+  };
+
   app.get("/api/public/restaurant/:id/hotel/checkin/:bookingId", resolvePublicTenantParam, async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -52585,6 +52631,7 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: 'Online check-in is only available for confirmed bookings.' });
       }
       const room: any = await tenantDb.get("SELECT name, type FROM rooms WHERE id = ?", [b.room_id]);
+      const linkVerified = _checkinTokenValid(req.query.t, req.params.id, b.id);
       // Minimal public payload — no PII beyond what the guest already
       // knows (their own name + dates).
       res.json({
@@ -52596,8 +52643,10 @@ ${data.tenant.name}`;
         room_type: room?.type || null,
         num_guests: b.num_guests || 1,
         hotel_name: check.restaurant?.name,
-        // Surface existing values so the guest only updates what's missing
-        special_requests: b.special_requests || '',
+        // Special requests can carry health or access needs, so they are only
+        // pre-filled for the holder of the emailed link.
+        special_requests: linkVerified ? (b.special_requests || '') : '',
+        link_verified: linkVerified,
         // Display preference — so the online check-in page formats dates
         // in the property's preferred style (matches confirmation email).
         date_format: check.restaurant?.date_format || 'DD-MMM-YYYY',
@@ -52613,7 +52662,8 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const b: any = await tenantDb.get(
-        "SELECT id, guest_phone, status FROM room_bookings WHERE id = ?",
+        `SELECT id, guest_phone, status, guest_id_proof, guest_nationality, guest_state, guest_email, special_requests
+           FROM room_bookings WHERE id = ?`,
         [req.params.bookingId]
       );
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
@@ -52621,25 +52671,78 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: 'Online check-in is only available for confirmed bookings.' });
       }
       const body = req.body || {};
-      // Soft verification: phone last 10 digits must match on-file.
-      if (b.guest_phone && body.verify_phone) {
-        const onFile = String(b.guest_phone).replace(/\D/g, '').slice(-10);
-        const given  = String(body.verify_phone).replace(/\D/g, '').slice(-10);
-        if (onFile && given && onFile !== given) {
+
+      // Mandatory verification — the signed link, or the phone on file.
+      const failKey = `${req.params.id}|${b.id}`;
+      const fails = _checkinFails.get(failKey);
+      if (fails && fails.until > Date.now()) {
+        return res.status(429).json({ error: 'Too many attempts. Please try again in 30 minutes or contact the property.' });
+      }
+      let verifiedBy = '';
+      if (_checkinTokenValid(body.checkin_token, req.params.id, b.id)) {
+        verifiedBy = 'link';
+      } else if (String(body.verify_phone || '').trim()) {
+        if (_checkinPhoneMatches(b.guest_phone, body.verify_phone)) {
+          verifiedBy = 'phone';
+        } else {
+          const n = (fails && fails.until <= Date.now() && fails.n >= CHECKIN_MAX_FAILS ? 0 : (fails?.n || 0)) + 1;
+          _checkinFails.set(failKey, { n, until: n >= CHECKIN_MAX_FAILS ? Date.now() + CHECKIN_LOCK_MS : 0 });
           return res.status(403).json({ error: 'Phone number does not match the booking.' });
         }
       }
+      if (!verifiedBy) {
+        return res.status(403).json({
+          error: String(b.guest_phone || '').replace(/\D/g, '').length >= 4
+            ? 'Enter the last 4 digits of the phone number used to book.'
+            : 'Please open the check-in link from your pre-arrival email, or contact the property.',
+        });
+      }
+      _checkinFails.delete(failKey);
+
       // Allowed fields the guest can pre-fill (no rate / status / room change).
-      const allow = ['guest_id_proof', 'guest_nationality', 'guest_state', 'guest_email', 'special_requests'];
+      const limits: Record<string, number> = {
+        guest_id_proof: 100, guest_nationality: 60, guest_state: 60, guest_email: 200, special_requests: 1000,
+      };
       const patch: any = {};
-      for (const k of allow) if (k in body) patch[k] = body[k];
+      for (const k of Object.keys(limits)) {
+        if (!(k in body) || body[k] == null || typeof body[k] === 'object') continue;
+        patch[k] = String(body[k]).trim().slice(0, limits[k]);
+      }
+      if (patch.guest_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patch.guest_email)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
+      // A blank field never wipes what the front desk already holds.
+      for (const k of Object.keys(patch)) if (!patch[k] && b[k]) delete patch[k];
       if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to save.' });
 
-      const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
-      await tenantDb.run(
-        `UPDATE room_bookings SET ${setStr} WHERE id = ?`,
-        [...Object.values(patch), req.params.bookingId]
-      );
+      const changed = Object.keys(patch).filter(k => String(b[k] ?? '') !== patch[k]);
+      const idReplaced = changed.includes('guest_id_proof') && !!String(b.guest_id_proof || '').trim();
+      const shown = (k: string, v: any) => (k === 'guest_id_proof' ? _maskIdProof(v) : (v ?? ''));
+      const before: any = {}, after: any = {};
+      for (const k of changed) { before[k] = shown(k, b[k]); after[k] = shown(k, patch[k]); }
+      const guestActor: any = { user: { id: null, email: 'Guest (online check-in)', role: 'GUEST' } };
+      const audit = {
+        objectType: 'ROOM_BOOKING', objectId: b.id,
+        action: idReplaced ? 'ONLINE_CHECKIN_ID_REPLACED' : 'ONLINE_CHECKIN',
+        summary: (idReplaced
+          ? `Guest replaced the ID on file (${_maskIdProof(b.guest_id_proof)} → ${_maskIdProof(patch.guest_id_proof)}) via online check-in`
+          : `Online check-in form saved${changed.length ? ` — ${changed.join(', ')}` : ' — no changes'}`)
+          + ` · verified by ${verifiedBy === 'link' ? 'emailed link' : 'phone'}`,
+        before, after,
+      };
+      // Replacing an ID number must never go unrecorded: log first, refuse on failure.
+      if (idReplaced && !(await writeObjectAudit(tenantDb, guestActor, audit))) {
+        return res.status(500).json({ error: 'Could not save right now. Please try again or contact the property.' });
+      }
+
+      if (changed.length) {
+        const setStr = changed.map(k => `${k} = ?`).join(', ');
+        await tenantDb.run(
+          `UPDATE room_bookings SET ${setStr} WHERE id = ?`,
+          [...changed.map(k => patch[k]), b.id]
+        );
+      }
+      if (!idReplaced) await writeObjectAudit(tenantDb, guestActor, audit);
       res.json({ success: true });
     } catch (err) {
       console.error("online check-in submit error:", err);
@@ -69660,8 +69763,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'private-guest-documents',
+    commit_marker: 'online-checkin-verification',
     code_features: [
+      'online-checkin-verification  Security fix from the 29 Sep survey. The public online check-in POST (/api/public/restaurant/:id/hotel/checkin/:bookingId) is keyed by the raw booking id (BK-<ms>-XXXX, printed on confirmations, not a secret) and only checked the phone when the caller chose to send verify_phone, so anyone holding a booking id could overwrite the ID number, email, nationality, state and special requests of any BOOKED booking. Verification is now mandatory: the signed token on the emailed pre-arrival link (?t=, HMAC tenant|booking|expiry, 30 days, CHECKIN_TOKEN_SECRET else JWT_SECRET-derived) or at least the last 4 digits of the phone on file; a booking with no phone can only be saved through the link; 5 wrong phone tries lock that booking for 30 minutes. The page asked for the last 4 digits while the server compared 10, so honest guests were being refused; the server now compares the trailing digits both sides have. Every save writes a ROOM_BOOKING audit row (ONLINE_CHECKIN), replacing an ID number already on file is logged first as ONLINE_CHECKIN_ID_REPLACED with the numbers masked and the save refused if that row cannot be written, blanks never wipe held values, and fields are length-capped. The GET only pre-fills special requests for the link holder. TC-HOTEL-CHECKIN-VERIFY.',
       'private-guest-documents  Security fix from the 29 Sep fit-gap review. Guest ID proofs (guest_documents: passport, Aadhaar, visa from check-in) and the Documents node files on Hotel, Event and Spa bookings (object_documents) were stored unencrypted at a public R2 URL (documents/...) and opened with no sign-in; deleting a document left the file public. New files are AES-256-GCM encrypted (the HR file helper, now persistPrivateFile with an area: hr-private or private-docs) and rows keep storage + file_key; file_url is the signed-in route GET .../documents/:docId/file (hotel: hotelStaff + HOTEL_BOOKINGS read; events: EV_READ_BOOKINGS; spa: SPA_APPOINTMENTS), which decrypts and sends the file with Cache-Control private, no-store, and writes DOCUMENT_VIEWED to the booking Audit log first (writeObjectAudit now resolves true or false; if the row cannot be written the file is not sent, 503). List routes never return a storage URL. Legacy rows still open through the same route (read from R2 by key). POST /api/admin/private-documents/migrate (SUPER_ADMIN, dryRun by default) moves every legacy file into private-docs, reads it back byte for byte, repoints the row (migrated_from keeps the old key) and only then deletes the public object; objects no row points at are kept encrypted in orphaned_documents before deletion; idempotent, time-budgeted. Also fixed GET /uploads/:filename path traversal: Express decodes %2F, so documents%2F<file> or %2E%2E%2F reached subfolders and public/; it now accepts one plain [\w.-] name. Frontend: GuestDocumentsWidget, the booking document lightbox and ObjectDetail DocumentsView fetch with the token into a blob URL (src/privateFile.ts); ID thumbnails became typed tiles so an ID image is fetched, and logged, only when opened. TC-DOC-PRIVATE-*.',
       'payroll-guard-tables-sync-conflict-dates  Three faults found while seeding a new tenant. (1) An uncomputed payroll run could be approved, locked and marked paid with no employees and zero pay, and one run per month is allowed, so the month was blocked. Approve now refuses a run with no payslips (409 RUN_NOT_COMPUTED), and a never-computed run can be deleted whatever its status (it posted nothing, the payroll journal skips a zero run); the Payroll screen shows Delete empty run for it. (2) tables/sync inserted the tables and then returned 500, because its QR backfill had a literal containing a question mark that the tenant DB rewrote into a placeholder; the prefix is now a parameter. (3) Room-conflict and room-hold messages printed pg DATE objects as Mon Sep 28 2026 00:00:00 GMT; they now read 28-Sep-2026 via _humanDate.',
       'booking-shows-open-bill-total  Found by a charges check across every surface: bills, check-out, Guest Bills, master folio and invoice PDFs all showed the right total after a room upgrade, but the booking detail Financials box worked out Outstanding as booking total minus advance, which leaves out GST, room upgrades, room service and every other folio charge (a guest owing 4515 showed 3000). With an open folio the box now shows the room booking, the bill to date, paid and outstanding from the same outstanding endpoint check-out uses; without one it keeps the old estimate. The Reservations list returns open_folio_total and shows Bill X under the total when it differs.',
@@ -74799,7 +74903,7 @@ ${data.tenant.name}`;
                 guestName: b.guest_name,
                 checkIn: b.check_in_date,
                 checkOut: b.check_out_date,
-                checkinUrl: `https://app.atithi-setu.com/checkin/${t.id}/${b.id}`,
+                checkinUrl: _checkinLink(t.id, b.id),
               });
               totalSent++;
             } catch (e) {
