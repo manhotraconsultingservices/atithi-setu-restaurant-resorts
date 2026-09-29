@@ -146,6 +146,13 @@ fi
 log "→ Waiting for new version to become healthy (up to ${HEALTH_MAX_WAIT}s)…"
 if wait_for_health "$HEALTH_MAX_WAIT"; then
   log "✅ DEPLOY SUCCEEDED — $NEW_SHA is live"
+  # Keep the off-site backup service built and running (deploy/BACKUPS.md).
+  # Never fails the deploy — the backup's own alerts cover a broken backup.
+  if docker compose -f "$COMPOSE_FILE" up -d --build backup >>"$LOG_FILE" 2>&1; then
+    log "✓ Backup service up to date"
+  else
+    log "⚠ Backup service failed to build/start — check: docker compose -f $COMPOSE_FILE logs backup"
+  fi
   # Optional: ping a webhook for success notification
   exit 0
 else

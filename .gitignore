@@ -12,6 +12,8 @@ coverage/
 
 # Docker database backups
 backups/
+# Decrypted backups fetched by deploy/backup/restore.sh
+deploy/restore/
 
 # Claude Code internal files
 .claude/

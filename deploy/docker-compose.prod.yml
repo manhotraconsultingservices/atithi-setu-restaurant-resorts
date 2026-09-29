@@ -54,6 +54,25 @@ services:
     environment:
       - TUNNEL_TRANSPORT_PROTOCOL=quic
 
+  # Nightly encrypted off-site backup of the database and uploads.
+  # Configure BACKUP_* in deploy/.env — see deploy/BACKUPS.md.
+  backup:
+    build:
+      context: ./backup
+    container_name: atithi-setu-backup
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - PGHOST=db
+      - PGPORT=5432
+    volumes:
+      - app_uploads:/uploads:ro
+      - ./restore:/restore
+
 volumes:
   pg_data:
   app_uploads:

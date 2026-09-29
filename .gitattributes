@@ -1,1 +1,4 @@
 print-agent/dist/AtithiSetuPrintAgent.exe binary
+# Shell scripts run inside Linux containers / on the VPS — never CRLF.
+*.sh text eol=lf
+deploy/backup/Dockerfile text eol=lf

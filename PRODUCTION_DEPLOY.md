@@ -971,6 +971,8 @@ Set these up on day 1 — they work even when your server is unreachable:
 
 > ⚠️ **Critical:** All restaurant orders, menus, staff, and settings live in these backups. A failure without backup means permanent data loss.
 
+> ✅ **Production (Hostinger VPS, `deploy/docker-compose.prod.yml`) uses the automated `backup` service — see [`deploy/BACKUPS.md`](deploy/BACKUPS.md).** It dumps the database and uploads nightly, encrypts them, uploads them off-server, and runs a weekly restore test with alerts. The manual scripts below (which write to the same server) are for the older WSL/Nginx setup and for ad-hoc copies only.
+
 ### 9.1 What Must Be Backed Up
 
 | Data | Where It Lives | Backup Method |
