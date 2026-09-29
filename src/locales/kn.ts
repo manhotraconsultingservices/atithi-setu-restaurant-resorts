@@ -8,6 +8,7 @@ export const kn: Record<string, string> = {
   'common.delete': 'ಅಳಿಸಿ',
   'documents.openFailed': 'ದಾಖಲೆಯನ್ನು ತೆರೆಯಲು ಆಗಲಿಲ್ಲ',
   'documents.openBill': 'ಬಿಲ್ ತೆರೆಯಿರಿ',
+  'hr.offer.viewSignedCopy': 'ಸಹಿ ಮಾಡಿದ ಪ್ರತಿ',
   'common.edit': 'ಸಂಪಾದಿಸಿ',
   'common.add': 'ಸೇರಿಸಿ',
   'common.close': 'ಮುಚ್ಚಿ',

@@ -70804,7 +70804,11 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
 // ─── Offer Letters ─────────────────────────────────────────────────
 function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const toast = useToast();
+  const { t: tr } = useT();
   const canEdit = canWriteTab('HR_PAYROLL');
+  // The signed copy holds the candidate's signature and CTC: the server asks
+  // for HR Sensitive Data at View and logs each opening, so hide it otherwise.
+  const canOpenSigned = tabLevel('HR_SENSITIVE') >= 1;
   const [offers, setOffers] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
   const [offerHistory, setOfferHistory] = useState<any | null>(null);
@@ -70883,6 +70887,9 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
                   <td className="p-3">{o.status}</td>
                   <td className="p-3 space-x-1">
                     <button onClick={() => openOfferLetterPdf(o.id)} className="text-[10px] text-brand hover:underline">PDF</button>
+                    {o.has_signed_copy && o.signed_pdf_url && canOpenSigned && (
+                      <button onClick={() => openPrivateFile(o.signed_pdf_url, token).catch((e: any) => toast.error(e.message))} className="text-[10px] text-emerald-700 hover:underline">{tr('hr.offer.viewSignedCopy')}</button>
+                    )}
                     <button onClick={() => setOfferHistory(o)} className="text-[10px] text-[#6b5d52] hover:underline">History</button>
                     {canEdit && (o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
                   </td>

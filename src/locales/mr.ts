@@ -8,6 +8,7 @@ export const mr: Record<string, string> = {
   'common.delete': 'हटवा',
   'documents.openFailed': 'दस्तऐवज उघडता आला नाही',
   'documents.openBill': 'बिल उघडा',
+  'hr.offer.viewSignedCopy': 'स्वाक्षरी केलेली प्रत',
   'common.edit': 'संपादित करा',
   'common.add': 'जोडा',
   'common.close': 'बंद करा',

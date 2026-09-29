@@ -8,6 +8,7 @@ export const bn: Record<string, string> = {
   'common.delete': 'মুছুন',
   'documents.openFailed': 'নথি খোলা যায়নি',
   'documents.openBill': 'বিল খুলুন',
+  'hr.offer.viewSignedCopy': 'স্বাক্ষরিত কপি',
   'common.edit': 'সম্পাদনা',
   'common.add': 'যোগ করুন',
   'common.close': 'বন্ধ করুন',

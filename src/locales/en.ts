@@ -10,6 +10,7 @@ export const en: Record<string, string> = {
   'common.delete': 'Delete',
   'documents.openFailed': 'Could not open the document',
   'documents.openBill': 'Open bill',
+  'hr.offer.viewSignedCopy': 'Signed copy',
   'common.edit': 'Edit',
   'common.add': 'Add',
   'common.close': 'Close',

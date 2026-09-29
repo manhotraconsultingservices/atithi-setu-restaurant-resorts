@@ -8,6 +8,7 @@ export const gu: Record<string, string> = {
   'common.delete': 'કાઢી નાખો',
   'documents.openFailed': 'દસ્તાવેજ ખોલી શકાયો નહીં',
   'documents.openBill': 'બિલ ખોલો',
+  'hr.offer.viewSignedCopy': 'સહી કરેલી નકલ',
   'common.edit': 'સંપાદિત કરો',
   'common.add': 'ઉમેરો',
   'common.close': 'બંધ કરો',

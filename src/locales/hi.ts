@@ -8,6 +8,7 @@ export const hi: Record<string, string> = {
   'common.delete': 'हटाएँ',
   'documents.openFailed': 'दस्तावेज़ नहीं खुल सका',
   'documents.openBill': 'बिल खोलें',
+  'hr.offer.viewSignedCopy': 'हस्ताक्षरित प्रति',
   'common.edit': 'संपादित करें',
   'common.add': 'जोड़ें',
   'common.close': 'बंद करें',

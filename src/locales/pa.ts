@@ -8,6 +8,7 @@ export const pa: Record<string, string> = {
   'common.delete': 'ਮਿਟਾਓ',
   'documents.openFailed': 'ਦਸਤਾਵੇਜ਼ ਨਹੀਂ ਖੁੱਲ੍ਹ ਸਕਿਆ',
   'documents.openBill': 'ਬਿੱਲ ਖੋਲ੍ਹੋ',
+  'hr.offer.viewSignedCopy': 'ਦਸਤਖ਼ਤ ਕੀਤੀ ਕਾਪੀ',
   'common.edit': 'ਸੋਧੋ',
   'common.add': 'ਸ਼ਾਮਲ ਕਰੋ',
   'common.close': 'ਬੰਦ ਕਰੋ',
