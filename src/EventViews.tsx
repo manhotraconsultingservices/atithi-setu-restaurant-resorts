@@ -4,6 +4,7 @@
 // right sub-view; the public inquiry page is exported separately. Strings run
 // through the i18n t() so the whole module is translatable.
 // ════════════════════════════════════════════════════════════════════════
+import { postWithRetry, readJson } from './lib/postWithRetry';
 import { BRAND, BRAND_DARK } from './theme';
 import React, { useState, useEffect, useRef } from 'react';
 import { DataTable } from './components/DataTable';
@@ -3778,23 +3779,12 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
     if (!form.customer_name || !form.customer_phone || !form.event_date) { setError('Name, phone and date are required'); return; }
     setBusy(true);
     try {
-      // A gateway error (502/503/504, e.g. the few seconds of a server restart) or a
-      // dropped connection is retried twice before the guest sees anything, so an
-      // enquiry is not lost. The server treats a repeat of the same phone, date and
-      // venue within 15 minutes as the same enquiry, so a retry never duplicates it.
-      const body = JSON.stringify({ ...form, guest_count: Number(form.guest_count || 0) });
-      let r: Response | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          r = await fetch(`/api/public/restaurant/${encodeURIComponent(tenantId)}/events/inquiry`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
-          });
-        } catch { r = null; }
-        if (r && r.status < 500) break;
-        if (attempt < 2) await new Promise(res => setTimeout(res, attempt === 0 ? 2000 : 5000));
-      }
+      // Retries a gateway error or dropped connection with one idempotency key, so an
+      // enquiry is not lost to a server restart and a retry never makes a second one.
+      const r = await postWithRetry(`/api/public/restaurant/${encodeURIComponent(tenantId)}/events/inquiry`,
+        { ...form, guest_count: Number(form.guest_count || 0) });
       if (!r) { setError(t('events.public.offline')); return; }
-      const b = await r.json().catch(() => null);
+      const b = await readJson(r);
       if (!r.ok) { setError((b && b.error) || t('events.public.serverBusy')); return; }
       setDone(true);
     } finally { setBusy(false); }

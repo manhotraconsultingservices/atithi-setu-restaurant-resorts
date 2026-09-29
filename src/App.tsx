@@ -1,3 +1,4 @@
+import { postWithRetry, readJson } from './lib/postWithRetry';
 import { BRAND, BRAND_DARK } from './theme';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { TabErrorBoundary } from './components/TabErrorBoundary';
@@ -75063,12 +75064,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       };
       if (pickedRoom.category_id) bookingPayload.room_type_id = pickedRoom.category_id;
       else                        bookingPayload.room_id      = pickedRoom.id;
-      const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/booking`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bookingPayload),
-      });
-      const data = await res.json();
+      // Retries a gateway error or dropped connection with one idempotency key: a
+      // booking is not lost to a server restart, and if an attempt did land, the
+      // retry gets the same booking (and payment link) back, never a second one.
+      const res = await postWithRetry(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/booking`, bookingPayload);
+      if (!res) throw new Error('You seem to be offline. Your details are still here: check your connection and press Book again.');
+      const data = (await readJson(res)) || {};
+      if (!res.ok && res.status >= 500) throw new Error("We couldn't reach our server just now. Your details are still here: please press Book again in a minute.");
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setConfirmation(data);
       setBookingPaid(false);

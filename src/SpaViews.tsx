@@ -3,6 +3,7 @@
 // Single import surface for App.tsx: <SpaModule tab={activeTab} .../> dispatches
 // to the right view. Public booking page exported separately.
 // ════════════════════════════════════════════════════════════════════════
+import { postWithRetry, readJson } from './lib/postWithRetry';
 import { BRAND, BRAND_DARK } from './theme';
 import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
@@ -3026,13 +3027,16 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
     if (!slot || !guest.client_name || !guest.client_phone) return;
     setBusy(true); setError('');
     try {
-      const r = await fetch(`/api/public/restaurant/${restaurantId}/spa/booking`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, assistant_ids: slot.assistant_ids, ...guest,
+      // Retries a gateway error or dropped connection with one idempotency key: a
+      // booking is not lost to a server restart, and if an attempt did land, the retry
+      // gets the same booking back rather than the slot looking "just taken".
+      const r = await postWithRetry(`/api/public/restaurant/${restaurantId}/spa/booking`,
+        { service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, assistant_ids: slot.assistant_ids, ...guest,
           client_gender: genderPick.guest_gender || undefined, therapist_gender_pref: genderPick.therapist_gender || undefined,
-          pay_option: effectivePayChoice }),
-      });
-      const b = await r.json();
+          pay_option: effectivePayChoice });
+      if (!r) { setError('You seem to be offline. Your details are still here: check your connection and press Book again.'); return; }
+      const b = (await readJson(r)) || {};
+      if (!r.ok && r.status >= 500) { setError("We couldn't reach our server just now. Your details are still here: please press Book again in a minute."); return; }
       if (!r.ok) {
         // The time went while the guest was filling in their details: back to the
         // times, which reload, saying which are still free.

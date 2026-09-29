@@ -371,6 +371,50 @@ async function _ensureGuestDocPrivateCols(db: any): Promise<void> {
   }
   if (ok) _guestDocColsEnsured.add(db);
 }
+// ── Replaying a guest submit that is retried ──────────────────────────────
+// The public booking pages retry a submit that hit a gateway error (a deploy
+// restart answers 502 for 10-20 seconds) or a dropped connection. A retry can
+// arrive after the first attempt DID create the booking and only its reply was
+// lost, so the page sends one Idempotency-Key per click and every retry reuses
+// it. The first successful reply is stored against the key; a repeat gets that
+// same reply back (same booking, same payment link), never a second booking.
+// Stored in the tenant DB, not memory, because the restart is the very case.
+const _publicIdemEnsured = new WeakSet<any>();
+async function _ensurePublicIdemTable(db: any): Promise<void> {
+  if (_publicIdemEnsured.has(db)) return;
+  await db.exec(`CREATE TABLE IF NOT EXISTS public_request_replay (
+    idem_key TEXT NOT NULL, scope TEXT NOT NULL, status_code INTEGER NOT NULL,
+    response_json TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (idem_key, scope))`);
+  _publicIdemEnsured.add(db);
+}
+function publicIdempotency(scope: string) {
+  return async (req: any, res: any, next: any) => {
+    const raw = String(req.get('Idempotency-Key') || req.body?.idempotency_key || '').trim();
+    if (!/^[A-Za-z0-9_-]{16,80}$/.test(raw)) return next();
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensurePublicIdemTable(db);
+      const hit: any = await db.get(
+        `SELECT status_code, response_json FROM public_request_replay
+          WHERE idem_key = ? AND scope = ? AND created_at > NOW() - INTERVAL '1 day'`, [raw, scope]);
+      if (hit) {
+        let body: any; try { body = JSON.parse(hit.response_json); } catch { body = { success: true }; }
+        res.set('Idempotent-Replay', 'true');
+        return res.status(Number(hit.status_code) || 200).json(body);
+      }
+      const origJson = res.json.bind(res);
+      res.json = (body: any) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          db.run(`INSERT INTO public_request_replay (idem_key, scope, status_code, response_json) VALUES (?, ?, ?, ?)
+                  ON CONFLICT (idem_key, scope) DO NOTHING`, [raw, scope, res.statusCode, JSON.stringify(body ?? null)]).catch(() => {});
+        }
+        return origJson(body);
+      };
+    } catch { /* replay is a safety net; never block the booking over it */ }
+    next();
+  };
+}
 const _objectDocsEnsured = new WeakSet<any>();
 async function ensureObjectDocumentsTable(tenantDb: DbInterface): Promise<void> {
   if (_objectDocsEnsured.has(tenantDb)) return;
@@ -42626,7 +42670,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load events page" }); }
   });
 
-  app.post("/api/public/restaurant/:id/events/inquiry", resolvePublicTenantParam, async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/events/inquiry", resolvePublicTenantParam, publicIdempotency('event-inquiry'), async (req: Request, res: Response) => {
     try {
       const gate = await publicEventsGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Events not available" });
@@ -42705,7 +42749,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to compute availability" }); }
   });
 
-  app.post("/api/public/restaurant/:id/spa/booking", resolvePublicTenantParam, async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/spa/booking", resolvePublicTenantParam, publicIdempotency('spa-booking'), async (req: Request, res: Response) => {
     try {
       const gate = await publicSpaGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
@@ -52463,7 +52507,7 @@ ${data.tenant.name}`;
   // Public booking creation. Anyone can hit this — basic rate-limit-
   // friendly fields-only; status starts BOOKED, booking_source set to
   // 'DIRECT_WEB' so reports can attribute revenue.
-  app.post("/api/public/restaurant/:id/hotel/booking", resolvePublicTenantParam, async (req: Request, res: Response) => {
+  app.post("/api/public/restaurant/:id/hotel/booking", resolvePublicTenantParam, publicIdempotency('hotel-booking'), async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -70299,8 +70343,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'event-inquiry-retry-idempotent',
+    commit_marker: 'public-booking-idempotent-retry',
     code_features: [
+      'public-booking-idempotent-retry  The public hotel and spa booking pages now get the same protection as the event enquiry form. A shared postWithRetry helper (src/lib/postWithRetry.ts) retries a gateway error or dropped connection twice with ONE Idempotency-Key per click; a new publicIdempotency middleware on the three public POST routes stores the first successful reply in a tenant table public_request_replay (created once per tenant per process) and answers a repeat of the key with that same reply and an Idempotent-Replay header, so a retry after a lost reply returns the same booking and payment link instead of a second booking or a slot that looks just taken. Replies are kept in the database, not memory, because a server restart is the case being handled. Non-JSON replies (a gateway error page) show a clear message instead of Unexpected token. TC-PUBLIC-REPLAY-HOTEL, TC-PUBLIC-REPLAY-INQUIRY.',
       'event-inquiry-retry-idempotent  Owner reported the public Enquire Now form showing Failed to submit. The endpoint and form were working when reproduced; the report came during a run of deploys, and a deploy restart answers 502 for 10-20 seconds, which the form turned into a lost enquiry. The guest page now retries a gateway error or dropped connection twice (after about 2 and 5 seconds) before showing a message, and the message says the server could not be reached and the details are still filled in. The inquiry endpoint answers a repeat of the same phone, date and venue within 15 minutes with the existing enquiry (duplicate true), so a retry never creates two. TC-EVT-INQUIRY-IDEMPOTENT.',
       'offer-letter-delete-removed  The DELETE /hr/offer-letters/:offerId route added as offer-letter-delete was taken out again at the owner request: offer letters are never deleted from the system (decline or let them expire instead).',
       'private-procurement-files  Follow-up to private-hr-files. Supplier PAN / MSME / GST certificates (POST /procurement/suppliers/:supplierId/upload-doc) and GRN bill photos (POST /api/inventory/grn/:id/upload-bill) went to public/uploads with a guessable name, open to anyone. Both now use the memory upload and persistPrivateFile(private-docs); the storage key lives in a new private_attachments table (owner_type SUPPLIER slot PAN|MSME|GST, GRN slot BILL; created once per tenant), never on the supplier or GRN row, which many SELECT * routes return. The URL columns hold the signed-in route: GET /procurement/suppliers/:supplierId/documents/:docType/file (PROCUREMENT read) and GET /api/inventory/grn/:id/bill (inventoryReadStaff, as the GRN detail); both send private, no-store, nosniff and write DOCUMENT_VIEWED to object_audit_log first (503 and no file if that fails). The doc URL columns are no longer accepted by supplier create or edit. receipt-ocr reads the bill from memory and no longer saves it. Replacing a file deletes the old copy. POST /api/admin/procurement-files/migrate (SUPER_ADMIN, dryRun default) moves legacy files and deletes a plaintext file only if no other row names it (every tenant table plus the central restaurants row). Frontend: GRN bill and supplier certificate links fetch with the token (openStoredFile); the bill is a button, not an inline image. TC-PROCFILE-*.',
