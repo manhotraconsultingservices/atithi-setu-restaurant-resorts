@@ -25403,19 +25403,31 @@ ${data.tenant.name}`;
     //   6 from, 7 to (wastage)   8 from, 9 to (theoretical)   10 to (closing)
     //   11 module
     // Anything reordered here silently produces a plausible, wrong statement.
+    //
+    // DAY BOUNDARIES ARE IST. recorded_at holds UTC (CURRENT_TIMESTAMP in a UTC
+    // session), and a bare ?::date is UTC midnight, which is 05:30 IST. So stock
+    // received between 00:00 and 05:30 IST on the 1st was counted as the
+    // PREVIOUS month's closing stock as well as this month's, and the close
+    // journal released it as "opening" with one line and capitalised it with the
+    // next: net zero on the asset account (TC-INV-PERIOD-GL, 1 Oct 2026). Every
+    // boundary is shifted back 5h30m so it falls on IST midnight. A back-dated
+    // movement stored as a bare date (00:00) still lands on its own day.
+    const B = (expr: string) => `(${expr} - INTERVAL '330 minutes')`;
+    const FROM = B('?::date');
+    const END = B("?::date + INTERVAL '1 day'");
     const rows: any[] = await db.query(
       `SELECT i.id, i.name, i.unit, ${_INV_UNIT_COST_SQL} AS unit_price,
-              COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date THEN sm.qty_delta ELSE 0 END), 0) AS opening_qty,
-              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+              COALESCE(SUM(CASE WHEN sm.recorded_at < ${FROM} THEN sm.qty_delta ELSE 0 END), 0) AS opening_qty,
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ${FROM} AND sm.recorded_at < ${END}
                                  AND sm.movement_type IN ('GRN','RECEIVE') THEN sm.qty_delta ELSE 0 END), 0) AS purchases_qty,
-              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ${FROM} AND sm.recorded_at < ${END}
                                  AND sm.movement_type IN ('MANUAL','ADJUST','COUNT_ADJUSTMENT','REVERSAL')
                                  THEN sm.qty_delta ELSE 0 END), 0) AS other_in_qty,
-              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ${FROM} AND sm.recorded_at < ${END}
                                  AND sm.movement_type = 'WASTAGE' THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS wastage_qty,
-              COALESCE(SUM(CASE WHEN sm.recorded_at >= ?::date AND sm.recorded_at < ?::date + INTERVAL '1 day'
+              COALESCE(SUM(CASE WHEN sm.recorded_at >= ${FROM} AND sm.recorded_at < ${END}
                                  AND sm.movement_type IN ('CONSUMPTION','SPA_CONSUMPTION') THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS theoretical_qty,
-              COALESCE(SUM(CASE WHEN sm.recorded_at < ?::date + INTERVAL '1 day' THEN sm.qty_delta ELSE 0 END), 0) AS closing_qty
+              COALESCE(SUM(CASE WHEN sm.recorded_at < ${END} THEN sm.qty_delta ELSE 0 END), 0) AS closing_qty
          FROM ingredients i
          LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
         WHERE i.is_active = 1 AND COALESCE(i.module, 'RESTAURANT') = ?
@@ -25526,6 +25538,52 @@ ${data.tenant.name}`;
     return true;
   };
 
+  // The ONE date rule for a stock-close journal AND every reversal of it: the
+  // period end, but never in the future (IST). Closing October on the 1st used
+  // to post the close on the 1st but reverse it on the 31st, so any report run
+  // "up to today" showed each re-close's journal with none of the reversals
+  // beside it — the stock counted once per close. Same rule on both sides and
+  // a close and its reversal always fall in the same report window.
+  const _invCloseGlDate = (periodTo: any): string => {
+    const end = normaliseDateIso(periodTo);
+    const today = _todayIST();
+    return end && end < today ? end : today;
+  };
+
+  // Reverse EVERY close journal still standing for a period, not just the one
+  // the period row remembers. A close whose reversal was refused, a crash
+  // between posting and recording the ref, or two closes racing would otherwise
+  // leave a second journal standing that no later close ever touches — both
+  // balanced, so the trial balance ties and the stock is simply doubled.
+  // `_reverseJournal` is idempotent on REV-<ref>, so journals already reversed
+  // are a no-op. Returns ok:false (and posts nothing further) on the first
+  // reversal the ledger refuses, so the caller can stop before posting anew.
+  const _reverseStandingInvCloses = async (
+    db: DbInterface, tenantId: string, periodId: string, knownRef: string | null,
+    periodTo: any, reason: string, postedBy: string | null,
+  ): Promise<{ ok: boolean; reversed: string[]; failedRef?: string; why?: string }> => {
+    const rows: any[] = await db.query(
+      `SELECT DISTINCT journal_ref FROM gl_entries
+        WHERE restaurant_id = ? AND source_type = 'INVENTORY_CLOSE' AND source_id = ?`,
+      [tenantId, periodId]);
+    const refs = new Set<string>((rows || []).map((r: any) => String(r.journal_ref || '').trim()).filter(Boolean));
+    if (knownRef) refs.add(knownRef);
+    const reversed: string[] = [];
+    for (const ref of refs) {
+      const rev = await _reverseJournal(db, tenantId, ref, {
+        reversalRef: `REV-${ref}`,
+        date: _invCloseGlDate(periodTo),
+        sourceType: 'INVENTORY_CLOSE_REVERSAL', sourceId: periodId,
+        reason, postedBy,
+      });
+      if (rev.ok) { if (rev.reversed) reversed.push(rev.reversalRef); continue; }
+      // Nothing left to reverse (never posted, or its lines are already flagged).
+      if (rev.reason === 'no_original_journal') continue;
+      return { ok: false, reversed, failedRef: ref, why: rev.reason };
+    }
+    return { ok: true, reversed };
+  };
+
   // Preview — compute WITHOUT writing anything. A close is a statement about a
   // month; it should be looked at before it is made.
   app.get("/api/restaurant/:id/inventory/periods/preview", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
@@ -25557,6 +25615,24 @@ ${data.tenant.name}`;
       const prior: any = await db.get(
         "SELECT id, gl_journal_ref FROM inventory_periods WHERE module = ? AND period_key = ?", [mod, key]).catch(() => null);
       const pid = prior?.id || `INVP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+      // Take the previous close off the ledger FIRST, before the period row is
+      // rewritten. If the ledger refuses the reversal (say the accounting period
+      // is signed off) the re-close stops here with the old close intact, rather
+      // than posting a second journal beside the first. See
+      // _reverseStandingInvCloses for why every standing journal is swept.
+      if (prior) {
+        const sweep = await _reverseStandingInvCloses(db, req.params.id, pid,
+          String(prior.gl_journal_ref || '').trim() || null, to,
+          `Re-close of ${mod} stock for ${key}`, req.user?.email || req.user?.id || null);
+        if (!sweep.ok) {
+          return res.status(409).json({
+            error: `Could not reverse the previous close journal (${sweep.failedRef}: ${sweep.why || 'refused'}), so ${key} was left as it was. ${sweep.why === 'ACCOUNTING_PERIOD_CLOSED' ? 'Reopen the accounting period first.' : ''}`.trim(),
+            code: 'INVENTORY_RECLOSE_GL_FAILED', period_id: pid, journal_ref: sweep.failedRef,
+          });
+        }
+      }
+
       if (prior) {
         await db.run(
           `UPDATE inventory_periods SET period_from=?, period_to=?, status='CLOSED', count_id=?,
@@ -25606,8 +25682,9 @@ ${data.tenant.name}`;
       // Purchases are already expensed as the supplier invoices post, so the net
       // effect is COGS = purchases + opening - closing. Exactly right.
       const acct = _INVENTORY_GL_ACCOUNTS[mod] || _INVENTORY_GL_ACCOUNTS.SHARED;
-      // EVERY close gets its OWN journal ref, and a re-close reverses the exact
-      // ref the previous close recorded on this period.
+      // EVERY close gets its OWN journal ref, and a re-close reverses every
+      // close journal still standing on this period (done above, before the
+      // period row was rewritten).
       //
       // The obvious design — one fixed ref per module-month, reversed and
       // re-posted — is quietly broken, and the third close is where it bites.
@@ -25619,16 +25696,6 @@ ${data.tenant.name}`;
       // that does not exist and nothing would flag it, because both journals
       // are individually balanced.
       const glRef = `INVCLOSE-${mod}-${key}-${Date.now()}`;
-      const priorGlRef = String(prior?.gl_journal_ref || '').trim();
-      if (priorGlRef) {
-        await _reverseJournal(db, req.params.id, priorGlRef, {
-          reversalRef: `REV-${priorGlRef}`,
-          date: to,
-          sourceType: 'INVENTORY_CLOSE_REVERSAL', sourceId: pid,
-          reason: `Re-close of ${mod} stock for ${key}`,
-          postedBy: req.user?.email || req.user?.id || null,
-        }).catch(() => {});
-      }
       const glLines: GlLine[] = [];
       if (t.opening_value > 0) {
         glLines.push(
@@ -25645,9 +25712,9 @@ ${data.tenant.name}`;
       // Post on the period end, but NEVER INTO THE FUTURE. Closing September on
       // the 12th would otherwise date the journal the 30th, where it sits
       // outside every report run "up to today" — present in the ledger and
-      // invisible in the trial balance, which is the worst of both.
-      const todayIso = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
-      const postDate = to > todayIso ? todayIso : to;
+      // invisible in the trial balance, which is the worst of both. Reversals
+      // use the same rule (_invCloseGlDate), so they always sit beside it.
+      const postDate = _invCloseGlDate(to);
       let posted: string | null = null;
       if (glLines.length) {
         // The result is CHECKED: _postGlEntries refuses an unbalanced journal and
@@ -25657,11 +25724,13 @@ ${data.tenant.name}`;
           req.user?.email || req.user?.id || null, mod);
         if (glRes?.ok) {
           posted = glRef;
-          await db.run("UPDATE inventory_periods SET gl_journal_ref = ? WHERE id = ?", [glRef, pid]);
         } else {
           console.warn(`[inventory-close] journal ${glRef} refused: ${glRes?.reason || 'unknown'}`);
         }
       }
+      // Always recorded, even when null: the previous close has been reversed,
+      // so the row must not keep pointing at it as though it still stood.
+      await db.run("UPDATE inventory_periods SET gl_journal_ref = ? WHERE id = ?", [posted, pid]);
 
       await writeObjectAudit(db, req, {
         objectType: 'INVENTORY_PERIOD', objectId: pid,
@@ -25704,26 +25773,21 @@ ${data.tenant.name}`;
       }
 
       const priorGlRef = String(period.gl_journal_ref || '').trim();
-      let reversed: string | null = null;
-      if (priorGlRef) {
-        const rev = await _reverseJournal(db, req.params.id, priorGlRef, {
-          reversalRef: `REV-${priorGlRef}`,
-          date: period.period_to,
-          sourceType: 'INVENTORY_CLOSE_REVERSAL', sourceId: period.id,
-          reason: `Reopen of ${period.module} stock for ${period.period_key}: ${reason}`,
-          postedBy: req.user?.email || req.user?.id || null,
-        }).catch(() => null);
-        // Only clear the ref once the reversal is actually in the ledger. If it
-        // failed, the period stays CLOSED and the books stay consistent rather
-        // than the stock being released with nothing to release it.
-        if (!rev?.ok) {
-          return res.status(409).json({
-            error: 'Could not reverse the close journal, so the period was left closed',
-            code: 'INVENTORY_REOPEN_GL_FAILED', period_id: period.id,
-          });
-        }
-        reversed = rev.reversalRef;
+      // Every close journal still standing on this period is reversed, dated by
+      // the same rule the close used (_invCloseGlDate).
+      const sweep = await _reverseStandingInvCloses(db, req.params.id, period.id, priorGlRef || null,
+        period.period_to, `Reopen of ${period.module} stock for ${period.period_key}: ${reason}`,
+        req.user?.email || req.user?.id || null);
+      // Only clear the ref once the reversal is actually in the ledger. If it
+      // failed, the period stays CLOSED and the books stay consistent rather
+      // than the stock being released with nothing to release it.
+      if (!sweep.ok) {
+        return res.status(409).json({
+          error: 'Could not reverse the close journal, so the period was left closed',
+          code: 'INVENTORY_REOPEN_GL_FAILED', period_id: period.id, journal_ref: sweep.failedRef,
+        });
       }
+      const reversed: string | null = sweep.reversed.join(', ') || null;
 
       await db.run(
         `UPDATE inventory_periods
@@ -71039,8 +71103,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'messaging-cost-platform-only',
+    commit_marker: 'inventory-close-ist-and-one-standing-journal',
     code_features: [
+      'inventory-close-ist-and-one-standing-journal  TC-INV-PERIOD-GL failed from 1 Oct 2026 (asset 1630 stayed 0 after closing October). Cause: the stock-close query cut each day at UTC midnight (05:30 IST), so stock received 00:00-05:30 IST on the 1st counted as the closing stock of the previous month AND of this month, and the close journal released it as opening and capitalised it as closing: net zero. _computeInventoryPeriod now cuts at IST midnight. The close posted on min(period end, today) but its reversal (re-close and reopen) on the period end, so a report up to today saw every re-close journal and none of their reversals; one rule _invCloseGlDate (min of period end and _todayIST) now dates the close and both reversals. A re-close now reverses EVERY close journal still standing on the period (not only the remembered ref) BEFORE rewriting the period, and stops with 409 INVENTORY_RECLOSE_GL_FAILED if the ledger refuses, so exactly one close journal stands after any number of re-closes; gl_journal_ref is always rewritten. Smoke: TC-INV-PERIOD-GL.',
       'messaging-cost-platform-only  Owner request: the messaging Est. cost (Notifications Analytics total and the broadcast audience preview) is the platform rate card and is no longer sent to or shown to property owners or staff; only SUPER_ADMIN / CTO receive it. The admin console WhatsApp page gets a Messaging usage and estimated cost table per tenant (7 / 30 / 90 / 365 days) from /api/admin/messaging/usage. Smoke: TC-MSG-COST-PLATFORM-ONLY.',
       'auth-current-role  A session token carried the role from sign-in and POST /api/auth/refresh copied it forward, so a role change or a switched-off account never reached an open session. authenticate() now reads the current role and active flag for tenant staff and owners (attendance_staff, then central users), cached 60s per user and dropped on staff edit / delete / admin role change; a switched-off account gets 401 ACCOUNT_DEACTIVATED; platform roles are never taken from a staff record; a lookup failure keeps the token as is. Refresh and my-permissions return the current role and the app reloads once when it changed. Smoke: TC-AUTH-CURRENT-ROLE.',
       'supplier-gate-and-self-role-guard  Two fixes from the pconvention RCA (1 Oct 2026). (1) Supplier add / edit / deactivate checked the restaurant-only kitchen INVENTORY tab, which no staff role on a hotel or events property can hold, so only the owner could add a supplier and with none the Purchasing tab offered no Raise PO or Receive stock; now any module inventory tab or Suppliers & Purchasing at Edit (Full to deactivate) qualifies, and the Hotel / Events / Spa inventory Purchasing tab gets an Add supplier button. (2) PATCH /api/owner/staff/:id let any Staff-page Full user change their own role (a PCC Manager did, three times) or hand out OWNER; non-owners can no longer change their own role, switch themselves off, or assign an owner or platform role (also on staff create); the Staff form locks the role on your own record. Smoke: TC-SUPPLIER-MODULE-GATE, TC-STAFF-SELF-ROLE.',
