@@ -8765,6 +8765,40 @@ function _touchTenantActive(rid: any, role: any) {
   centralDb.run("UPDATE restaurants SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?", [id]).catch(() => {});
 }
 
+// A session token carries the role the user had when they signed in, and the silent
+// refresh used to copy it forward, so a role change or a switched-off account never
+// reached an open session until sign-out (pconvention, Oct 2026). authenticate()
+// now reads the CURRENT role and active flag for tenant staff and owners, cached
+// for a minute per user; staff edits drop the cache so a change lands at once.
+// Platform roles are never taken from a staff record, and a lookup failure leaves
+// the token as it was.
+const _AUTH_ROLE_TTL_MS = 60_000;
+const _authRoleCache = new Map<string, { role: string | null; active: boolean; found: boolean; at: number }>();
+const _AUTH_PLATFORM_ROLES = new Set(['SUPER_ADMIN', 'CTO', 'SALES_REP']);
+function _staffAuthCacheDrop(tenantId: any, userId: any) {
+  _authRoleCache.delete(`${tenantId}::${userId}`);
+}
+async function _currentAuthRole(tenantId: string, userId: string): Promise<{ role: string | null; active: boolean; found: boolean }> {
+  const key = `${tenantId}::${userId}`;
+  const hit = _authRoleCache.get(key);
+  const now = Date.now();
+  if (hit && now - hit.at < _AUTH_ROLE_TTL_MS) return hit;
+  let out = { role: null as string | null, active: true, found: false };
+  try {
+    const db = await getTenantDb(tenantId);
+    const st: any = await db.get("SELECT role, is_active FROM attendance_staff WHERE id = ?", [userId]).catch(() => null);
+    if (st) out = { role: st.role ? String(st.role) : null, active: Number(st.is_active ?? 1) !== 0, found: true };
+    else {
+      const u: any = await centralDb.get("SELECT role, is_active FROM users WHERE id = ?", [userId]).catch(() => null);
+      if (u) out = { role: u.role ? String(u.role) : null, active: Number(u.is_active ?? 1) !== 0, found: true };
+    }
+  } catch {
+    return { role: null, active: true, found: false };   // do not cache a failure
+  }
+  _authRoleCache.set(key, { ...out, at: now });
+  return out;
+}
+
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   // T1-S8 — accept the JWT from EITHER the Authorization header (legacy
   // SPA, mobile clients, integrations) OR the HttpOnly cookie issued at
@@ -8779,6 +8813,23 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
     req.user = decoded;
+
+    // Current role + active flag for tenant staff / owners (see _currentAuthRole).
+    {
+      const tokRole = String(decoded?.role || '').toUpperCase();
+      const tid = decoded?.restaurantId;
+      if (decoded?.id && tid && tid !== 'SYSTEM' && !decoded?.purpose && !_AUTH_PLATFORM_ROLES.has(tokRole) && tokRole !== 'CUSTOMER') {
+        const cur = await _currentAuthRole(String(tid), String(decoded.id));
+        if (cur.found) {
+          if (!cur.active) {
+            return res.status(401).json({ error: 'Your account has been switched off. Please contact your manager.', code: 'ACCOUNT_DEACTIVATED' });
+          }
+          if (cur.role && cur.role !== decoded.role && !_AUTH_PLATFORM_ROLES.has(cur.role.toUpperCase())) {
+            decoded.role = cur.role;
+          }
+        }
+      }
+    }
     _touchTenantActive(decoded?.restaurantId, decoded?.role);
 
     // Name the actor on the audit context opened above. Mutating the store in
@@ -12443,6 +12494,7 @@ async function startServer() {
       if (!before) return res.status(404).json({ error: 'Staff member not found' });
       const newRole = role.trim();
       await db.run("UPDATE attendance_staff SET role = ? WHERE id = ?", [newRole, req.params.staffId]);
+      _staffAuthCacheDrop(tenantId, req.params.staffId);
       await writeObjectAudit(db, req, {
         objectType: 'EMPLOYEE', objectId: req.params.staffId, action: 'UPDATED',
         summary: `Role changed ${before.role} → ${newRole} (platform admin)`,
@@ -13168,7 +13220,7 @@ async function startServer() {
           console.error('[my-permissions] custom-role self-heal failed (non-fatal):', healErr);
         }
       }
-      if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
+      if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null, role: req.user?.role || null });
       const allowed_tabs = Object.keys(perms).filter(k => !k.startsWith('__') && (perms[k] ?? 0) >= 1);
       // A configured role with ZERO viewable tabs means the owner deliberately
       // restricted it to nothing — NOT "no restriction". Returning null here
@@ -13203,6 +13255,7 @@ async function startServer() {
       res.json({
         allowed_tabs: outTabs,
         tab_permissions: cleanPerms,
+        role: req.user?.role || null,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch permissions" });
@@ -13527,7 +13580,8 @@ async function startServer() {
       }
       const token = jwt.sign(claims, JWT_SECRET, { expiresIn: '7d' });
       try { _setJwtCookie(res, token); } catch {}
-      res.json({ token });
+      // role is the CURRENT one (authenticate re-reads it), so the app can notice a change.
+      res.json({ token, role: claims.role || null });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Token refresh failed' });
     }
@@ -14675,8 +14729,11 @@ async function startServer() {
       const category = String(req.body?.category || 'MARKETING').toUpperCase();
       const rate = await _mwRate(category);
       const reach = people.length - optedOut;
+      // Messaging cost is the platform's own rate card: shown to platform admins
+      // only (admin console), never to a property owner.
+      const platform = ['SUPER_ADMIN', 'CTO'].includes(String(req.user?.role || '').toUpperCase());
       res.json({ count: people.length, opted_out: optedOut, reachable: reach, sample: people.slice(0, 5),
-        estimated_cost: Math.round(reach * rate * 100) / 100, rate, currency: 'INR' });
+        ...(platform ? { estimated_cost: Math.round(reach * rate * 100) / 100, rate, currency: 'INR' } : {}) });
     } catch (err: any) {
       console.error('[broadcasts] audience failed:', err);
       res.status(500).json({ error: 'Could not work out the audience.' });
@@ -15133,10 +15190,13 @@ async function startServer() {
         return { channel: u.channel, category: u.category, messages: Number(u.messages), rate, cost };
       });
 
+      // Cost is the platform's rate card: platform admins only (per tenant in the
+      // admin console, /api/admin/messaging/usage), never a property owner.
+      const platform = ['SUPER_ADMIN', 'CTO'].includes(String(req.user?.role || '').toUpperCase());
       res.json({
         days, totals, by_channel: byChannel || [], daily: daily || [],
         people: people || [], top_events: topEvents || [], by_template: byTemplate || [],
-        cost: { currency: 'INR', lines: costLines, estimated_total: Math.round(estimatedCost * 100) / 100 },
+        ...(platform ? { cost: { currency: 'INR', lines: costLines, estimated_total: Math.round(estimatedCost * 100) / 100 } } : {}),
       });
     } catch (err: any) {
       console.error('[messaging/summary] failed:', err);
@@ -67976,6 +68036,7 @@ ${data.tenant.name}`;
       }
       const beforeStaff: any = await db.get("SELECT name, role, login_id, phone, email, is_active FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
       await db.run(`UPDATE attendance_staff SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`, [...values, req.params.id]);
+      _staffAuthCacheDrop(req.user!.restaurantId, req.params.id);
       if (beforeStaff) {
         const afterStaff: any = await db.get("SELECT name, role, login_id, phone, email, is_active FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
         const chStaff = diffFields(beforeStaff, afterStaff, STAFF_PATCH_FIELDS);
@@ -68000,6 +68061,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.user!.restaurantId);
       const gone: any = await db.get("SELECT name, role, employee_code FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
       await db.run("DELETE FROM attendance_staff WHERE id = ?", [req.params.id]);
+      _staffAuthCacheDrop(req.user!.restaurantId, req.params.id);
       if (gone) await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'DELETED', summary: `Removed ${gone.name} (${gone.role || 'no role'})`, before: gone });
       res.json({ success: true });
     } catch (err) {
@@ -70977,8 +71039,10 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'supplier-gate-and-self-role-guard',
+    commit_marker: 'messaging-cost-platform-only',
     code_features: [
+      'messaging-cost-platform-only  Owner request: the messaging Est. cost (Notifications Analytics total and the broadcast audience preview) is the platform rate card and is no longer sent to or shown to property owners or staff; only SUPER_ADMIN / CTO receive it. The admin console WhatsApp page gets a Messaging usage and estimated cost table per tenant (7 / 30 / 90 / 365 days) from /api/admin/messaging/usage. Smoke: TC-MSG-COST-PLATFORM-ONLY.',
+      'auth-current-role  A session token carried the role from sign-in and POST /api/auth/refresh copied it forward, so a role change or a switched-off account never reached an open session. authenticate() now reads the current role and active flag for tenant staff and owners (attendance_staff, then central users), cached 60s per user and dropped on staff edit / delete / admin role change; a switched-off account gets 401 ACCOUNT_DEACTIVATED; platform roles are never taken from a staff record; a lookup failure keeps the token as is. Refresh and my-permissions return the current role and the app reloads once when it changed. Smoke: TC-AUTH-CURRENT-ROLE.',
       'supplier-gate-and-self-role-guard  Two fixes from the pconvention RCA (1 Oct 2026). (1) Supplier add / edit / deactivate checked the restaurant-only kitchen INVENTORY tab, which no staff role on a hotel or events property can hold, so only the owner could add a supplier and with none the Purchasing tab offered no Raise PO or Receive stock; now any module inventory tab or Suppliers & Purchasing at Edit (Full to deactivate) qualifies, and the Hotel / Events / Spa inventory Purchasing tab gets an Add supplier button. (2) PATCH /api/owner/staff/:id let any Staff-page Full user change their own role (a PCC Manager did, three times) or hand out OWNER; non-owners can no longer change their own role, switch themselves off, or assign an owner or platform role (also on staff create); the Staff form locks the role on your own record. Smoke: TC-SUPPLIER-MODULE-GATE, TC-STAFF-SELF-ROLE.',
       'mahurat-remove-paste-dates  Owner request: removed the Paste many dates at once box from the Mahurat season editor (it confused users); dates are added one row at a time.',
       'events-availability-polish  Public availability calendar opens on next month when fewer than 7 days of the current month remain; Enquiries column renamed Availability.',

@@ -599,7 +599,6 @@ function BroadcastForm({ token, templates, propertyName, onDone }: { token: stri
         {preview && (
           <p className="text-xs mt-2 bg-[#faf7f2] rounded-lg px-2 py-1.5">
             {t('nw.reach', { n: preview.reachable, total: preview.count, opted: preview.opted_out })}
-            {preview.estimated_cost > 0 && <> · {t('nw.estCost', { cost: `₹${Number(preview.estimated_cost).toLocaleString('en-IN')}` })}</>}
           </p>
         )}
       </div>
@@ -908,7 +907,6 @@ function AnalyticsTab({ token }: { token: string }) {
         <div className={cn(CARD, 'p-3')}>
           <div className="flex items-center gap-1 mb-2">
             {[7, 30, 90].map(d => <button key={d} onClick={() => setDays(d)} className={cn('px-2.5 py-1 rounded-lg text-xs font-bold', days === d ? 'bg-brand text-white' : 'bg-[#faf7f2] text-[#6b5d52]')}>{t('nw.daysN', { n: d })}</button>)}
-            {sum?.cost?.estimated_total > 0 && <span className="ml-auto text-xs text-[#6b5d52]">{t('nw.estCost', { cost: `₹${Number(sum.cost.estimated_total).toLocaleString('en-IN')}` })}</span>}
           </div>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
             {tiles.map(([k, v, c]) => (

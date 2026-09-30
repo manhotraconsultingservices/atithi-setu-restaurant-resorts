@@ -587,7 +587,6 @@ export const te: Record<string, string> = {
   'nw.daysN': '{n} రోజులు',
   'nw.emailServer': 'ఈమెయిల్ సర్వర్',
   'nw.emailSmsWording': 'ఈమెయిల్ & SMS పదాలు',
-  'nw.estCost': 'అంచనా ఖర్చు {cost}',
   'nw.event': 'సంఘటన',
   'nw.eventMessages': 'సంఘటన సందేశాలు',
   'nw.exact': 'ఖచ్చితం',

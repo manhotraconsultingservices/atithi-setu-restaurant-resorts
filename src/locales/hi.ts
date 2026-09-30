@@ -699,7 +699,6 @@ export const hi: Record<string, string> = {
   'nw.daysN': '{n} दिन',
   'nw.emailServer': 'ईमेल सर्वर',
   'nw.emailSmsWording': 'ईमेल और SMS शब्द',
-  'nw.estCost': 'अनुमानित लागत {cost}',
   'nw.event': 'घटना',
   'nw.eventMessages': 'घटना संदेश',
   'nw.exact': 'सटीक',

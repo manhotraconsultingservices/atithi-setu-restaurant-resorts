@@ -587,7 +587,6 @@ export const ta: Record<string, string> = {
   'nw.daysN': '{n} நாட்கள்',
   'nw.emailServer': 'மின்னஞ்சல் சேவையகம்',
   'nw.emailSmsWording': 'மின்னஞ்சல் & SMS வாசகம்',
-  'nw.estCost': 'மதிப்பீட்டு செலவு {cost}',
   'nw.event': 'நிகழ்வு',
   'nw.eventMessages': 'நிகழ்வு செய்திகள்',
   'nw.exact': 'சரியாக',

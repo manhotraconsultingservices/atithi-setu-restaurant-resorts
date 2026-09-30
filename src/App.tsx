@@ -218,6 +218,23 @@ const TABS_INTRODUCED_AFTER_V3 = new Set<string>(['PROCUREMENT', 'EXPENSE_JOURNA
 //   • no marker                      → ancient legacy list (saved before
 //                                       the marker existed); grandfather
 //                                       every tab in ALWAYS_VISIBLE_TABS
+// The server now reports a user's CURRENT role (it re-reads it on every request).
+// When the owner changed it since sign-in, store the new role and reload once so
+// the menu and home page follow. The sessionStorage guard stops a reload loop if
+// the two ever disagree for another reason.
+function syncRoleFromServer(serverRole: any) {
+  try {
+    const next = String(serverRole || '');
+    if (!next) return;
+    const cur = localStorage.getItem('role') || '';
+    if (cur.toUpperCase() === next.toUpperCase()) { sessionStorage.removeItem('role_sync'); return; }
+    if (sessionStorage.getItem('role_sync') === next) return;
+    sessionStorage.setItem('role_sync', next);
+    localStorage.setItem('role', next);
+    window.location.reload();
+  } catch { /* storage unavailable: keep the current screen */ }
+}
+
 function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boolean {
   if (id === 'HOME') return true;   // launchpad is the default landing — always reachable
   if (!allowedTabs || allowedTabs.length === 0) return true;
@@ -1406,6 +1423,7 @@ export default function App() {
         if (alive && d && d.token) {
           try { localStorage.setItem('token', d.token); } catch {}
           setToken(d.token);
+          syncRoleFromServer(d.role);
         }
       } catch { /* network blip — try again next interval */ }
     };
@@ -13677,6 +13695,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
+        if (data?.role) syncRoleFromServer(data.role);
         if (data?.allowed_tabs && Array.isArray(data.allowed_tabs) && data.allowed_tabs.length > 0) {
           setAllowedTabs(data.allowed_tabs);
         }

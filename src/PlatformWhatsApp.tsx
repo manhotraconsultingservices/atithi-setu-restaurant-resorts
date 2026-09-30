@@ -224,6 +224,8 @@ export function PlatformWhatsApp({ token, events }: { token: string; events: { i
 
       <WebhookDiagnostics api={api} />
 
+      <MessagingCostReport token={token} />
+
       <div className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xl font-bold">Message templates</h3>
@@ -367,6 +369,65 @@ function WebhookDiagnostics({ api }: { api: (path: string, init?: RequestInit) =
             </tbody>
           </table>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Estimated messaging spend per tenant at the platform rate card. Owners no longer
+// see any cost (it is the platform's price, not theirs); this is the one place it
+// shows. Server: GET /api/admin/messaging/usage?days=N (SUPER_ADMIN only).
+const COST_PERIODS = [7, 30, 90, 365];
+const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const channelLabel = (l: Json) => l.channel === 'WHATSAPP' ? `WhatsApp ${String(l.category || '').toLowerCase()}` : String(l.channel || '').charAt(0) + String(l.channel || '').slice(1).toLowerCase();
+function MessagingCostReport({ token }: { token: string }) {
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState<Json | null>(null);
+  const [err, setErr] = useState('');
+  const load = useCallback(async (d: number) => {
+    setErr('');
+    try {
+      const res = await fetch(`/api/admin/messaging/usage?days=${d}`, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+      setData(body);
+    } catch (e: any) { setErr(e.message); setData(null); }
+  }, [token]);
+  useEffect(() => { load(days); }, [days, load]);
+  const rows: Json[] = data?.tenants || [];
+  const columns: ColDef<Json>[] = [
+    { key: 'name', label: 'Tenant', sortable: true, searchable: true, render: (r) => <span className="font-semibold">{r.name}</span> },
+    { key: 'restaurant_id', label: 'Tenant ID', sortable: true, searchable: true, hideable: true, defaultHidden: true },
+    { key: 'messages', label: 'Messages', sortable: true, align: 'right', getValue: (r) => Number(r.messages || 0) },
+    { key: 'failed', label: 'Failed', sortable: true, align: 'right', hideable: true, getValue: (r) => Number(r.failed || 0) },
+    { key: 'breakdown', label: 'Breakdown', hideable: true,
+      getValue: (r) => (r.lines || []).map((l: Json) => `${channelLabel(l)} ${l.messages} × ${inr(l.rate)}`).join(' · '),
+      render: (r) => <span className="text-xs text-[#6b5d52]">{(r.lines || []).map((l: Json) => `${channelLabel(l)} ${l.messages} × ${inr(l.rate)}`).join(' · ')}</span> },
+    { key: 'cost', label: 'Est. cost', sortable: true, align: 'right', getValue: (r) => Number(r.cost || 0), render: (r) => <span className="font-semibold tabular-nums">{inr(r.cost)}</span>, exportValue: (r) => String(r.cost ?? 0) },
+  ];
+  return (
+    <div className={CARD}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xl font-bold flex items-center gap-2"><MessageCircle size={20} className="text-emerald-600" /> Messaging usage and estimated cost</h3>
+          <p className="text-sm text-[#6b5d52] mt-1">Per tenant, at the platform rate card. Property owners do not see these costs.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-2xl border border-brand/10 overflow-hidden">
+            {COST_PERIODS.map(d => (
+              <button key={d} onClick={() => setDays(d)} data-allow-readonly
+                className={`px-3 py-1.5 text-xs font-bold ${days === d ? 'bg-emerald-600 text-white' : 'bg-white text-[#3d3128]'}`}>{d === 365 ? '1 year' : `${d} days`}</button>
+            ))}
+          </div>
+          <button className={`${BTN} bg-white border border-brand/10 text-[#3d3128]`} onClick={() => load(days)} data-allow-readonly aria-label="Refresh"><RefreshCw size={14} /></button>
+        </div>
+      </div>
+      {err && <p className="text-sm text-red-700 mt-3">{err}</p>}
+      {data && (
+        <p className="text-sm mt-4">Total over {data.days} days: <b className="tabular-nums">{inr(data.total_cost)}</b> across {rows.length} tenant(s).</p>
+      )}
+      <div className="mt-4">
+        <DataTable data={rows} columns={columns} rowKey={r => r.restaurant_id} columnChooser columnFilters tableId="admin-messaging-cost" exportFilename="messaging-cost-by-tenant" emptyMessage={data ? 'No messages in this period.' : 'Loading…'} />
       </div>
     </div>
   );

@@ -640,7 +640,6 @@ export const pa: Record<string, string> = {
   'nw.daysN': '{n} ਦਿਨ',
   'nw.emailServer': 'ਈਮੇਲ ਸਰਵਰ',
   'nw.emailSmsWording': 'ਈਮੇਲ ਅਤੇ SMS ਸ਼ਬਦ',
-  'nw.estCost': 'ਅੰਦਾਜ਼ਨ ਲਾਗਤ {cost}',
   'nw.event': 'ਘਟਨਾ',
   'nw.eventMessages': 'ਘਟਨਾ ਸੁਨੇਹੇ',
   'nw.exact': 'ਬਿਲਕੁਲ',

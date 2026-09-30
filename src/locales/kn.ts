@@ -589,7 +589,6 @@ export const kn: Record<string, string> = {
   'nw.daysN': '{n} ದಿನಗಳು',
   'nw.emailServer': 'ಇಮೇಲ್ ಸರ್ವರ್',
   'nw.emailSmsWording': 'ಇಮೇಲ್ & SMS ಪದಗಳು',
-  'nw.estCost': 'ಅಂದಾಜು ವೆಚ್ಚ {cost}',
   'nw.event': 'ಘಟನೆ',
   'nw.eventMessages': 'ಘಟನೆ ಸಂದೇಶಗಳು',
   'nw.exact': 'ನಿಖರ',

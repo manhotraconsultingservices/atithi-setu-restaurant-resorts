@@ -654,7 +654,6 @@ export const en: Record<string, string> = {
   'nw.daysN': '{n} days',
   'nw.emailServer': 'Email server',
   'nw.emailSmsWording': 'Email & SMS wording',
-  'nw.estCost': 'Est. cost {cost}',
   'nw.event': 'Event',
   'nw.eventMessages': 'Event messages',
   'nw.exact': 'Exact',
