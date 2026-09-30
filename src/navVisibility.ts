@@ -112,6 +112,9 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   if (id === 'EVENTS_MIGRATION') return isPlatformAdmin && isEventsEnabled;
   // Calendar Mahurat View — opt-in per property; owner/manager or an explicit grant
   // (not in RBAC_NEWLY_ADDED, so never implied by a fail-open null list).
+  // Event Enquiries — customer contact details, so owner/manager or an explicit
+  // grant only (not in RBAC_NEWLY_ADDED, never under a fail-open null list).
+  if (id === 'EVENTS_ENQUIRIES') return isEventsEnabled && (isOwnerOrAdmin || currentRole === 'MANAGER' || strictGranted(id));
   if (id === 'EVENTS_MAHURAT') return isEventsEnabled && ctx.isMahuratEnabled === true && (isOwnerOrAdmin || currentRole === 'MANAGER' || strictGranted(id));
   // Personal work queue — visible to every staff member.
   if (id === 'MY_CHECKLIST') return true;

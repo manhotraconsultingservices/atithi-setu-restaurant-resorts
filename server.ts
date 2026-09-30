@@ -31,7 +31,7 @@ import {
   createEventTables, seedEventDefaults,
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty, rentalShortages,
   recomputeEventPaid, reconcileEventSchedule, eventStaffConflict,
-  halfDayWindow, venueTurnaroundMin,
+  halfDayWindow, venueTurnaroundMin, computeVenueAvailability,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { generateBankRecStatementPdf, type BankRecStatementData } from "./bankRecStatementPdf.ts";
@@ -9455,7 +9455,7 @@ const HOTEL_TAB_IDS = ['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS'
 const EVENTS_TAB_IDS = ['EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_ADDONS',
   'EVENTS_VENUES', 'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING',
   'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
-  'EVENTS_MIGRATION', 'EVENTS_MAHURAT'];
+  'EVENTS_MIGRATION', 'EVENTS_MAHURAT', 'EVENTS_ENQUIRIES'];
 const _HOTEL_TAB_SET = new Set(HOTEL_TAB_IDS);
 const _EVENTS_TAB_SET = new Set(EVENTS_TAB_IDS);
 
@@ -11101,6 +11101,8 @@ async function startServer() {
     // switches it on in Events settings. Title is the property's own wording.
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS event_mahurat_enabled INT DEFAULT 0`);
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS event_mahurat_title TEXT`);
+    // Public venue availability calendar on the events page (opt-in, DEFAULT 0).
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS event_public_availability INT DEFAULT 0`);
     // ====== Secondary language (i18n) ======
     // NULL = English-only (default). When set (e.g. 'ta','hi','kn','te','pa'), the
     // app offers an English↔regional toggle. Purely additive; unset tenants unchanged.
@@ -34391,6 +34393,155 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: 'Failed to update venue status' }); }
   });
 
+  // ==== Public venue availability + Enquiries page (Events) ====================
+  // Availability: an opt-in calendar on the public events page showing, per venue
+  // and day (per session where the hall sells sessions), FREE / HOLD / BOOKED /
+  // CLOSED. Never a name, event type or amount. Enquiries: every public enquiry,
+  // including one for an unavailable date, with the owner's follow-up stage.
+  const _publicAvailabilityOn = async (rid: string): Promise<boolean> => {
+    const r: any = await centralDb.get("SELECT event_public_availability FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+    return Number(r?.event_public_availability || 0) === 1;
+  };
+  const ENQUIRY_STAGES = ['NEW', 'CONTACTED', 'QUOTED', 'WON', 'LOST'];
+  const _enquiryStage = (b: any): string => {
+    const st = String(b.status || '').toUpperCase();
+    if (['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(st)) return 'WON';
+    if (st === 'CANCELLED') return 'LOST';
+    const explicit = String(b.inquiry_stage || '').toUpperCase();
+    if (ENQUIRY_STAGES.includes(explicit)) return explicit;
+    return st === 'QUOTED' ? 'QUOTED' : 'NEW';
+  };
+  // Is this venue / date / session unavailable to a guest? Returns the flag to keep
+  // on the enquiry (DATE_BLOCKED / DATE_BOOKED) or null.
+  const _enquiryDateFlag = async (db: any, rid: string, venueId: string | null, date: string, session: string | null): Promise<string | null> => {
+    if (await mahuratBlockFor(db, rid, venueId, date, null).catch(() => null)) return 'DATE_BLOCKED';
+    if (!venueId) return null;
+    const venue: any = await db.get("SELECT * FROM event_venues WHERE id = ?", [venueId]).catch(() => null);
+    if (!venue) return null;
+    if (await venueBlockConflict(db, venueId, date).catch(() => null)) return 'DATE_BLOCKED';
+    const profile: any = await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null);
+    const w = session ? halfDayWindow(session, venue, profile) : { start: '10:00', end: '22:00' };
+    const clash = await venueBookingConflict(db, venueId, date, null, w.start, w.end, undefined, venueTurnaroundMin(venue, profile)).catch(() => null);
+    return clash ? 'DATE_BOOKED' : null;
+  };
+
+  app.get("/api/restaurant/:id/events/public-availability/settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    res.json({ enabled: await _publicAvailabilityOn(req.params.id) });
+  });
+
+  app.put("/api/restaurant/:id/events/public-availability/settings", authenticate, eventsStaff, requireTabAction('EVENTS_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const enabled = !!(req.body || {}).enabled;
+      await centralDb.run("UPDATE restaurants SET event_public_availability = ? WHERE id = ?", [enabled ? 1 : 0, req.params.id]);
+      const db = await getTenantDb(req.params.id);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_SETTINGS', objectId: req.params.id, action: 'UPDATED',
+        summary: `Public venue availability calendar ${enabled ? 'switched on' : 'switched off'}` }).catch(() => {});
+      res.json({ enabled });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the setting' }); }
+  });
+
+  // Guest-facing availability. At most about six months per call, never before today.
+  app.get("/api/public/restaurant/:id/events/availability", resolvePublicTenantParam, async (req: Request, res: Response) => {
+    try {
+      const r: any = await centralDb.get("SELECT events_enabled, event_public_availability FROM restaurants WHERE id = ?", [req.params.id]);
+      if (!r || Number(r.events_enabled) !== 1 || Number(r.event_public_availability || 0) !== 1) return res.status(404).json({ error: 'Availability not available' });
+      const db = await getTenantDb(req.params.id);
+      const profile: any = await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null);
+      if (profile && Number(profile.is_published) === 0) return res.status(404).json({ error: 'Availability not available' });
+      const today = _istNowParts().date;
+      const qFrom = String(req.query.from || '').slice(0, 10), qTo = String(req.query.to || '').slice(0, 10);
+      const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+      let from = DATE_RE.test(qFrom) && qFrom > today ? qFrom : today;
+      const maxTo = new Date(Date.parse(from + 'T00:00:00Z') + 185 * 86400000).toISOString().slice(0, 10);
+      let to = DATE_RE.test(qTo) ? qTo : maxTo;
+      if (to > maxTo) to = maxTo;
+      if (to < from) return res.status(400).json({ error: 'to must be on or after from' });
+      const shift = (ymd: string, n: number) => new Date(Date.parse(ymd + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+      const venues = await db.query("SELECT * FROM event_venues WHERE is_active = 1 ORDER BY display_order, name");
+      const bookings = await db.query(
+        `SELECT venue_id, event_date, end_date, start_time, end_time, status FROM event_bookings
+          WHERE venue_id IS NOT NULL AND status IN ('CONFIRMED','IN_PROGRESS','QUOTED')
+            AND event_date <= ? AND COALESCE(end_date, event_date) >= ?`, [shift(to, 1), shift(from, -1)]
+      ).catch(() => []);
+      const blocks = await db.query("SELECT venue_id, from_date, to_date FROM event_venue_blocks WHERE from_date <= ? AND to_date >= ?", [to, from]).catch(() => []);
+      const mh = await _mahuratSettings(req.params.id);
+      const mhSeasons = mh.enabled ? (await _mahuratSeasons(db, { from, to })).filter((x: any) => x.kind === 'BLOCK') : [];
+      const addRange = (set: Set<string>, a: string, b: string) => {
+        let c = a < from ? from : a; const end = b > to ? to : b; let g = 0;
+        while (c <= end && g++ < 400) { set.add(c); c = shift(c, 1); }
+      };
+      const out = venues.map((v: any) => {
+        const closed = new Set<string>();
+        for (const bl of (blocks || []) as any[]) if (String(bl.venue_id) === String(v.id)) addRange(closed, normaliseDateIso(bl.from_date), normaliseDateIso(bl.to_date));
+        for (const sn of mhSeasons as any[]) {
+          if (sn.venue_ids && !sn.venue_ids.includes(String(v.id))) continue;
+          for (const d of sn.days) addRange(closed, d.start_date, d.end_date);
+        }
+        const a = computeVenueAvailability({ venue: v, profile, from, to, closedDays: closed,
+          bookings: ((bookings || []) as any[]).filter(b => String(b.venue_id) === String(v.id)) });
+        return { id: v.id, name: v.name, sessions: a.sessions, days: a.days,
+          ...(a.sessions ? { am: halfDayWindow('AM', v, profile), pm: halfDayWindow('PM', v, profile) } : {}) };
+      });
+      res.set('Cache-Control', 'public, max-age=60');
+      res.json({ from, to, venues: out });
+    } catch (err: any) { console.error('/public events availability error:', err); res.status(500).json({ error: 'Failed to load availability' }); }
+  });
+
+  // Enquiries page: every public enquiry received in the window (default the last year).
+  app.get("/api/restaurant/:id/events/enquiries", authenticate, eventsStaff, requireTabAccess('EVENTS_ENQUIRIES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      // No from/to = every enquiry ever received (the page's "All"); the list is
+      // deliberately uncapped so no lead drops off the screen.
+      const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+      const from = DATE_RE.test(String(req.query.from || '')) ? String(req.query.from) : '0001-01-01';
+      const to = DATE_RE.test(String(req.query.to || '')) ? String(req.query.to) : '9999-12-30';
+      const toNext = new Date(Date.parse(to + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT b.id, b.created_at, b.customer_name, b.customer_phone, b.customer_email, b.event_type, b.event_date, b.end_date,
+                b.guest_count, b.special_requests, b.status, b.venue_id, v.name AS venue_name, b.inquiry_flag, b.inquiry_stage,
+                b.inquiry_note, b.inquiry_stage_at, b.inquiry_stage_by, b.preferred_session, b.total_amount
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.booking_source = 'PUBLIC_INQUIRY' AND b.created_at >= ? AND b.created_at < ?
+          ORDER BY b.created_at DESC`, [from, toNext]
+      );
+      res.json({ from, to, enquiries: (rows || []).map((b: any) => ({
+        ...b,
+        event_date: normaliseDateIso(b.event_date), end_date: b.end_date ? normaliseDateIso(b.end_date) : null,
+        created_at: b.created_at instanceof Date ? b.created_at.toISOString() : b.created_at,
+        inquiry_stage_at: b.inquiry_stage_at instanceof Date ? b.inquiry_stage_at.toISOString() : b.inquiry_stage_at,
+        stage: _enquiryStage(b),
+      })) });
+    } catch (err: any) { console.error('/events enquiries error:', err); res.status(500).json({ error: 'Failed to load enquiries' }); }
+  });
+
+  app.patch("/api/restaurant/:id/events/enquiries/:bid", authenticate, eventsStaff, requireTabAction('EVENTS_ENQUIRIES', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const cur: any = await db.get("SELECT id, booking_source, inquiry_stage, inquiry_note FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!cur || cur.booking_source !== 'PUBLIC_INQUIRY') return res.status(404).json({ error: 'Enquiry not found' });
+      const b = req.body || {};
+      const stage = b.stage === undefined ? cur.inquiry_stage : String(b.stage || '').toUpperCase();
+      if (b.stage !== undefined && !ENQUIRY_STAGES.includes(stage)) return res.status(400).json({ error: 'Unknown follow-up stage.' });
+      const note = b.note === undefined ? cur.inquiry_note : (String(b.note || '').trim().slice(0, 1000) || null);
+      const actor = (req as any).user?.email || (req as any).user?.name || null;
+      await db.run("UPDATE event_bookings SET inquiry_stage = ?, inquiry_note = ?, inquiry_stage_at = CURRENT_TIMESTAMP, inquiry_stage_by = ? WHERE id = ?", [stage || null, note, actor, req.params.bid]);
+      const parts = [];
+      if (b.stage !== undefined && stage !== cur.inquiry_stage) parts.push(`stage ${cur.inquiry_stage || 'NEW'} to ${stage}`);
+      if (b.note !== undefined && note !== cur.inquiry_note) parts.push('note updated');
+      if (parts.length) await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'ENQUIRY_FOLLOWUP', summary: `Enquiry follow-up: ${parts.join(', ')}` }).catch(() => {});
+      res.json({ id: req.params.bid, inquiry_stage: stage, inquiry_note: note });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the follow-up' }); }
+  });
+
   // ==== Calendar Mahurat View (Events, opt-in per property) ====================
   // Owner-defined, religion-agnostic date seasons. HIGHLIGHT tints the calendar;
   // BLOCK stops new events on those dates for the season's venues, with an owner
@@ -43014,8 +43165,10 @@ ${data.tenant.name}`;
         mahurat = { title: mhSet.title, seasons: pubSeasons.map((x: any) => ({ id: x.id, name: x.name, color: x.color, kind: x.kind, venue_ids: x.venue_ids,
           days: x.days.map((d: any) => ({ start_date: d.start_date, end_date: d.end_date, note: d.note })) })) };
       }
+      const availabilityOn = Number(r.event_public_availability || 0) === 1;
       res.json({
         ...(mahurat ? { mahurat } : {}),
+        ...(availabilityOn ? { availability_enabled: true } : {}),
         property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
         profile: profile || { hero_title: null, tagline: null, description: null, hero_image_url: null, gallery: '[]' },
         venues,
@@ -43034,9 +43187,18 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "Name and phone are required" });
       }
       if (!b.event_date) return res.status(400).json({ error: "Event date is required" });
-      // Calendar Mahurat View: the owner is not accepting events on this date here.
-      const pubBlock = await mahuratBlockFor(db, req.params.id, b.venue_id ? String(b.venue_id) : null, b.event_date, null);
-      if (pubBlock) return res.status(409).json({ code: 'MAHURAT_BLOCKED', error: 'This date is not available for events at this venue. Please choose another date.' });
+      // Every enquiry is kept (owner decision 30 Sep 2026). One for a date that is
+      // blocked or already booked is saved with a flag, and the guest is told the
+      // property will come back with alternatives, so no lead is lost.
+      const session = ['AM', 'PM'].includes(String(b.preferred_session || '').toUpperCase()) ? String(b.preferred_session).toUpperCase() : null;
+      const dateFlag = await _enquiryDateFlag(db, req.params.id, b.venue_id ? String(b.venue_id) : null, String(b.event_date).slice(0, 10), session);
+      let winStart = b.start_time || '10:00', winEnd = b.end_time || '22:00';
+      if (session && b.venue_id) {
+        const sv: any = await db.get("SELECT * FROM event_venues WHERE id = ?", [b.venue_id]).catch(() => null);
+        const sp: any = await db.get("SELECT * FROM event_profile WHERE id = 1").catch(() => null);
+        const w = halfDayWindow(session, sv, sp); winStart = w.start; winEnd = w.end;
+      }
+      const unavailableMsg = "Thank you! That date is not available at this venue, but we have saved your enquiry and will contact you with alternatives.";
       // The guest page retries a submit that hit a gateway error (a deploy restart
       // answers 502 for a few seconds, which lost enquiries as "Failed to submit").
       // A retry can arrive after the first attempt did land, so the same phone, date
@@ -43050,26 +43212,27 @@ ${data.tenant.name}`;
         [String(b.customer_phone), String(b.event_date), String(b.venue_id || '')]
       ).catch(() => null);
       if (dup?.id) {
-        return res.status(201).json({ success: true, inquiry_id: dup.id, duplicate: true, message: "Thank you! We'll get back to you shortly with a quotation." });
+        return res.status(201).json({ success: true, inquiry_id: dup.id, duplicate: true, unavailable: !!dateFlag, message: dateFlag ? unavailableMsg : "Thank you! We'll get back to you shortly with a quotation." });
       }
       const id = `EVT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
         `INSERT INTO event_bookings
           (id, venue_id, customer_name, customer_phone, customer_email, event_type, status,
-           event_date, start_time, end_time, guest_count, booking_source, special_requests)
-         VALUES (?, ?, ?, ?, ?, ?, 'INQUIRY', ?, ?, ?, ?, 'PUBLIC_INQUIRY', ?)`,
+           event_date, start_time, end_time, guest_count, booking_source, special_requests,
+           inquiry_flag, inquiry_stage, preferred_session, half_day_slot)
+         VALUES (?, ?, ?, ?, ?, ?, 'INQUIRY', ?, ?, ?, ?, 'PUBLIC_INQUIRY', ?, ?, 'NEW', ?, ?)`,
         [id, b.venue_id || null, b.customer_name, b.customer_phone, b.customer_email || null,
-         b.event_type || null, b.event_date, b.start_time || '10:00', b.end_time || '22:00',
-         Number(b.guest_count || 0), b.special_requests || null]
+         b.event_type || null, b.event_date, winStart, winEnd,
+         Number(b.guest_count || 0), b.special_requests || null, dateFlag, session, session]
       );
       // Best-effort notify the property owner by email.
       const ownerEmail = gate.restaurant?.email;
       if (ownerEmail) {
-        const subject = `New event inquiry — ${b.customer_name}`;
+        const subject = `New event inquiry — ${b.customer_name}${dateFlag ? ' (asked for an unavailable date)' : ''}`;
         const text = `New event inquiry received:\n\nName: ${b.customer_name}\nPhone: ${b.customer_phone}\nEmail: ${b.customer_email || '—'}\nEvent type: ${b.event_type || '—'}\nDate: ${b.event_date}\nGuests: ${b.guest_count || '—'}\nNotes: ${b.special_requests || '—'}\n\nOpen the Events module to prepare a quotation.`;
         sendEmail(ownerEmail, subject, text).catch(() => {});
       }
-      res.status(201).json({ success: true, inquiry_id: id, message: "Thank you! We'll get back to you shortly with a quotation." });
+      res.status(201).json({ success: true, inquiry_id: id, unavailable: !!dateFlag, message: dateFlag ? unavailableMsg : "Thank you! We'll get back to you shortly with a quotation." });
     } catch (err: any) {
       console.error("/public events inquiry error:", err);
       res.status(500).json({ error: "Failed to submit inquiry" });
@@ -70766,8 +70929,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-mahurat-calendar-polish',
+    commit_marker: 'events-public-availability-enquiries',
     code_features: [
+      'events-public-availability-enquiries  FEATURE (owner request 30 Sep 2026). (1) Opt-in public venue availability calendar (restaurants.event_public_availability, switched on in Events settings): GET /api/public/restaurant/:id/events/availability returns per venue and day, per session where the hall sells sessions, FREE / HOLD (quoted) / BOOKED (confirmed or in progress) / CLOSED (maintenance block or owner-blocked date), using the same span and turnaround rule as the staff availability check, and never any booking detail. (2) Every public enquiry is kept: one for a blocked or booked date is saved with inquiry_flag DATE_BLOCKED or DATE_BOOKED instead of being refused, and the guest is told the property will suggest alternatives. (3) New Enquiries page (tab EVENTS_ENQUIRIES, not in RBAC_NEWLY_ADDED): every public enquiry with no list cap, follow-up stage NEW / CONTACTED / QUOTED / WON / LOST and a note, audited as ENQUIRY_FOLLOWUP. Smoke: TC-AVAIL-*, TC-ENQ-*.',
       'events-mahurat-calendar-polish  Calendar Mahurat View browser check fixes: the day panel showed a raw venue id for a booking whose hall was since removed (the calendar feed now joins the venue name), and the season editor date row overflowed at phone width (now wraps to two columns).',
       'events-mahurat-calendar  FEATURE (opt-in per property, owner request 30 Sep 2026): Calendar Mahurat View. A separate Events page, off by default (restaurants.event_mahurat_enabled, switched on in Events, Public Page Settings, with an owner-chosen title), so no existing screen, booking flow or public page changes for tenants who do not use it. Owner-defined religion-agnostic seasons (event_mahurat_seasons + event_mahurat_days: name, colour, HIGHLIGHT or BLOCK, all or chosen venues, show on public page, date ranges with notes, paste many dates) tint a month or year calendar with bookings on top. A BLOCK season is enforced server-side on booking create, venue or date change, confirm and the public enquiry (409 MAHURAT_BLOCKED); owner, manager or EVENTS_MAHURAT Full may override with a reason, audited on the booking as MAHURAT_OVERRIDE. Own tab EVENTS_MAHURAT (View, Edit, Full), not in RBAC_NEWLY_ADDED. Public page shows public seasons as upcoming special dates and refuses a blocked date. Smoke: TC-MAHURAT-*.',
       'guest-id-proof-encrypted  Security fix from the 29 Sep review. room_bookings.guest_id_proof and group_guests.guest_id_proof (the passport / Aadhaar number; Form-C prints it) were plain TEXT. Every write now seals it with sealGuestIdProof (encryptSensitive, AES-256-GCM hr1: values, HR_DATA_KEY or derived from JWT_SECRET): booking create, PATCH, online check-in, group guest upsert, SA booking import, demo seed. Reads are opened in one place, PostgresDb.query, for any column named *id_proof, so Form-C, the booking screens and reports get the plain number; a value that cannot be decrypted reads as null, never ciphertext. The SQL console reads raw (query opts.raw). POST /api/admin/guest-id-proof/encrypt-existing (SUPER_ADMIN, dryRun by default, compare-and-set, time-budgeted, counts only) seals values saved before. Form-C PDF generation now writes FORM_C_PDF_GENERATED to the booking audit log first (503 and no PDF if it cannot). DPDP erase (POST /dpdp/erase) now also deletes the guest ID documents of the matched bookings (private or legacy storage, then the row), clears guest_id_proof on them and anonymises group_guests, writes DPDP_ERASED on each booking, and does the document deletes first so a storage failure (502) leaves the request repeatable. TC-GUESTID-*.',

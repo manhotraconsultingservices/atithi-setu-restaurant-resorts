@@ -196,6 +196,71 @@ export async function venueBookingConflict(
   return null;
 }
 
+export type PublicSlotStatus = 'FREE' | 'HOLD' | 'BOOKED' | 'CLOSED';
+
+/** Does this venue sell morning / night sessions (any half-day price set)? */
+export function venueSellsSessions(venue: any): boolean {
+  return [venue?.half_day_rate, venue?.half_day_am_rate, venue?.half_day_pm_rate].some(v => Number(v || 0) > 0);
+}
+
+/**
+ * Public availability of one venue over [from, to] (YYYY-MM-DD, inclusive), for the
+ * guest-facing calendar. Uses the same absolute-span + turnaround rule as
+ * venueBookingConflict: a CONFIRMED / IN_PROGRESS booking makes a window BOOKED, a
+ * QUOTED one makes it HOLD, INQUIRY never shows. A venue that sells sessions is
+ * judged per session (AM / PM windows from halfDayWindow); otherwise the day's
+ * default working window (10:00-22:00, the default a daily booking carries).
+ * `closedDays` (maintenance blocks, owner-blocked dates) wins over everything.
+ * Returns only the days that are not fully FREE, and never any booking detail.
+ */
+export function computeVenueAvailability(p: {
+  venue: any; profile: any; from: string; to: string;
+  bookings: Array<{ event_date: any; end_date?: any; start_time?: any; end_time?: any; status: string }>;
+  closedDays: Set<string>;
+}): { sessions: boolean; days: Record<string, { s: PublicSlotStatus | 'PARTIAL'; am?: PublicSlotStatus; pm?: PublicSlotStatus }> } {
+  const sessions = venueSellsSessions(p.venue);
+  const buffer = venueTurnaroundMin(p.venue, p.profile);
+  const dayNum = (ymd: string) => Math.round(Date.parse(ymd + 'T00:00:00Z') / 86400000);
+  const span = (startYmd: string, endYmd: string, sTime: any, eTime: any) => {
+    const s = dayNum(startYmd) * 1440 + hhmmToMin(String(sTime || '00:00'));
+    let e = dayNum(endYmd) * 1440 + hhmmToMin(String(eTime || '00:00'));
+    if (e <= s) e += 1440;
+    return { s, e };
+  };
+  const spans = p.bookings.map(b => {
+    const st = ymdStr(b.event_date);
+    const en = b.end_date && ymdStr(b.end_date) > st ? ymdStr(b.end_date) : st;
+    const status = String(b.status || '').toUpperCase();
+    return { ...span(st, en, b.start_time || '10:00', b.end_time || '22:00'), held: status === 'CONFIRMED' || status === 'IN_PROGRESS', quoted: status === 'QUOTED' };
+  }).filter(x => x.held || x.quoted);
+  const windowStatus = (day: string, w: { start: string; end: string }): PublicSlotStatus => {
+    const nw = span(day, day, w.start, w.end);
+    let hold = false;
+    for (const x of spans) {
+      if (x.s - buffer < nw.e && x.e + buffer > nw.s) {
+        if (x.held) return 'BOOKED';
+        hold = true;
+      }
+    }
+    return hold ? 'HOLD' : 'FREE';
+  };
+  const days: Record<string, any> = {};
+  let cur = p.from, guard = 0;
+  while (cur <= p.to && guard++ < 400) {
+    if (p.closedDays.has(cur)) days[cur] = sessions ? { s: 'CLOSED', am: 'CLOSED', pm: 'CLOSED' } : { s: 'CLOSED' };
+    else if (sessions) {
+      const am = windowStatus(cur, halfDayWindow('AM', p.venue, p.profile));
+      const pm = windowStatus(cur, halfDayWindow('PM', p.venue, p.profile));
+      if (am !== 'FREE' || pm !== 'FREE') days[cur] = { s: am === pm ? am : 'PARTIAL', am, pm };
+    } else {
+      const st = windowStatus(cur, { start: '10:00', end: '22:00' });
+      if (st !== 'FREE') days[cur] = { s: st };
+    }
+    cur = new Date(Date.parse(cur + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+  }
+  return { sessions, days };
+}
+
 /** Returns a venue block (maintenance/hold) overlapping the date, or null. */
 export async function venueBlockConflict(
   tenantDb: DbInterface,
@@ -787,6 +852,16 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // within its own category so its GST stays correct (rooms use the Hotel slab,
   // event lines use the event GST). Defaults to 0 → existing bookings unchanged.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS discount_hotel DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  // Public enquiries (Enquiries page): every public enquiry is kept, including one
+  // for a date that is blocked or already booked (inquiry_flag DATE_BLOCKED /
+  // DATE_BOOKED), plus the owner's follow-up stage and note. preferred_session is
+  // the AM/PM session the guest picked on the public availability calendar.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS inquiry_flag TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS inquiry_stage TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS inquiry_note TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS inquiry_stage_at TIMESTAMP`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS inquiry_stage_by TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS preferred_session TEXT`).catch(() => {});
 
   // ── Event-invoice GST config (owner-configurable, default 18%) ───────────────
   // A single event GST rate applies to all non-room event lines (venue, rentals,

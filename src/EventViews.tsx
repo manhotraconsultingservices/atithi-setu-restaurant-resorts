@@ -18,7 +18,8 @@ import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { useConfirm } from './components/ConfirmDialog';
 import { todayIST } from './lib/utils';
-import { MahuratCalendar, MahuratSettingsCard, PublicMahuratHint, publicMahuratBlock } from './MahuratCalendar';
+import { MahuratCalendar, MahuratSettingsCard, PublicMahuratHint } from './MahuratCalendar';
+import { PublicAvailabilityCalendar, PublicAvailabilitySettingsCard } from './PublicAvailability';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -3452,6 +3453,7 @@ function EventSettings({ restaurantId, token }: Props) {
       <SectionHeader icon={<Building2 size={18} />} title={t('events.settings.title')} sub={t('events.settings.sub')} />
 
       <MahuratSettingsCard restaurantId={restaurantId} token={token} canEdit={canEdit} />
+      <PublicAvailabilitySettingsCard restaurantId={restaurantId} token={token} canEdit={canEdit} />
 
       {/* App-wide secondary language (i18n) */}
       <div className={`${CARD} mb-4`}>
@@ -3777,6 +3779,109 @@ export function EventMigration({ restaurantId, token }: Props) {
   );
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// Enquiries: every enquiry sent from the public events page, with no list cap,
+// the owner's follow-up stage + note, and one click into the booking itself.
+// ════════════════════════════════════════════════════════════════════════
+const ENQ_STAGES = ['NEW', 'CONTACTED', 'QUOTED', 'WON', 'LOST'];
+const ENQ_TONE: Record<string, string> = {
+  NEW: 'bg-sky-50 border-sky-200 text-sky-800', CONTACTED: 'bg-violet-50 border-violet-200 text-violet-800',
+  QUOTED: 'bg-amber-50 border-amber-200 text-amber-800', WON: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+  LOST: 'bg-stone-100 border-stone-200 text-stone-600',
+};
+function EventEnquiries({ restaurantId, token }: Props) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const canEdit = evCanEdit('EVENTS_ENQUIRIES');
+  const [range, setRange] = useState<DateRange>(rangeFor('ALL'));
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [stage, setStage] = useState('ALL');
+  const [venues, setVenues] = useState<any[]>([]);
+  const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
+  const [error, setError] = useState('');
+  const load = async (r: DateRange = range) => {
+    setError('');
+    try {
+      const qs = new URLSearchParams();
+      if (r.from) qs.set('from', r.from);
+      if (r.to) qs.set('to', r.to);
+      const d = await api(`/events/enquiries?${qs.toString()}`);
+      setRows(Array.isArray(d?.enquiries) ? d.enquiries : []);
+    } catch (e: any) { setError(e.message); setRows([]); }
+  };
+  useEffect(() => { load(); api('/events/venues').then((v: any) => setVenues(Array.isArray(v) ? v : [])).catch(() => {}); }, []);
+  const save = async (r: any, patch: any) => {
+    if (!canEdit) return;
+    try { await api(`/events/enquiries/${r.id}`, { method: 'PATCH', body: JSON.stringify(patch) }); await load(); }
+    catch (e: any) { alert(e.message); }
+  };
+  const stageLabel = (s: string) => t(`events.enq.stage.${s}`);
+  const top = objStack[objStack.length - 1];
+  if (top) return (
+    <EventObjectRouter restaurantId={restaurantId} token={token} obj={top} venues={venues}
+      onOpenObject={(type, id) => setObjStack(s => [...s, { type, id }])}
+      onBack={() => { setObjStack(s => s.slice(0, -1)); load(); }} />
+  );
+  const all = rows || [];
+  const shown = stage === 'ALL' ? all : all.filter(r => r.stage === stage);
+  const fmtWhen = (v: string) => { const d = new Date(v); return isNaN(d.getTime()) ? String(v || '') : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); };
+  return (
+    <div>
+      <SectionHeader icon={<Mail size={18} />} title={t('events.enq.title')} sub={t('events.enq.sub')}
+        action={<button className={BTN_GHOST} onClick={() => load()}><RefreshCw size={13} /></button>} />
+      <div className="mb-3"><DateRangeBar value={range} onChange={r => { setRange(r); load(r); }} label={t('events.enq.received')} /></div>
+      <div className="mb-4">
+        <StatusTiles active={stage} onSelect={setStage}
+          tiles={[{ filter: 'ALL', label: t('events.enq.all'), value: all.length, tone: 'bg-white border-[#e8dccf] text-[#3d3128]' },
+            ...ENQ_STAGES.map(s => ({ filter: s, label: stageLabel(s), value: all.filter(r => r.stage === s).length, tone: ENQ_TONE[s] }))]} />
+      </div>
+      {error && <div className="mb-3 text-sm text-rose-700">{error}</div>}
+      {rows === null ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
+        <DataTable
+          data={shown}
+          rowKey={(r: any) => r.id}
+          columnChooser columnFilters tableId="events-enquiries" exportFilename="event-enquiries"
+          emptyMessage={t('events.enq.none')}
+          columns={[
+            { key: 'created_at', label: t('events.enq.received'), sortable: true, getValue: (r: any) => r.created_at, render: (r: any) => fmtWhen(r.created_at) },
+            { key: 'customer_name', label: t('common.name'), sortable: true, searchable: true,
+              render: (r: any) => <button className="font-semibold text-brand hover:underline text-left" onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{r.customer_name}</button> },
+            { key: 'customer_phone', label: t('common.phone'), searchable: true },
+            { key: 'customer_email', label: t('common.email'), searchable: true, hideable: true, defaultHidden: true },
+            { key: 'event_date', label: t('events.bookings.eventDate'), sortable: true },
+            { key: 'venue_name', label: t('events.bookings.venue'), sortable: true, filterable: true, filterType: 'select',
+              filterOptions: [...new Set(all.map(r => r.venue_name || '—'))].sort().map(v => ({ value: v, label: v })),
+              getValue: (r: any) => r.venue_name || '—' },
+            { key: 'preferred_session', label: t('events.enq.session'), hideable: true,
+              getValue: (r: any) => r.preferred_session === 'AM' ? t('events.avail.morning') : r.preferred_session === 'PM' ? t('events.avail.evening') : '' },
+            { key: 'event_type', label: t('events.bookings.eventType'), sortable: true, hideable: true },
+            { key: 'guest_count', label: t('events.enq.guests'), sortable: true, align: 'right', getValue: (r: any) => Number(r.guest_count || 0) },
+            { key: 'inquiry_flag', label: t('events.enq.flag'), filterable: true, filterType: 'select',
+              filterOptions: [{ value: 'DATE_BOOKED', label: t('events.enq.flagBooked') }, { value: 'DATE_BLOCKED', label: t('events.enq.flagBlocked') }],
+              getValue: (r: any) => r.inquiry_flag || '',
+              render: (r: any) => r.inquiry_flag ? <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700">{r.inquiry_flag === 'DATE_BLOCKED' ? t('events.enq.flagBlocked') : t('events.enq.flagBooked')}</span> : '',
+              exportValue: (r: any) => r.inquiry_flag || '' },
+            { key: 'stage', label: t('events.enq.stageCol'), sortable: true, getValue: (r: any) => r.stage,
+              render: (r: any) => (canEdit && !['CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(String(r.status || '').toUpperCase())) ? (
+                <select className="px-2 py-1 rounded-lg border border-[#e8dccf] text-xs bg-white" value={r.stage} onChange={e => save(r, { stage: e.target.value })}>
+                  {ENQ_STAGES.map(s => <option key={s} value={s}>{stageLabel(s)}</option>)}
+                </select>
+              ) : <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${ENQ_TONE[r.stage] || ''}`}>{stageLabel(r.stage)}</span>,
+              exportValue: (r: any) => r.stage },
+            { key: 'inquiry_note', label: t('events.enq.note'), getValue: (r: any) => r.inquiry_note || '',
+              render: (r: any) => canEdit ? (
+                <input className="px-2 py-1 rounded-lg border border-[#e8dccf] text-xs w-44" defaultValue={r.inquiry_note || ''} placeholder={t('events.enq.notePlaceholder')}
+                  onBlur={e => { if ((e.target.value || '') !== (r.inquiry_note || '')) save(r, { note: e.target.value }); }} />
+              ) : (r.inquiry_note || '') },
+            { key: 'special_requests', label: t('events.enq.message'), hideable: true, defaultHidden: true, searchable: true },
+            { key: 'status', label: t('events.enq.bookingStatus'), sortable: true, hideable: true },
+          ] as any}
+        />
+      )}
+    </div>
+  );
+}
+
 function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }) {
   switch (tab) {
     case 'EVENTS_DASHBOARD': return <EventDashboard restaurantId={restaurantId} token={token} />;
@@ -3791,6 +3896,7 @@ function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }
     case 'EVENTS_SETTINGS': return <EventSettings restaurantId={restaurantId} token={token} />;
     case 'EVENTS_MIGRATION': return <EventMigration restaurantId={restaurantId} token={token} />;
     case 'EVENTS_MAHURAT': return <MahuratCalendar restaurantId={restaurantId} token={token} />;
+    case 'EVENTS_ENQUIRIES': return <EventEnquiries restaurantId={restaurantId} token={token} />;
     default: return null;
   }
 }
@@ -3810,8 +3916,9 @@ export function EventsModule(props: Props & { tab: string }) {
 export function EventBookingPage({ tenantId }: { tenantId: string }) {
   const { t } = useT();
   const [data, setData] = useState<any>(null);
-  const [form, setForm] = useState<any>({ customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: '', guest_count: '', special_requests: '' });
+  const [form, setForm] = useState<any>({ customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: '', guest_count: '', special_requests: '', preferred_session: '' });
   const [done, setDone] = useState(false);
+  const [doneMsg, setDoneMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -3825,7 +3932,6 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
   const submit = async () => {
     setError('');
     if (!form.customer_name || !form.customer_phone || !form.event_date) { setError('Name, phone and date are required'); return; }
-    if (publicMahuratBlock(data?.mahurat, form.venue_id, form.event_date)) { setError(t('events.mahurat.publicUnavailable')); return; }
     setBusy(true);
     try {
       // Retries a gateway error or dropped connection with one idempotency key, so an
@@ -3835,6 +3941,9 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
       if (!r) { setError(t('events.public.offline')); return; }
       const b = await readJson(r);
       if (!r.ok) { setError((b && b.error) || t('events.public.serverBusy')); return; }
+      // A date that is blocked or already booked is still saved; the guest is told
+      // the property will come back with alternatives.
+      setDoneMsg(b?.unavailable ? t('events.avail.savedUnavailable') : '');
       setDone(true);
     } finally { setBusy(false); }
   };
@@ -3928,12 +4037,21 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
           </div>
         )}
 
+        {data.availability_enabled && (
+          <PublicAvailabilityCalendar tenantId={tenantId} mahurat={data.mahurat}
+            onPick={(venueId, date, session) => {
+              setForm((f: any) => ({ ...f, venue_id: venueId, event_date: date, preferred_session: session || '' }));
+              setDone(false);
+              setTimeout(() => document.getElementById('enquire')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+            }} />
+        )}
+
         {/* ── Inquiry form ───────────────────────────────────────────────── */}
         <div id="enquire" style={{ scrollMarginTop: 20, background: '#fff', border: '1px solid #ece3d7', borderRadius: 22, padding: 28, margin: '20px 0 56px', boxShadow: '0 4px 20px rgba(20,17,12,0.06)' }}>
           <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>{t('public.events.enquire')}</h2>
           <p style={{ fontSize: 14, color: '#6b5d52', marginBottom: 18 }}>{t('public.events.formSub')}</p>
           {done ? (
-            <div style={{ textAlign: 'center', padding: 32, color: '#047857', fontWeight: 700, fontSize: 17 }}>✓ {t('public.events.thankYou')}</div>
+            <div style={{ textAlign: 'center', padding: 32, color: '#047857', fontWeight: 700, fontSize: 17 }}>✓ {doneMsg || t('public.events.thankYou')}</div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
               <input className={INPUT} placeholder={t('public.events.yourName')} value={form.customer_name} onChange={e => setForm({ ...form, customer_name: e.target.value })} />
@@ -3942,13 +4060,19 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
               <select className={INPUT} value={form.event_type} onChange={e => setForm({ ...form, event_type: e.target.value })}>
                 {['WEDDING', 'RECEPTION', 'CONFERENCE', 'BIRTHDAY', 'CORPORATE', 'OTHER'].map(c => <option key={c} value={c}>{c}</option>)}
               </select>
-              <select className={INPUT} value={form.venue_id} onChange={e => setForm({ ...form, venue_id: e.target.value })}>
+              <select className={INPUT} value={form.venue_id} onChange={e => setForm({ ...form, venue_id: e.target.value, preferred_session: '' })}>
                 <option value="">{t('events.bookings.venue')} —</option>
                 {venues.map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
-              <input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} />
+              <input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value, preferred_session: '' })} />
               <input type="number" className={INPUT} placeholder={t('public.events.guests')} value={form.guest_count} onChange={e => setForm({ ...form, guest_count: e.target.value })} />
-              <PublicMahuratHint mahurat={data.mahurat} venueId={form.venue_id} date={form.event_date} onPick={(d) => setForm({ ...form, event_date: d })} />
+              {form.preferred_session && (
+                <div style={{ gridColumn: '1 / -1', fontSize: 13, color: '#3d3128' }}>
+                  {t('events.avail.chosenSession', { session: form.preferred_session === 'AM' ? t('events.avail.morning') : t('events.avail.evening') })}
+                  <button type="button" onClick={() => setForm({ ...form, preferred_session: '' })} style={{ marginLeft: 8, border: 'none', background: 'none', color: '#9d8b7e', cursor: 'pointer' }} aria-label={t('common.close')}>✕</button>
+                </div>
+              )}
+              <PublicMahuratHint mahurat={data.mahurat} venueId={form.venue_id} date={form.event_date} onPick={(d) => setForm({ ...form, event_date: d, preferred_session: '' })} />
               <textarea className={INPUT} style={{ gridColumn: '1 / -1' }} rows={3} placeholder={t('public.events.message')} value={form.special_requests} onChange={e => setForm({ ...form, special_requests: e.target.value })} />
               {error && <div style={{ gridColumn: '1 / -1', color: '#dc2626', fontSize: 13 }}>{error}</div>}
               <button className={BTN_PRIMARY} style={{ gridColumn: '1 / -1', justifyContent: 'center', padding: 14, fontSize: 15 }} disabled={busy} onClick={submit}>
