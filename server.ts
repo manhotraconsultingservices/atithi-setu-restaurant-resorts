@@ -25417,6 +25417,19 @@ ${data.tenant.name}`;
     SHARED: { asset: '1610', assetName: 'Inventory — Housekeeping & Amenities', expense: '5200', expenseName: 'Housekeeping & Laundry Expenses' },
   };
 
+  // IST DAY CUT for stock_movements.recorded_at (and any other TIMESTAMP that
+  // holds UTC - the Postgres session is UTC). A bare ?::date is UTC midnight,
+  // which is 05:30 IST, so a movement between 00:00 and 05:30 IST lands on the
+  // previous day. Shifting the boundary back 5h30m puts it on IST midnight.
+  // Never `AT TIME ZONE 'Asia/Kolkata'` on these columns: on a TIMESTAMP
+  // without zone it reads the value AS IST and shifts it the wrong way.
+  // Every inventory report cuts days with this, so each agrees with the close.
+  const _istCut = (expr: string) => `(${expr} - INTERVAL '330 minutes')`;
+  // Start of the current IST month, as a UTC timestamp.
+  const _IST_MONTH_START_SQL = `(DATE_TRUNC('month', LOCALTIMESTAMP + INTERVAL '330 minutes') - INTERVAL '330 minutes')`;
+  // IST calendar day of a UTC TIMESTAMP, for daily buckets.
+  const _istDayOf = (col: string) => `((${col}) + INTERVAL '330 minutes')::date`;
+
   const _computeInventoryPeriod = async (
     tenantId: string, mod: string, from: string, to: string,
   ): Promise<any> => {
@@ -25442,9 +25455,8 @@ ${data.tenant.name}`;
     // next: net zero on the asset account (TC-INV-PERIOD-GL, 1 Oct 2026). Every
     // boundary is shifted back 5h30m so it falls on IST midnight. A back-dated
     // movement stored as a bare date (00:00) still lands on its own day.
-    const B = (expr: string) => `(${expr} - INTERVAL '330 minutes')`;
-    const FROM = B('?::date');
-    const END = B("?::date + INTERVAL '1 day'");
+    const FROM = _istCut('?::date');
+    const END = _istCut("?::date + INTERVAL '1 day'");
     const rows: any[] = await db.query(
       `SELECT i.id, i.name, i.unit, ${_INV_UNIT_COST_SQL} AS unit_price,
               COALESCE(SUM(CASE WHEN sm.recorded_at < ${FROM} THEN sm.qty_delta ELSE 0 END), 0) AS opening_qty,
@@ -29562,7 +29574,7 @@ ${data.tenant.name}`;
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION')
-            AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)${dmfI.sql}`, dmfI.params
+            AND sm.recorded_at >= ${_IST_MONTH_START_SQL}${dmfI.sql}`, dmfI.params
       );
       // Revenue for THIS module. It used to be the tenant's restaurant orders
       // with no filter at all, while every figure beside it was filtered — so
@@ -29578,11 +29590,11 @@ ${data.tenant.name}`;
       const _ordersRevSql = `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
           WHERE status != 'CANCELLED'
             AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
-            AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`;
+            AND created_at >= ${_IST_MONTH_START_SQL}`;
       const _folioRevSql = (kindClause: string) => `SELECT COALESCE(SUM(grand_total - COALESCE(gst_amount, 0)), 0) AS v
           FROM folios
          WHERE status IN ('settled', 'closed')
-           AND settled_at >= DATE_TRUNC('month', CURRENT_DATE)${kindClause}`;
+           AND settled_at >= ${_IST_MONTH_START_SQL}${kindClause}`;
       let revenueRow: any;
       const _revKind = dmf2.module ? _MODULE_FOLIO_KIND[dmf2.module] : null;
       if (_revKind) {
@@ -29691,14 +29703,15 @@ ${data.tenant.name}`;
 
       // 3. Consumption trend — last 30 days, aggregated daily
       const trendRows: any[] = await db.query(
-        `SELECT DATE_TRUNC('day', sm.recorded_at)::date AS d,
+        // IST days: a UTC bucket filed 00:00-05:30 IST usage under yesterday.
+        `SELECT ${_istDayOf('sm.recorded_at')} AS d,
                 SUM(ABS(sm.qty_delta)) AS qty,
                 SUM(ABS(sm.qty_delta) * COALESCE(uc.unit_cost, 0)) AS cost
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type IN ('CONSUMPTION', 'SPA_CONSUMPTION', 'WASTAGE')
             AND sm.recorded_at >= NOW() - INTERVAL '30 days'${dmfI.sql}
-          GROUP BY DATE_TRUNC('day', sm.recorded_at)
+          GROUP BY ${_istDayOf('sm.recorded_at')}
           ORDER BY d ASC`, dmfI.params
       );
 
@@ -29819,8 +29832,9 @@ ${data.tenant.name}`;
       const params: any[] = [];
       if (ingredient_id) { conds.push("sm.ingredient_id = ?"); params.push(String(ingredient_id)); }
       if (type) { conds.push("sm.movement_type = ?"); params.push(String(type).toUpperCase()); }
-      if (from) { conds.push("sm.recorded_at >= ?"); params.push(String(from)); }
-      if (to) { conds.push("sm.recorded_at < ?::timestamp + INTERVAL '1 day'"); params.push(String(to)); }
+      // from/to are IST calendar days (the screen sends YYYY-MM-DD).
+      if (from) { conds.push(`sm.recorded_at >= ${_istCut('?::date')}`); params.push(String(from)); }
+      if (to) { conds.push(`sm.recorded_at < ${_istCut("?::date + INTERVAL '1 day'")}`); params.push(String(to)); }
       // Scope to one module. Appended to the SAME conds/params pair the other
       // filters use, so the SQL and its bound values cannot drift apart.
       const amf = _invModuleFilter(req, 'i.module');
@@ -29965,8 +29979,8 @@ ${data.tenant.name}`;
            FROM stock_movements sm
            JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'CONSUMPTION'
-            AND sm.recorded_at >= ?::date
-            AND sm.recorded_at < ?::date + INTERVAL '1 day'
+            AND sm.recorded_at >= ${_istCut('?::date')}
+            AND sm.recorded_at < ${_istCut("?::date + INTERVAL '1 day'")}
           GROUP BY i.id, i.name, i.category, i.unit
           ORDER BY cogs DESC`,
         [fromDate, toDate]
@@ -29976,16 +29990,16 @@ ${data.tenant.name}`;
            FROM stock_movements sm
            LEFT JOIN ingredients i ON i.id = sm.ingredient_id${_INV_UNIT_COST_JOIN}
           WHERE sm.movement_type = 'WASTAGE'
-            AND sm.recorded_at >= ?::date
-            AND sm.recorded_at < ?::date + INTERVAL '1 day'`,
+            AND sm.recorded_at >= ${_istCut('?::date')}
+            AND sm.recorded_at < ${_istCut("?::date + INTERVAL '1 day'")}`,
         [fromDate, toDate]
       );
       const revenueRow: any = await db.get(
         `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
           WHERE status != 'CANCELLED'
             AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
-            AND created_at >= ?::date
-            AND created_at < ?::date + INTERVAL '1 day'`,
+            AND created_at >= ${_istCut('?::date')}
+            AND created_at < ${_istCut("?::date + INTERVAL '1 day'")}`,
         [fromDate, toDate]
       );
 
@@ -31748,9 +31762,13 @@ ${data.tenant.name}`;
       const to = String(req.query.to || todayIso).slice(0, 10);
       const from = String(req.query.from || '').slice(0, 10)
         || new Date(new Date(to + 'T00:00:00Z').getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
-      const fromTs = new Date(from + 'T00:00:00Z').getTime();
+      // Window edges are IST midnights, the same cut as the SQL below and the
+      // month-end close (_istCut). UTC midnights put 00:00-05:30 IST movements
+      // on the previous day, and an item's opening balance disagreed with the
+      // close's for the same date.
+      const fromTs = new Date(from + 'T00:00:00+05:30').getTime();
       // Exclusive end of the last day, so a window of one day is a full day.
-      const toTs = new Date(to + 'T00:00:00Z').getTime() + 86400000;
+      const toTs = new Date(to + 'T00:00:00+05:30').getTime() + 86400000;
       const spanDays = Math.max(1, Math.round((toTs - fromTs) / 86400000));
       // Time is counted up to NOW, not to the end of the last day. `to` defaults
       // to today, so toTs lies in the future: a report run at 09:00 IST charged
@@ -31775,7 +31793,7 @@ ${data.tenant.name}`;
                 COALESCE(i.current_stock_qty, 0) AS current_qty,
                 COALESCE(i.reorder_point, 0) AS reorder_point,
                 COALESCE((SELECT SUM(sm.qty_delta) FROM stock_movements sm
-                           WHERE sm.ingredient_id = i.id AND sm.recorded_at < ?::date), 0) AS opening_qty
+                           WHERE sm.ingredient_id = i.id AND sm.recorded_at < ${_istCut('?::date')}), 0) AS opening_qty
            FROM ingredients i
           WHERE i.is_active = 1${dmf.sql}
           ORDER BY i.name`,
@@ -31791,8 +31809,8 @@ ${data.tenant.name}`;
            FROM stock_movements sm
            JOIN ingredients i ON i.id = sm.ingredient_id
           WHERE i.is_active = 1
-            AND sm.recorded_at >= ?::date
-            AND sm.recorded_at < ?::date + INTERVAL '1 day'${dmf.sql}
+            AND sm.recorded_at >= ${_istCut('?::date')}
+            AND sm.recorded_at < ${_istCut("?::date + INTERVAL '1 day'")}${dmf.sql}
           ORDER BY sm.ingredient_id, sm.recorded_at`,
         [from, to, ...dmf.params]
       ).catch(() => [] as any[]);
@@ -31901,7 +31919,8 @@ ${data.tenant.name}`;
           availability_pct: availability,
           days_below_reorder: Math.round((msLow / DAY) * 10) / 10,
           currently_out: isOutNow,
-          last_stockout_at: lastStockout ? new Date(lastStockout).toISOString().slice(0, 10) : null,
+          // IST calendar day, not the UTC one toISOString() gives.
+          last_stockout_at: lastStockout ? new Date(lastStockout + 330 * 60000).toISOString().slice(0, 10) : null,
         };
       });
 
@@ -71163,8 +71182,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-role-ceiling',
+    commit_marker: 'inventory-reports-ist-day-cut',
     code_features: [
+      'inventory-reports-ist-day-cut  After the close moved to IST days (inventory-close-ist-and-one-standing-journal), every other inventory report still cut stock_movements.recorded_at (UTC) at a bare ?::date, which is 05:30 IST, so movements between 00:00 and 05:30 IST landed on the previous day and the reports disagreed with the close. One helper _istCut (boundary minus 330 minutes) is now used by the close, the stockout report (opening balance, window, and its JS window edges; last_stockout_at is the IST date), the COGS report (consumption, wastage and the order revenue it is compared with), and the audit log from/to filter (now IST calendar days). The dashboard trend buckets by IST day (_istDayOf) and month-to-date consumption and its revenue denominators (orders, folios) start at the IST month (_IST_MONTH_START_SQL). No AT TIME ZONE on TIMESTAMP-without-zone columns. Bind order unchanged. Smoke: TC-INV-IST-DAY-CUT (drives a 04:30 IST movement), TC-INV-IST-DAY-CUT-SOURCE.',
       'staff-role-ceiling  A staff manager who is not the owner, the platform or the built-in MANAGER can only give a role with the same or less access than their own, tab by tab (403 ROLE_ABOVE_YOURS with the tabs), and cannot edit, remove or reset the password of a colleague whose role has more access (403 TARGET_ABOVE_YOURS), since either would let a lower role reach higher access. Applied to staff create, bulk create (which also gains the owner-role guard), edit, delete and password reset. Smoke: TC-STAFF-ROLE-CEILING.',
       'inventory-close-ist-and-one-standing-journal  TC-INV-PERIOD-GL failed from 1 Oct 2026 (asset 1630 stayed 0 after closing October). Cause: the stock-close query cut each day at UTC midnight (05:30 IST), so stock received 00:00-05:30 IST on the 1st counted as the closing stock of the previous month AND of this month, and the close journal released it as opening and capitalised it as closing: net zero. _computeInventoryPeriod now cuts at IST midnight. The close posted on min(period end, today) but its reversal (re-close and reopen) on the period end, so a report up to today saw every re-close journal and none of their reversals; one rule _invCloseGlDate (min of period end and _todayIST) now dates the close and both reversals. A re-close now reverses EVERY close journal still standing on the period (not only the remembered ref) BEFORE rewriting the period, and stops with 409 INVENTORY_RECLOSE_GL_FAILED if the ledger refuses, so exactly one close journal stands after any number of re-closes; gl_journal_ref is always rewritten. Smoke: TC-INV-PERIOD-GL.',
       'messaging-cost-platform-only  Owner request: the messaging Est. cost (Notifications Analytics total and the broadcast audience preview) is the platform rate card and is no longer sent to or shown to property owners or staff; only SUPER_ADMIN / CTO receive it. The admin console WhatsApp page gets a Messaging usage and estimated cost table per tenant (7 / 30 / 90 / 365 days) from /api/admin/messaging/usage. Smoke: TC-MSG-COST-PLATFORM-ONLY.',
