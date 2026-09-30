@@ -18,6 +18,7 @@ import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { useConfirm } from './components/ConfirmDialog';
 import { todayIST } from './lib/utils';
+import { MahuratCalendar, MahuratSettingsCard, PublicMahuratHint, publicMahuratBlock } from './MahuratCalendar';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
@@ -138,6 +139,21 @@ function makeApi(restaurantId: string, token: string) {
     }
     return b;
   };
+}
+
+// Calendar Mahurat View: a staff write refused because the date is blocked for
+// the venue. Returns null when the error is something else, '' when the user
+// could not or chose not to override, or the reason to re-send with.
+function askMahuratOverride(e: any, t: (k: string, v?: any) => string): string | null {
+  const d = e?.data;
+  if (d?.code !== 'MAHURAT_BLOCKED') return null;
+  if (!d.can_override) { alert(`${d.error}
+
+${t('events.mahurat.askOwner')}`); return ''; }
+  const r = window.prompt(`${d.error}
+
+${t('events.mahurat.overridePrompt')}`, '');
+  return r && r.trim() ? r.trim() : '';
 }
 
 // Open an authenticated PDF endpoint. A bare window.open() navigation carries
@@ -812,7 +828,14 @@ function EventBookings({ restaurantId, token }: Props) {
     if (!form.customer_phone || !form.customer_phone.trim()) { alert('Phone number is required.'); return; }
     try {
       const body = { ...form, guest_count: Number(form.guest_count || 0) };
-      const created = await api('/events/bookings', { method: 'POST', body: JSON.stringify(body) });
+      let created: any;
+      try { created = await api('/events/bookings', { method: 'POST', body: JSON.stringify(body) }); }
+      catch (e: any) {
+        const reason = askMahuratOverride(e, t);
+        if (reason === null) throw e;
+        if (!reason) return;
+        created = await api('/events/bookings', { method: 'POST', body: JSON.stringify({ ...body, mahurat_override_reason: reason }) });
+      }
       setShowNew(false); setForm(blank); await load(); setObjStack([{ type: 'EVENT_BOOKING', id: created.id }]);
     } catch (e: any) { alert(e.message); }
   };
@@ -1539,7 +1562,15 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const commitContact = async (field: string, value: string) => {
     const v = value.trim();
     if (String(bk[field] || '') === v) return;
-    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v }) });
+    try { await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v }) }); }
+    catch (e: any) {
+      const reason = askMahuratOverride(e, t);
+      try {
+        if (reason === null) throw e;
+        if (!reason) { await load(); return; }
+        await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v, mahurat_override_reason: reason }) });
+      } catch (e2: any) { alert(e2.message); await load(); return; }
+    }
     await load(); flashSaved();
   };
   // Change the venue after creation — the backend re-resolves the venue charge for
@@ -1548,7 +1579,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const commitVenue = async (venueId: string) => {
     if (String(bk.venue_id || '') === String(venueId || '')) return;
     try {
-      await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ venue_id: venueId || null }) });
+      try { await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ venue_id: venueId || null }) }); }
+      catch (e: any) {
+        const reason = askMahuratOverride(e, t);
+        if (reason === null) throw e;
+        if (!reason) { await load(); return; }
+        await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ venue_id: venueId || null, mahurat_override_reason: reason }) });
+      }
       await load(); flashSaved();
     } catch (e: any) { alert(e.message); await load(); }
   };
@@ -1617,6 +1654,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       await runAct(path, { ...(extraBody || {}) }, okMsg);
     } catch (e: any) {
       const d = e?.data;
+      const mReason = askMahuratOverride(e, t);
+      if (mReason !== null) {
+        if (mReason) {
+          try { await runAct(path, { ...(extraBody || {}), mahurat_override_reason: mReason }, okMsg); }
+          catch (e2: any) { alert(e2.message); }
+        }
+        return;
+      }
       // Housekeeping gate: the venue still has an open cleaning job. This is
       // raised when an event is STARTED, not when it is booked — a hall that
       // needs cleaning today has no bearing on a date months away, and gating
@@ -3406,6 +3451,8 @@ function EventSettings({ restaurantId, token }: Props) {
     <div>
       <SectionHeader icon={<Building2 size={18} />} title={t('events.settings.title')} sub={t('events.settings.sub')} />
 
+      <MahuratSettingsCard restaurantId={restaurantId} token={token} canEdit={canEdit} />
+
       {/* App-wide secondary language (i18n) */}
       <div className={`${CARD} mb-4`}>
         <label className={LABEL}>{t('common.language')} — secondary (app-wide)</label>
@@ -3743,6 +3790,7 @@ function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }
     case 'EVENTS_REPORTS': return <EventReports restaurantId={restaurantId} token={token} />;
     case 'EVENTS_SETTINGS': return <EventSettings restaurantId={restaurantId} token={token} />;
     case 'EVENTS_MIGRATION': return <EventMigration restaurantId={restaurantId} token={token} />;
+    case 'EVENTS_MAHURAT': return <MahuratCalendar restaurantId={restaurantId} token={token} />;
     default: return null;
   }
 }
@@ -3777,6 +3825,7 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
   const submit = async () => {
     setError('');
     if (!form.customer_name || !form.customer_phone || !form.event_date) { setError('Name, phone and date are required'); return; }
+    if (publicMahuratBlock(data?.mahurat, form.venue_id, form.event_date)) { setError(t('events.mahurat.publicUnavailable')); return; }
     setBusy(true);
     try {
       // Retries a gateway error or dropped connection with one idempotency key, so an
@@ -3899,6 +3948,7 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
               </select>
               <input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} />
               <input type="number" className={INPUT} placeholder={t('public.events.guests')} value={form.guest_count} onChange={e => setForm({ ...form, guest_count: e.target.value })} />
+              <PublicMahuratHint mahurat={data.mahurat} venueId={form.venue_id} date={form.event_date} onPick={(d) => setForm({ ...form, event_date: d })} />
               <textarea className={INPUT} style={{ gridColumn: '1 / -1' }} rows={3} placeholder={t('public.events.message')} value={form.special_requests} onChange={e => setForm({ ...form, special_requests: e.target.value })} />
               {error && <div style={{ gridColumn: '1 / -1', color: '#dc2626', fontSize: 13 }}>{error}</div>}
               <button className={BTN_PRIMARY} style={{ gridColumn: '1 / -1', justifyContent: 'center', padding: 14, fontSize: 15 }} disabled={busy} onClick={submit}>

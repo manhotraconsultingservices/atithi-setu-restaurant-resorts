@@ -11191,6 +11191,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'CHECKLISTS'                               // owner config — hotel/room checklist templates (PMS nav)
     | 'EVENTS_CHECKLISTS'                        // owner config — event checklist templates (Events & Convention nav)
     | 'EVENTS_MIGRATION'                         // owner-only CSV migration utility (bookings / invoices / rentals / add-ons)
+    | 'EVENTS_MAHURAT'                           // opt-in Calendar Mahurat View (seasons, blocked dates, bookings)
     | 'MY_CHECKLIST'                             // personal — checklist instances assigned to me / my role
     | 'CHECKLIST_BOARD'                          // manager/owner — every checklist instance across the property
     | 'STATUS_BOARD'                             // rooms + halls status grid, flip inline
@@ -16995,7 +16996,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', STATUS_BOARD: 'Status Board', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', EVENTS_CHECKLISTS: 'Checklist Templates', MY_CHECKLIST: 'My Checklist', CHECKLIST_BOARD: 'Checklist Board', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', STATUS_BOARD: 'Status Board', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', HOUSEKEEPING: 'Housekeeping', EVENTS_HOUSEKEEPING: 'Cleaning Checklist', CHECKLISTS: 'Checklist Templates', EVENTS_CHECKLISTS: 'Checklist Templates', EVENTS_MAHURAT: 'Calendar Mahurat View', MY_CHECKLIST: 'My Checklist', CHECKLIST_BOARD: 'Checklist Board', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_BILLING: 'Invoices & Payments', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -17150,6 +17151,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             tabs: [
               { id: 'EVENTS_DASHBOARD',  label: 'Dashboard' },
               { id: 'EVENTS_CALENDAR',   label: 'Event Calendar' },
+              // Opt-in per property (Events → Public Page Settings); the owner may rename it.
+              ...(Number((restaurant as any)?.event_mahurat_enabled) === 1 ? [{ id: 'EVENTS_MAHURAT', label: String((restaurant as any)?.event_mahurat_title || '').trim() || 'Calendar Mahurat View' } as NavTab] : []),
               { id: 'EVENTS_BOOKINGS',   label: 'Bookings' },
               { id: 'EVENTS_VENUES',     label: 'Halls & Venues' },
               { id: 'EVENTS_RENTALS',    label: 'Rental Inventory' },
@@ -17326,6 +17329,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           isOnlinePaymentsEnabled: Number((restaurant as any)?.online_payments_enabled) === 1,
           isAccountsEnabled: Number((restaurant as any)?.accounts_enabled) === 1,
           isPeopleEnabled: Number((restaurant as any)?.people_enabled) === 1,
+          isMahuratEnabled: Number((restaurant as any)?.event_mahurat_enabled) === 1,
           hasEventsGrant: Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.some(t => String(t).startsWith('EVENTS_')),
           baseTabVisible: (tid: string) => isTabVisible(tid, effectiveAllowedTabs),
           strictGranted: (tid: string) => Array.isArray(effectiveAllowedTabs) && effectiveAllowedTabs.includes(tid),
@@ -18103,7 +18107,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         />
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_BILLING' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
-      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || (activeTab === 'EVENTS_MIGRATION' && isPlatformAdmin)) && isEventsEnabled ? (
+      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS' || (activeTab === 'EVENTS_MAHURAT' && Number((restaurant as any)?.event_mahurat_enabled) === 1) || (activeTab === 'EVENTS_MIGRATION' && isPlatformAdmin)) && isEventsEnabled ? (
         <LanguageProvider secondary={secondaryLanguage}>
           <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
         </LanguageProvider>
@@ -29205,6 +29209,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EVENTS_REPORTS',    label: 'Event Reports',      description: 'Events reporting hub — revenue, venue utilization, upcoming events, CSV export.', eventsOnly: true },
               { id: 'EVENTS_SETTINGS',   label: 'Events Page Settings', description: 'Public events page config — hero, tagline, gallery photos.', eventsOnly: true },
               { id: 'EVENTS_CHECKLISTS', label: 'Event Checklist Templates', description: 'Build event-hall checklist templates (setup / daily / post-event), set triggers, and assign to all or specific venues. Grant to let a role VIEW the templates in the Events nav; creating / editing / deleting stays owner-only.', eventsOnly: true },
+              { id: 'EVENTS_MAHURAT',    label: 'Calendar Mahurat View', description: 'Owner-defined seasons (auspicious dates, festivals, busy periods) shown in colour on a separate calendar, with dates that can be blocked for events per venue. View = see the calendar; Edit = add and change seasons; Full = also remove seasons and override a blocked date on a booking. Shown only when the feature is switched on in Events settings.', eventsOnly: true },
               { id: 'EVENTS_MIGRATION',  label: 'Event Data Migration', description: 'Owner-only CSV import for bookings, sales invoices, rental inventory and add-on services — validate + dedup + editable fix-it grid.', eventsOnly: true },
               // Spa & Wellness tabs (only shown when the Spa module is enabled).
               { id: 'SPA_CALENDAR',     label: 'Spa Calendar',       description: 'Therapist × time appointment calendar — book, reschedule, view the day.', spaOnly: true },
@@ -29249,7 +29254,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ROOMS: 'FRONTDESK', HOTEL_BOOKINGS: 'FRONTDESK', SERVICES: 'FRONTDESK', SERVICE_REQUESTS: 'FRONTDESK', HOUSEKEEPING: 'FRONTDESK', CHECKLISTS: 'FRONTDESK', FOLIOS: 'FRONTDESK', COMPLIANCE: 'FRONTDESK', CONCIERGE_FAQ: 'FRONTDESK', FRONT_OFFICE_REPORTS: 'FRONTDESK',
               ORDERS: 'RESTAURANT', MENU: 'RESTAURANT', DELIVERY: 'RESTAURANT', QR: 'RESTAURANT', BOOKINGS: 'RESTAURANT', RESTAURANT_REPORTS: 'RESTAURANT',
               SPA_CALENDAR: 'SPA', SPA_APPOINTMENTS: 'SPA', SPA_CATALOG: 'SPA', SPA_RESOURCES: 'SPA', SPA_CLIENTS: 'SPA', SPA_CLINICAL: 'SPA', SPA_PACKAGES: 'SPA', SPA_REPORTS: 'SPA', SPA_BILLING: 'SPA', SPA_SETTINGS: 'SPA',
-              EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
+              EVENTS_DASHBOARD: 'EVENTS', EVENTS_CALENDAR: 'EVENTS', EVENTS_BOOKINGS: 'EVENTS', EVENTS_ADDONS: 'EVENTS', EVENTS_VENUES: 'EVENTS', EVENTS_RENTALS: 'EVENTS', EVENTS_SERVICES: 'EVENTS', EVENTS_CATERING: 'EVENTS', EVENTS_QUOTATIONS: 'EVENTS', EVENTS_REPORTS: 'EVENTS', EVENTS_SETTINGS: 'EVENTS', EVENTS_CHECKLISTS: 'EVENTS', EVENTS_MAHURAT: 'EVENTS', EVENTS_MIGRATION: 'EVENTS',
               EXPENSE_JOURNAL: 'ACCOUNTS', PROCUREMENT: 'ACCOUNTS', RECEIVABLES: 'ACCOUNTS', CUSTOMER_ACCOUNTS: 'ACCOUNTS',
               ACCOUNTING: 'ACCOUNTS', ACCOUNTS_PNL: 'ACCOUNTS', ACCOUNTS_CASHFLOW: 'ACCOUNTS', ACCOUNTS_GST: 'ACCOUNTS', ACCOUNTS_VENDOR_AGING: 'ACCOUNTS', ACCOUNTS_MSME_43B: 'ACCOUNTS', CASH_DRAWER: 'ACCOUNTS',
               CHECKLIST_BOARD: 'OVERVIEW', STATUS_BOARD: 'FRONTDESK',
@@ -55565,7 +55570,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Events & Convention tabs (shown only when the selected restaurant has events_enabled)
   const EVENTS_TABS = [
     'EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_ADDONS', 'EVENTS_VENUES', 'EVENTS_RENTALS',
-    'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS', 'EVENTS_MIGRATION',
+    'EVENTS_SERVICES', 'EVENTS_CATERING', 'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS', 'EVENTS_MAHURAT', 'EVENTS_MIGRATION',
   ];
   // Spa & Wellness tabs (shown only when the selected restaurant has spa_enabled)
   const SPA_TABS = [

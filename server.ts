@@ -9455,7 +9455,7 @@ const HOTEL_TAB_IDS = ['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS'
 const EVENTS_TAB_IDS = ['EVENTS_DASHBOARD', 'EVENTS_CALENDAR', 'EVENTS_BOOKINGS', 'EVENTS_ADDONS',
   'EVENTS_VENUES', 'EVENTS_RENTALS', 'EVENTS_SERVICES', 'EVENTS_CATERING',
   'EVENTS_QUOTATIONS', 'EVENTS_REPORTS', 'EVENTS_SETTINGS', 'EVENTS_CHECKLISTS',
-  'EVENTS_MIGRATION'];
+  'EVENTS_MIGRATION', 'EVENTS_MAHURAT'];
 const _HOTEL_TAB_SET = new Set(HOTEL_TAB_IDS);
 const _EVENTS_TAB_SET = new Set(EVENTS_TAB_IDS);
 
@@ -11096,6 +11096,11 @@ async function startServer() {
     // per tenant via POST /api/restaurant/:id/events/enable (SUPER_ADMIN/CTO only).
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS events_enabled INT DEFAULT 0`);
     await centralDb.run(`UPDATE restaurants SET events_enabled = 0 WHERE events_enabled IS NULL`);
+    // Calendar Mahurat View (Events, opt-in per property). DEFAULT 0: no tenant sees
+    // the page, the public-page dates or the blocked-date checks until the owner
+    // switches it on in Events settings. Title is the property's own wording.
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS event_mahurat_enabled INT DEFAULT 0`);
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS event_mahurat_title TEXT`);
     // ====== Secondary language (i18n) ======
     // NULL = English-only (default). When set (e.g. 'ta','hi','kn','te','pa'), the
     // app offers an English↔regional toggle. Purely additive; unset tenants unchanged.
@@ -34386,6 +34391,260 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: 'Failed to update venue status' }); }
   });
 
+  // ==== Calendar Mahurat View (Events, opt-in per property) ====================
+  // Owner-defined, religion-agnostic date seasons. HIGHLIGHT tints the calendar;
+  // BLOCK stops new events on those dates for the season's venues, with an owner
+  // override that is recorded on the booking. Everything here is a no-op until the
+  // property switches the feature on (restaurants.event_mahurat_enabled), so no
+  // other tenant's screens, public page or booking flow change.
+  const MAHURAT_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+  const MAHURAT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const _mahuratSettings = async (rid: string): Promise<{ enabled: boolean; title: string | null }> => {
+    const r: any = await centralDb.get("SELECT event_mahurat_enabled, event_mahurat_title FROM restaurants WHERE id = ?", [rid]).catch(() => null);
+    const title = String(r?.event_mahurat_title || '').trim();
+    return { enabled: Number(r?.event_mahurat_enabled || 0) === 1, title: title || null };
+  };
+  const _mahuratVenueIds = (raw: any): string[] | null => {
+    if (raw == null || raw === '') return null;
+    try { const v = typeof raw === 'string' ? JSON.parse(raw) : raw; return Array.isArray(v) && v.length ? v.map(String) : null; } catch { return null; }
+  };
+  const _mahuratDayRows = async (db: any, seasonIds: string[], from?: string, to?: string) => {
+    if (!seasonIds.length) return [];
+    const ph = seasonIds.map(() => '?').join(',');
+    const params: any[] = [...seasonIds];
+    let where = `season_id IN (${ph})`;
+    if (from && to) { where += ' AND start_date <= ? AND end_date >= ?'; params.push(to, from); }
+    const rows = await db.query(`SELECT id, season_id, start_date, end_date, note FROM event_mahurat_days WHERE ${where} ORDER BY start_date`, params).catch(() => []);
+    return (rows || []).map((d: any) => ({ id: d.id, season_id: d.season_id, start_date: normaliseDateIso(d.start_date), end_date: normaliseDateIso(d.end_date), note: d.note || null }));
+  };
+  // Seasons with their days, optionally only those touching [from, to].
+  const _mahuratSeasons = async (db: any, opts: { from?: string; to?: string; publicOnly?: boolean } = {}) => {
+    const rows = await db.query(
+      `SELECT * FROM event_mahurat_seasons WHERE is_active = 1 ${opts.publicOnly ? 'AND show_public = 1' : ''} ORDER BY created_at`
+    ).catch(() => []);
+    const seasons = (rows || []) as any[];
+    const days = await _mahuratDayRows(db, seasons.map(s => s.id), opts.from, opts.to);
+    const out = seasons.map(s => ({
+      id: s.id, name: s.name, color: s.color, kind: s.kind, venue_ids: _mahuratVenueIds(s.venue_ids),
+      show_public: Number(s.show_public ?? 1) === 1, notes: s.notes || null,
+      days: days.filter((d: any) => d.season_id === s.id).map(({ season_id, ...d }: any) => d),
+    }));
+    return (opts.from && opts.to) ? out.filter(s => s.days.length) : out;
+  };
+  // The first BLOCK season covering any day of [from, to] for this venue, or null.
+  // A season with no venues listed covers every venue; with no venue given (a
+  // public enquiry that names none), only an every-venue block applies.
+  const mahuratBlockFor = async (db: any, rid: string, venueId: string | null, fromDate: any, toDate?: any) => {
+    const st = await _mahuratSettings(rid);
+    if (!st.enabled) return null;
+    const f = normaliseDateIso(fromDate);
+    if (!f) return null;
+    const t = normaliseDateIso(toDate) || f;
+    const rows = await db.query(
+      `SELECT s.id, s.name, s.venue_ids, d.start_date, d.note
+         FROM event_mahurat_days d JOIN event_mahurat_seasons s ON s.id = d.season_id
+        WHERE s.is_active = 1 AND s.kind = 'BLOCK' AND d.start_date <= ? AND d.end_date >= ?
+        ORDER BY d.start_date`, [t < f ? f : t, f]
+    ).catch(() => []);
+    for (const r of (rows || []) as any[]) {
+      const venues = _mahuratVenueIds(r.venue_ids);
+      const applies = venues === null ? true : (venueId ? venues.includes(String(venueId)) : false);
+      if (!applies) continue;
+      const start = normaliseDateIso(r.start_date);
+      return { season_id: r.id, season_name: r.name, date: start > f ? start : f, note: r.note || null };
+    }
+    return null;
+  };
+  const _mahuratCanOverride = async (req: AuthRequest): Promise<boolean> => {
+    const role = String((req as any).user?.role || '').toUpperCase();
+    if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+    return await _roleHasTab(req, 'EVENTS_MAHURAT', 3).catch(() => false);
+  };
+  // Staff booking paths. Returns false after answering 409 when the date is blocked
+  // and there is no valid override; otherwise true (with the override to record).
+  const mahuratGuard = async (req: AuthRequest, res: Response, db: any, venueId: string | null, from: any, to?: any): Promise<{ ok: boolean; override?: { reason: string; block: any } }> => {
+    const blk = await mahuratBlockFor(db, req.params.id, venueId, from, to);
+    if (!blk) return { ok: true };
+    const reason = String((req.body || {}).mahurat_override_reason || '').trim();
+    const canOverride = await _mahuratCanOverride(req);
+    if (reason && canOverride) return { ok: true, override: { reason, block: blk } };
+    const v: any = venueId ? await db.get("SELECT name FROM event_venues WHERE id = ?", [venueId]).catch(() => null) : null;
+    res.status(409).json({
+      code: 'MAHURAT_BLOCKED', can_override: canOverride, season: blk.season_name, date: blk.date,
+      error: `${v?.name || 'This venue'} is not accepting events on ${_humanDate(blk.date)} (${blk.season_name}).`,
+    });
+    return { ok: false };
+  };
+  const _mahuratAuditOverride = async (db: any, req: AuthRequest, bookingId: string, ov?: { reason: string; block: any }) => {
+    if (!ov) return;
+    await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: bookingId, action: 'MAHURAT_OVERRIDE',
+      summary: `Booked on a blocked date ${_humanDate(ov.block.date)} (${ov.block.season_name}). Reason: ${ov.reason}` }).catch(() => {});
+  };
+  // Validate a season body. Returns { error } or the clean value.
+  const _mahuratParseSeason = async (db: any, b: any) => {
+    const name = String(b.name || '').trim();
+    if (!name || name.length > 80) return { error: 'Give the season a name (up to 80 characters).' };
+    const color = String(b.color || '').trim();
+    if (!MAHURAT_COLOR_RE.test(color)) return { error: 'Pick a colour for the season.' };
+    const kind = String(b.kind || 'HIGHLIGHT').toUpperCase();
+    if (!['HIGHLIGHT', 'BLOCK'].includes(kind)) return { error: 'A season either highlights dates or blocks them.' };
+    let venueIds: string[] | null = null;
+    if (Array.isArray(b.venue_ids) && b.venue_ids.length) {
+      venueIds = Array.from(new Set(b.venue_ids.map(String)));
+      const ph = venueIds.map(() => '?').join(',');
+      const found = await db.query(`SELECT id FROM event_venues WHERE id IN (${ph})`, venueIds).catch(() => []);
+      if ((found || []).length !== venueIds.length) return { error: 'One of the chosen venues no longer exists.' };
+    }
+    const rawDays = Array.isArray(b.days) ? b.days : [];
+    if (!rawDays.length) return { error: 'Add at least one date or date range.' };
+    if (rawDays.length > 500) return { error: 'A season can hold up to 500 dates or ranges.' };
+    const days: { start: string; end: string; note: string | null }[] = [];
+    for (const d of rawDays) {
+      const start = String(d?.start_date || '').slice(0, 10);
+      const end = String(d?.end_date || d?.start_date || '').slice(0, 10);
+      if (!MAHURAT_DATE_RE.test(start) || !MAHURAT_DATE_RE.test(end) || isNaN(Date.parse(start)) || isNaN(Date.parse(end))) return { error: `${start || 'A date'} is not a valid date.` };
+      if (end < start) return { error: `The range ${start} to ${end} ends before it starts.` };
+      if ((Date.parse(end) - Date.parse(start)) / 86400000 > 366) return { error: 'A single date range can be at most a year long.' };
+      days.push({ start, end, note: d?.note ? String(d.note).slice(0, 120) : null });
+    }
+    return { value: { name, color, kind, venueIds, showPublic: b.show_public === false || b.show_public === 0 ? 0 : 1, notes: b.notes ? String(b.notes).slice(0, 500) : null, days } };
+  };
+  // Active bookings on a new BLOCK season's dates and venues: shown as a warning,
+  // never cancelled.
+  const _mahuratBookingsOnBlock = async (db: any, v: any) => {
+    if (v.kind !== 'BLOCK') return [];
+    const out: any[] = [];
+    for (const d of v.days) {
+      const rows = await db.query(
+        `SELECT b.id, b.customer_name, b.event_date, b.end_date, b.status, b.venue_id, ven.name AS venue_name
+           FROM event_bookings b LEFT JOIN event_venues ven ON ven.id = b.venue_id
+          WHERE b.status NOT IN ('CANCELLED','COMPLETED') AND b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?`, [d.end, d.start]
+      ).catch(() => []);
+      for (const r of (rows || []) as any[]) {
+        if (v.venueIds && !v.venueIds.includes(String(r.venue_id))) continue;
+        if (!out.some(x => x.id === r.id)) out.push({ id: r.id, customer_name: r.customer_name, venue_name: r.venue_name, status: r.status, event_date: normaliseDateIso(r.event_date) });
+      }
+      if (out.length >= 50) break;
+    }
+    return out;
+  };
+  const _mahuratWriteDays = async (db: any, seasonId: string, days: any[]) => {
+    await db.run("DELETE FROM event_mahurat_days WHERE season_id = ?", [seasonId]);
+    for (const d of days) {
+      await db.run("INSERT INTO event_mahurat_days (id, season_id, start_date, end_date, note) VALUES (?, ?, ?, ?, ?)", [mkEventId('EMD'), seasonId, d.start, d.end, d.note]);
+    }
+  };
+
+  app.get("/api/restaurant/:id/events/mahurat/settings", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    res.json(await _mahuratSettings(req.params.id));
+  });
+
+  app.put("/api/restaurant/:id/events/mahurat/settings", authenticate, eventsStaff, requireTabAction('EVENTS_SETTINGS', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      const before = await _mahuratSettings(req.params.id);
+      const enabled = b.enabled === undefined ? before.enabled : !!b.enabled;
+      const title = b.title === undefined ? before.title : (String(b.title || '').trim().slice(0, 40) || null);
+      await centralDb.run("UPDATE restaurants SET event_mahurat_enabled = ?, event_mahurat_title = ? WHERE id = ?", [enabled ? 1 : 0, title, req.params.id]);
+      const db = await getTenantDb(req.params.id);
+      await writeObjectAudit(db, req, { objectType: 'MAHURAT_SETTINGS', objectId: req.params.id, action: 'UPDATED',
+        summary: `Calendar Mahurat View ${enabled ? 'switched on' : 'switched off'}${title ? `, title "${title}"` : ''}` }).catch(() => {});
+      res.json({ enabled, title });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the Mahurat settings' }); }
+  });
+
+  app.get("/api/restaurant/:id/events/mahurat/seasons", authenticate, eventsStaff, requireTabAccess('EVENTS_MAHURAT'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await _mahuratSeasons(db));
+    } catch (err: any) { res.status(500).json({ error: 'Failed to load the seasons' }); }
+  });
+
+  // Calendar feed: seasons touching [from, to] plus the bookings in it.
+  app.get("/api/restaurant/:id/events/mahurat/calendar", authenticate, eventsStaff, requireTabAccess('EVENTS_MAHURAT'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || '').slice(0, 10), to = String(req.query.to || '').slice(0, 10);
+      if (!MAHURAT_DATE_RE.test(from) || !MAHURAT_DATE_RE.test(to) || to < from) return res.status(400).json({ error: 'from and to must be dates, with to on or after from.' });
+      if ((Date.parse(to) - Date.parse(from)) / 86400000 > 400) return res.status(400).json({ error: 'Ask for at most about a year at a time.' });
+      const db = await getTenantDb(req.params.id);
+      const settings = await _mahuratSettings(req.params.id);
+      const seasons = await _mahuratSeasons(db, { from, to });
+      const venues = await db.query("SELECT id, name FROM event_venues WHERE COALESCE(is_active, 1) = 1 ORDER BY name").catch(() => []);
+      const brows = await db.query(
+        `SELECT id, customer_name, event_type, status, event_date, end_date, venue_id, guest_count
+           FROM event_bookings
+          WHERE status <> 'CANCELLED' AND event_date <= ? AND COALESCE(end_date, event_date) >= ?
+          ORDER BY event_date LIMIT 3000`, [to, from]
+      ).catch(() => []);
+      const bookings = (brows || []).map((b: any) => ({ ...b, event_date: normaliseDateIso(b.event_date), end_date: b.end_date ? normaliseDateIso(b.end_date) : null }));
+      res.json({ settings, seasons, venues, bookings });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to load the calendar' }); }
+  });
+
+  app.post("/api/restaurant/:id/events/mahurat/seasons", authenticate, eventsStaff, requireTabAction('EVENTS_MAHURAT', 'CREATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      if (!(await _mahuratSettings(req.params.id)).enabled) return res.status(409).json({ code: 'MAHURAT_DISABLED', error: 'Switch on Calendar Mahurat View in Events settings first.' });
+      const db = await getTenantDb(req.params.id);
+      const p: any = await _mahuratParseSeason(db, req.body || {});
+      if (p.error) return res.status(400).json({ error: p.error });
+      const v = p.value; const id = mkEventId('EMS');
+      await db.run(
+        `INSERT INTO event_mahurat_seasons (id, name, color, kind, venue_ids, show_public, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, v.name, v.color, v.kind, v.venueIds ? JSON.stringify(v.venueIds) : null, v.showPublic, v.notes, (req as any).user?.email || null]
+      );
+      await _mahuratWriteDays(db, id, v.days);
+      await writeObjectAudit(db, req, { objectType: 'MAHURAT_SEASON', objectId: id, action: 'CREATED',
+        summary: `${v.kind === 'BLOCK' ? 'Blocked' : 'Highlight'} season "${v.name}" with ${v.days.length} date range(s)` }).catch(() => {});
+      const season = (await _mahuratSeasons(db)).find((s: any) => s.id === id);
+      res.status(201).json({ season, bookings_on_blocked_days: await _mahuratBookingsOnBlock(db, v) });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the season' }); }
+  });
+
+  app.put("/api/restaurant/:id/events/mahurat/seasons/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_MAHURAT', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const cur: any = await db.get("SELECT * FROM event_mahurat_seasons WHERE id = ? AND is_active = 1", [req.params.sid]);
+      if (!cur) return res.status(404).json({ error: 'Season not found' });
+      const p: any = await _mahuratParseSeason(db, req.body || {});
+      if (p.error) return res.status(400).json({ error: p.error });
+      const v = p.value;
+      await db.run(
+        `UPDATE event_mahurat_seasons SET name = ?, color = ?, kind = ?, venue_ids = ?, show_public = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [v.name, v.color, v.kind, v.venueIds ? JSON.stringify(v.venueIds) : null, v.showPublic, v.notes, req.params.sid]
+      );
+      await _mahuratWriteDays(db, req.params.sid, v.days);
+      await writeObjectAudit(db, req, { objectType: 'MAHURAT_SEASON', objectId: req.params.sid, action: 'UPDATED',
+        summary: `Season "${v.name}" updated: ${v.kind === 'BLOCK' ? 'blocked' : 'highlight'}, ${v.days.length} date range(s)` }).catch(() => {});
+      const season = (await _mahuratSeasons(db)).find((s: any) => s.id === req.params.sid);
+      res.json({ season, bookings_on_blocked_days: await _mahuratBookingsOnBlock(db, v) });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to save the season' }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/mahurat/seasons/:sid", authenticate, eventsStaff, requireTabAction('EVENTS_MAHURAT', 'DELETE'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const cur: any = await db.get("SELECT name FROM event_mahurat_seasons WHERE id = ? AND is_active = 1", [req.params.sid]);
+      if (!cur) return res.status(404).json({ error: 'Season not found' });
+      await db.run("UPDATE event_mahurat_seasons SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.sid]);
+      await writeObjectAudit(db, req, { objectType: 'MAHURAT_SEASON', objectId: req.params.sid, action: 'DELETED', summary: `Season "${cur.name}" removed` }).catch(() => {});
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: 'Failed to remove the season' }); }
+  });
+
   // Venue blocks (maintenance / hold)
   app.get("/api/restaurant/:id/events/venue-blocks", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
@@ -36252,6 +36511,10 @@ ${data.tenant.name}`;
       if (!b.customer_phone || !String(b.customer_phone).trim()) return res.status(400).json({ error: "Phone number is required" });
       if (b.guest_count !== undefined && b.guest_count !== null && b.guest_count !== '' && Number(b.guest_count) < 0) return res.status(400).json({ error: "Guest count cannot be negative." });
       if (b.discount !== undefined && b.discount !== null && b.discount !== '' && Number(b.discount) < 0) return res.status(400).json({ error: "Discount cannot be negative." });
+      // Calendar Mahurat View: a date the owner blocked for this venue (no-op
+      // unless the property switched the feature on).
+      const mgCreate = await mahuratGuard(req, res, db, String(b.venue_id), b.event_date, b.end_date || null);
+      if (!mgCreate.ok) return;
       const sched = await resolveVenueBooking(db, b);
       const { rateBasis, startTime, endTime, slot, bufferMin, venueRate } = sched;
 
@@ -36313,6 +36576,7 @@ ${data.tenant.name}`;
       }
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})${acctLink.account ? ` — billed to ${acctLink.account.name}` : ''}`, after: row });
+      await _mahuratAuditOverride(db, req, id, mgCreate.override);
       notifyEvent(req.params.id, 'EVENT_BOOKING_CREATED', row);
       // The warning rides along with the created booking rather than blocking
       // it — the person on the phone gets to see it and decide.
@@ -36377,6 +36641,16 @@ ${data.tenant.name}`;
       if (b.discount_hotel !== undefined && b.discount_hotel !== null && b.discount_hotel !== '' && Number(b.discount_hotel) < 0) return res.status(400).json({ error: "Hotel-rooms discount cannot be negative." });
       const schedKeys = ['venue_id','event_date','end_date','start_time','end_time','venue_rate_basis','half_day_slot'];
       const scheduleChanged = schedKeys.some(k => b[k] !== undefined && String(b[k] ?? '') !== String(existing[k] ?? ''));
+      // Calendar Mahurat View: moving a booking onto a blocked date or venue.
+      let mahuratOvPut: any;
+      if (['venue_id', 'event_date', 'end_date'].some(k => b[k] !== undefined && String(b[k] ?? '') !== String(existing[k] ?? ''))) {
+        const mgPut = await mahuratGuard(req, res, db,
+          (b.venue_id !== undefined ? b.venue_id : existing.venue_id) || null,
+          b.event_date !== undefined ? b.event_date : existing.event_date,
+          b.end_date !== undefined ? b.end_date : existing.end_date);
+        if (!mgPut.ok) return;
+        mahuratOvPut = mgPut.override;
+      }
       if (scheduleChanged) {
         const sched = await resolveVenueBooking(db, b, existing);
         b.start_time = sched.startTime;
@@ -36447,6 +36721,7 @@ ${data.tenant.name}`;
       // Re-pointing a booking at a different company (or the total changing)
       // moves what is owed, so the statement is refreshed here too.
       await _syncAccountInvoiceForEvent(db, req.params.bid);
+      await _mahuratAuditOverride(db, req, req.params.bid, mahuratOvPut);
       res.json(acctWarning ? { ...row, credit_warning: acctWarning } : row);
     } catch (err: any) {
       console.error("/events/bookings update error:", err);
@@ -37657,6 +37932,12 @@ ${data.tenant.name}`;
           }).catch(() => {});
         }
       }
+
+      // Calendar Mahurat View: confirming commits the venue, so a date blocked
+      // after the enquiry was taken needs the owner override here too.
+      const mgConfirm = await mahuratGuard(req, res, db, bk.venue_id || null, bk.event_date, bk.end_date || null);
+      if (!mgConfirm.ok) return;
+      await _mahuratAuditOverride(db, req, bk.id, mgConfirm.override);
 
       // Re-check venue availability at confirm time.
       if (bk.venue_id) {
@@ -42722,7 +43003,19 @@ ${data.tenant.name}`;
       );
       const services = await db.query("SELECT id, name, category, pricing_type, rate FROM event_services WHERE is_active = 1 ORDER BY display_order, name");
       const r = gate.restaurant;
+      // Calendar Mahurat View: public seasons for the next two years, only when
+      // the property switched the feature on (absent otherwise, as before).
+      let mahurat: any = null;
+      const mhSet = await _mahuratSettings(req.params.id);
+      if (mhSet.enabled) {
+        const fromD = _istNowParts().date;
+        const toD = new Date(Date.parse(fromD + 'T00:00:00Z') + 730 * 86400000).toISOString().slice(0, 10);
+        const pubSeasons = await _mahuratSeasons(db, { from: fromD, to: toD, publicOnly: true });
+        mahurat = { title: mhSet.title, seasons: pubSeasons.map((x: any) => ({ id: x.id, name: x.name, color: x.color, kind: x.kind, venue_ids: x.venue_ids,
+          days: x.days.map((d: any) => ({ start_date: d.start_date, end_date: d.end_date, note: d.note })) })) };
+      }
       res.json({
+        ...(mahurat ? { mahurat } : {}),
         property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
         profile: profile || { hero_title: null, tagline: null, description: null, hero_image_url: null, gallery: '[]' },
         venues,
@@ -42741,6 +43034,9 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "Name and phone are required" });
       }
       if (!b.event_date) return res.status(400).json({ error: "Event date is required" });
+      // Calendar Mahurat View: the owner is not accepting events on this date here.
+      const pubBlock = await mahuratBlockFor(db, req.params.id, b.venue_id ? String(b.venue_id) : null, b.event_date, null);
+      if (pubBlock) return res.status(409).json({ code: 'MAHURAT_BLOCKED', error: 'This date is not available for events at this venue. Please choose another date.' });
       // The guest page retries a submit that hit a gateway error (a deploy restart
       // answers 502 for a few seconds, which lost enquiries as "Failed to submit").
       // A retry can arrive after the first attempt did land, so the same phone, date
@@ -70470,8 +70766,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'guest-id-proof-encrypted',
+    commit_marker: 'events-mahurat-calendar',
     code_features: [
+      'events-mahurat-calendar  FEATURE (opt-in per property, owner request 30 Sep 2026): Calendar Mahurat View. A separate Events page, off by default (restaurants.event_mahurat_enabled, switched on in Events, Public Page Settings, with an owner-chosen title), so no existing screen, booking flow or public page changes for tenants who do not use it. Owner-defined religion-agnostic seasons (event_mahurat_seasons + event_mahurat_days: name, colour, HIGHLIGHT or BLOCK, all or chosen venues, show on public page, date ranges with notes, paste many dates) tint a month or year calendar with bookings on top. A BLOCK season is enforced server-side on booking create, venue or date change, confirm and the public enquiry (409 MAHURAT_BLOCKED); owner, manager or EVENTS_MAHURAT Full may override with a reason, audited on the booking as MAHURAT_OVERRIDE. Own tab EVENTS_MAHURAT (View, Edit, Full), not in RBAC_NEWLY_ADDED. Public page shows public seasons as upcoming special dates and refuses a blocked date. Smoke: TC-MAHURAT-*.',
       'guest-id-proof-encrypted  Security fix from the 29 Sep review. room_bookings.guest_id_proof and group_guests.guest_id_proof (the passport / Aadhaar number; Form-C prints it) were plain TEXT. Every write now seals it with sealGuestIdProof (encryptSensitive, AES-256-GCM hr1: values, HR_DATA_KEY or derived from JWT_SECRET): booking create, PATCH, online check-in, group guest upsert, SA booking import, demo seed. Reads are opened in one place, PostgresDb.query, for any column named *id_proof, so Form-C, the booking screens and reports get the plain number; a value that cannot be decrypted reads as null, never ciphertext. The SQL console reads raw (query opts.raw). POST /api/admin/guest-id-proof/encrypt-existing (SUPER_ADMIN, dryRun by default, compare-and-set, time-budgeted, counts only) seals values saved before. Form-C PDF generation now writes FORM_C_PDF_GENERATED to the booking audit log first (503 and no PDF if it cannot). DPDP erase (POST /dpdp/erase) now also deletes the guest ID documents of the matched bookings (private or legacy storage, then the row), clears guest_id_proof on them and anonymises group_guests, writes DPDP_ERASED on each booking, and does the document deletes first so a storage failure (502) leaves the request repeatable. TC-GUESTID-*.',
       'public-booking-idempotent-retry  The public hotel and spa booking pages now get the same protection as the event enquiry form. A shared postWithRetry helper (src/lib/postWithRetry.ts) retries a gateway error or dropped connection twice with ONE Idempotency-Key per click; a new publicIdempotency middleware on the three public POST routes stores the first successful reply in a tenant table public_request_replay (created once per tenant per process) and answers a repeat of the key with that same reply and an Idempotent-Replay header, so a retry after a lost reply returns the same booking and payment link instead of a second booking or a slot that looks just taken. Replies are kept in the database, not memory, because a server restart is the case being handled. Non-JSON replies (a gateway error page) show a clear message instead of Unexpected token. TC-PUBLIC-REPLAY-HOTEL, TC-PUBLIC-REPLAY-INQUIRY.',
       'event-inquiry-retry-idempotent  Owner reported the public Enquire Now form showing Failed to submit. The endpoint and form were working when reproduced; the report came during a run of deploys, and a deploy restart answers 502 for 10-20 seconds, which the form turned into a lost enquiry. The guest page now retries a gateway error or dropped connection twice (after about 2 and 5 seconds) before showing a message, and the message says the server could not be reached and the details are still filled in. The inquiry endpoint answers a repeat of the same phone, date and venue within 15 minutes with the existing enquiry (duplicate true), so a retry never creates two. TC-EVT-INQUIRY-IDEMPOTENT.',

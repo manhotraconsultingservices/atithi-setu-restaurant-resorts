@@ -600,6 +600,36 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_event_venue_blocks ON event_venue_blocks(venue_id, from_date, to_date);
   `);
 
+  // ── Calendar Mahurat View: owner-defined date seasons (opt-in per property) ──
+  // Religion-agnostic: the owner names each season and picks its colour. kind
+  // HIGHLIGHT only tints the calendar; BLOCK stops new events on those dates for
+  // the season's venues (venue_ids JSON array; NULL = every venue). show_public
+  // decides whether the public enquiry page sees it. Soft-deleted via is_active.
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS event_mahurat_seasons (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      color       TEXT NOT NULL,
+      kind        TEXT NOT NULL DEFAULT 'HIGHLIGHT',
+      venue_ids   TEXT,
+      show_public INTEGER DEFAULT 1,
+      notes       TEXT,
+      is_active   INTEGER DEFAULT 1,
+      created_by  TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS event_mahurat_days (
+      id          TEXT PRIMARY KEY,
+      season_id   TEXT NOT NULL,
+      start_date  DATE NOT NULL,
+      end_date    DATE NOT NULL,
+      note        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_mahurat_days ON event_mahurat_days(start_date, end_date);
+    CREATE INDEX IF NOT EXISTS idx_event_mahurat_days_season ON event_mahurat_days(season_id);
+  `);
+
   // ── Public-page profile (single row per tenant) ─────────────────────────────
   await tenantDb.exec(`
     CREATE TABLE IF NOT EXISTS event_profile (

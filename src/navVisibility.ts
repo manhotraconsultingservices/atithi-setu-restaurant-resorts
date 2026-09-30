@@ -37,6 +37,8 @@ export interface NavVisibilityCtx {
   isAccountsEnabled?: boolean;
   /** People paid module (attendance, roster, timesheet, payroll, HR). Omitted = on. */
   isPeopleEnabled?: boolean;
+  /** Calendar Mahurat View switched on for the property (opt-in). Omitted = off. */
+  isMahuratEnabled?: boolean;
   /** true when the role holds ANY EVENTS_* tab grant (drives the Events group). */
   hasEventsGrant: boolean;
   /**
@@ -108,6 +110,9 @@ export function computeTabVisibility(id: string, ctx: NavVisibilityCtx): boolean
   if (id === 'EVENTS_CHECKLISTS') return (isOwnerOrAdmin || baseTabVisible(id)) && isEventsEnabled;
   // Data Migration = super-admin only (hidden from tenant owner/staff).
   if (id === 'EVENTS_MIGRATION') return isPlatformAdmin && isEventsEnabled;
+  // Calendar Mahurat View — opt-in per property; owner/manager or an explicit grant
+  // (not in RBAC_NEWLY_ADDED, so never implied by a fail-open null list).
+  if (id === 'EVENTS_MAHURAT') return isEventsEnabled && ctx.isMahuratEnabled === true && (isOwnerOrAdmin || currentRole === 'MANAGER' || strictGranted(id));
   // Personal work queue — visible to every staff member.
   if (id === 'MY_CHECKLIST') return true;
   // Checklist Board — owner / MANAGER / explicit grant.
