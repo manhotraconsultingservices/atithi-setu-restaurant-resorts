@@ -7864,6 +7864,23 @@ function _istDate(d: Date): string {
 }
 function _todayIST(): string { return _istDate(new Date()); }
 
+// IST DAY CUT in SQL for a TIMESTAMP column that holds UTC (the Postgres
+// session is UTC): stock_movements.recorded_at, folio_payments.recorded_at,
+// orders.created_at, folios.settled_at. A bare ?::date is UTC midnight, which
+// is 05:30 IST, so anything between 00:00 and 05:30 IST lands on the previous
+// day. Shifting the boundary back 5h30m puts it on IST midnight. Never
+// `AT TIME ZONE 'Asia/Kolkata'` on these columns: on a TIMESTAMP without zone
+// it reads the value AS IST and shifts it the wrong way.
+const _istCut = (expr: string) => `(${expr} - INTERVAL '330 minutes')`;
+// Start of the current IST month, as a UTC timestamp.
+const _IST_MONTH_START_SQL = `(DATE_TRUNC('month', LOCALTIMESTAMP + INTERVAL '330 minutes') - INTERVAL '330 minutes')`;
+// The IST wall-clock value of a UTC TIMESTAMP; ::date of it is the IST day.
+const _istWall = (col: string) => `((${col}) + INTERVAL '330 minutes')`;
+const _istDayOf = (col: string) => `${_istWall(col)}::date`;
+// `col` falls on IST days ?..? inclusive. Binds TWO placeholders, from then to.
+const _istDayRange = (col: string) =>
+  `${col} >= ${_istCut('?::date')} AND ${col} < ${_istCut("?::date + INTERVAL '1 day'")}`;
+
 function _glEntryDate(v: unknown): string {
   // A plain calendar date is taken as given. (This pattern had lost its
   // backslashes — d{4} instead of \d{4} — so no date string ever matched.)
@@ -25416,19 +25433,6 @@ ${data.tenant.name}`;
     EVENTS: { asset: '1630', assetName: 'Inventory — Events & Banquet Stock', expense: '5220', expenseName: 'Cost of Events Consumables' },
     SHARED: { asset: '1610', assetName: 'Inventory — Housekeeping & Amenities', expense: '5200', expenseName: 'Housekeeping & Laundry Expenses' },
   };
-
-  // IST DAY CUT for stock_movements.recorded_at (and any other TIMESTAMP that
-  // holds UTC - the Postgres session is UTC). A bare ?::date is UTC midnight,
-  // which is 05:30 IST, so a movement between 00:00 and 05:30 IST lands on the
-  // previous day. Shifting the boundary back 5h30m puts it on IST midnight.
-  // Never `AT TIME ZONE 'Asia/Kolkata'` on these columns: on a TIMESTAMP
-  // without zone it reads the value AS IST and shifts it the wrong way.
-  // Every inventory report cuts days with this, so each agrees with the close.
-  const _istCut = (expr: string) => `(${expr} - INTERVAL '330 minutes')`;
-  // Start of the current IST month, as a UTC timestamp.
-  const _IST_MONTH_START_SQL = `(DATE_TRUNC('month', LOCALTIMESTAMP + INTERVAL '330 minutes') - INTERVAL '330 minutes')`;
-  // IST calendar day of a UTC TIMESTAMP, for daily buckets.
-  const _istDayOf = (col: string) => `((${col}) + INTERVAL '330 minutes')::date`;
 
   const _computeInventoryPeriod = async (
     tenantId: string, mod: string, from: string, to: string,
@@ -46493,13 +46497,15 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const from = String(req.query.from || _istDate(new Date(Date.now() - 30 * 86400000)));
       const to   = String(req.query.to   || _todayIST());
       const grain = String(req.query.grain || 'daily');
       const fmt = _grainFmt(grain);
       const tenantDb = await getTenantDb(req.params.id);
       const rows: any[] = await tenantDb.query(
-        `SELECT TO_CHAR(p.recorded_at, '${fmt}') AS period,
+        // IST periods: recorded_at is UTC, so a 02:00 IST receipt was filed
+        // under the previous day (and on the 1st, the previous month).
+        `SELECT TO_CHAR(${_istWall('p.recorded_at')}, '${fmt}') AS period,
                 COALESCE(p.payment_method,'OTHER') AS method,
                 CASE WHEN b.booking_source IS NULL
                           OR b.booking_source IN ('DIRECT','WALK_IN','DIRECT_WEB','PHONE','')
@@ -46510,7 +46516,7 @@ ${data.tenant.name}`;
            LEFT JOIN folios f ON f.id = p.folio_id
            LEFT JOIN room_bookings b ON b.id = f.booking_id
           WHERE (p.is_voided IS NULL OR p.is_voided = 0)
-            AND TO_CHAR(p.recorded_at,'YYYY-MM-DD') BETWEEN ? AND ?
+            AND ${_istDayRange('p.recorded_at')}
           GROUP BY period, method, source
           ORDER BY period DESC`,
         [from, to]
@@ -51214,26 +51220,29 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
-      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      // IST month and IST days throughout: folio payments and orders are UTC
+      // timestamps, so each is cut with _istDayRange / _istDayOf. The UTC month
+      // start put the 1st's first 5h30m in the previous month's report.
+      const f = from || _todayIST().slice(0, 7) + '-01';
       const t = to   || _todayIST();
 
       const [hotelIn, spaIn, eventIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
              dailyHotel, dailyRest, dailyProcOut, dailyOpex, dailyPayroll] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND (fl.folio_kind IS NULL OR fl.folio_kind='HOTEL') AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='SPA' AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND (fl.folio_kind IS NULL OR fl.folio_kind='HOTEL') AND ${_istDayRange('fp.recorded_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='SPA' AND ${_istDayRange('fp.recorded_at')}`, [f, t]).catch(() => ({ val: 0 })),
         // Event receipts. Their ABSENCE was not merely an omission: the refund
         // query below and the daily series further down carry no folio_kind
         // filter, so an event refund already counted as cash OUT while the
         // matching receipt was never counted as cash IN, and the chart
         // contradicted its own headline. With this line the three agree.
-        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='EVENT' AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type='REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(total_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='EVENT' AND ${_istDayRange('fp.recorded_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type='REFUND' AND ${_istDayRange('recorded_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_net), 0) AS val FROM payroll_runs WHERE status='PAID' AND DATE(paid_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.query(`SELECT DATE(recorded_at) AS dt, COALESCE(SUM(CASE WHEN payment_type!='REFUND' THEN amount ELSE 0 END),0) AS cash_in, COALESCE(SUM(CASE WHEN payment_type='REFUND' THEN amount ELSE 0 END),0) AS cash_out FROM folio_payments WHERE is_voided=0 AND DATE(recorded_at) BETWEEN ? AND ? GROUP BY DATE(recorded_at)`, [f, t]).catch(() => []),
-        db.query(`SELECT DATE(created_at) AS dt, COALESCE(SUM(total_amount),0) AS cash_in FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)`, [f, t]).catch(() => []),
+        db.query(`SELECT ${_istDayOf('recorded_at')} AS dt, COALESCE(SUM(CASE WHEN payment_type!='REFUND' THEN amount ELSE 0 END),0) AS cash_in, COALESCE(SUM(CASE WHEN payment_type='REFUND' THEN amount ELSE 0 END),0) AS cash_out FROM folio_payments WHERE is_voided=0 AND ${_istDayRange('recorded_at')} GROUP BY ${_istDayOf('recorded_at')}`, [f, t]).catch(() => []),
+        db.query(`SELECT ${_istDayOf('created_at')} AS dt, COALESCE(SUM(total_amount),0) AS cash_in FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')} GROUP BY ${_istDayOf('created_at')}`, [f, t]).catch(() => []),
         db.query(`SELECT DATE(payment_date) AS dt, COALESCE(SUM(amount),0) AS cash_out FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ? GROUP BY DATE(payment_date)`, [f, t]).catch(() => []),
         db.query(`SELECT DATE(entry_date) AS dt, COALESCE(SUM(amount),0) AS cash_out FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ? GROUP BY DATE(entry_date)`, [f, t]).catch(() => []),
         db.query(`SELECT DATE(paid_at) AS dt, COALESCE(SUM(total_net),0) AS cash_out FROM payroll_runs WHERE status='PAID' AND DATE(paid_at) BETWEEN ? AND ? GROUP BY DATE(paid_at)`, [f, t]).catch(() => []),
@@ -51254,28 +51263,32 @@ ${data.tenant.name}`;
       const net_position = round(net_cash_in - net_cash_out);
 
       // Merge daily rows into a map
+      // Keyed by YYYY-MM-DD. pg returns a DATE as a JS Date, and used as a key
+      // it stringified to "Fri Sep 04 2026 00:00:00 GMT+0000 ...", so the chart
+      // sorted its days by weekday name, and the five series only shared a day
+      // if every query returned the same type.
       const dailyMap: Record<string, { in: number; out: number }> = {};
-      const ensureDay = (dt: string) => { if (!dailyMap[dt]) dailyMap[dt] = { in: 0, out: 0 }; };
+      const ensureDay = (v: any): string => {
+        const dt = normaliseDateIso(v);
+        if (!dailyMap[dt]) dailyMap[dt] = { in: 0, out: 0 };
+        return dt;
+      };
       for (const row of (dailyHotel as any[])) {
-        ensureDay(row.dt);
-        dailyMap[row.dt].in  += Number(row.cash_in  || 0);
-        dailyMap[row.dt].out += Number(row.cash_out || 0);
+        const dt = ensureDay(row.dt);
+        dailyMap[dt].in  += Number(row.cash_in  || 0);
+        dailyMap[dt].out += Number(row.cash_out || 0);
       }
       for (const row of (dailyRest as any[])) {
-        ensureDay(row.dt);
-        dailyMap[row.dt].in += Number(row.cash_in || 0);
+        dailyMap[ensureDay(row.dt)].in += Number(row.cash_in || 0);
       }
       for (const row of (dailyProcOut as any[])) {
-        ensureDay(row.dt);
-        dailyMap[row.dt].out += Number(row.cash_out || 0);
+        dailyMap[ensureDay(row.dt)].out += Number(row.cash_out || 0);
       }
       for (const row of (dailyOpex as any[])) {
-        ensureDay(row.dt);
-        dailyMap[row.dt].out += Number(row.cash_out || 0);
+        dailyMap[ensureDay(row.dt)].out += Number(row.cash_out || 0);
       }
       for (const row of (dailyPayroll as any[])) {
-        ensureDay(row.dt);
-        dailyMap[row.dt].out += Number(row.cash_out || 0);
+        dailyMap[ensureDay(row.dt)].out += Number(row.cash_out || 0);
       }
       const daily = Object.keys(dailyMap).sort().map(dt => ({
         date: dt,
@@ -71182,8 +71195,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-reports-ist-day-cut',
+    commit_marker: 'cash-reports-ist-day-cut',
     code_features: [
+      'cash-reports-ist-day-cut  folio_payments.recorded_at and orders.created_at are UTC timestamps, and the cash reports cut them at UTC midnight (05:30 IST), so a receipt or bill between 00:00 and 05:30 IST was reported on the previous day. Now IST days everywhere a folio receipt is cut: EOD day-close tender (orders and folio payments together), the cash-flow report (every folio receipt and refund line, its restaurant orders, the daily series, and the default month start), hotel payment-received (filter and TO_CHAR periods), and the hotel-advance GL backfill filter (now the same IST day _glPostDate posts on). The IST SQL helpers (_istCut, _istDayRange, _istDayOf, _istWall, _IST_MONTH_START_SQL) moved to module scope beside _istDate. Cash-flow daily rows were keyed by a JS Date and printed as Fri Sep 04 2026 00:00:00 GMT+0000 in weekday order; keys are now YYYY-MM-DD via normaliseDateIso. Not changed: P&L and GST ledger still cut orders at UTC days. Smoke: TC-RPT-CASH-IST-DAILY, -PAYMENTS, -DAYCLOSE, -SOURCE.',
       'inventory-reports-ist-day-cut  After the close moved to IST days (inventory-close-ist-and-one-standing-journal), every other inventory report still cut stock_movements.recorded_at (UTC) at a bare ?::date, which is 05:30 IST, so movements between 00:00 and 05:30 IST landed on the previous day and the reports disagreed with the close. One helper _istCut (boundary minus 330 minutes) is now used by the close, the stockout report (opening balance, window, and its JS window edges; last_stockout_at is the IST date), the COGS report (consumption, wastage and the order revenue it is compared with), and the audit log from/to filter (now IST calendar days). The dashboard trend buckets by IST day (_istDayOf) and month-to-date consumption and its revenue denominators (orders, folios) start at the IST month (_IST_MONTH_START_SQL). No AT TIME ZONE on TIMESTAMP-without-zone columns. Bind order unchanged. Smoke: TC-INV-IST-DAY-CUT (drives a 04:30 IST movement), TC-INV-IST-DAY-CUT-SOURCE.',
       'staff-role-ceiling  A staff manager who is not the owner, the platform or the built-in MANAGER can only give a role with the same or less access than their own, tab by tab (403 ROLE_ABOVE_YOURS with the tabs), and cannot edit, remove or reset the password of a colleague whose role has more access (403 TARGET_ABOVE_YOURS), since either would let a lower role reach higher access. Applied to staff create, bulk create (which also gains the owner-role guard), edit, delete and password reset. Smoke: TC-STAFF-ROLE-CEILING.',
       'inventory-close-ist-and-one-standing-journal  TC-INV-PERIOD-GL failed from 1 Oct 2026 (asset 1630 stayed 0 after closing October). Cause: the stock-close query cut each day at UTC midnight (05:30 IST), so stock received 00:00-05:30 IST on the 1st counted as the closing stock of the previous month AND of this month, and the close journal released it as opening and capitalised it as closing: net zero. _computeInventoryPeriod now cuts at IST midnight. The close posted on min(period end, today) but its reversal (re-close and reopen) on the period end, so a report up to today saw every re-close journal and none of their reversals; one rule _invCloseGlDate (min of period end and _todayIST) now dates the close and both reversals. A re-close now reverses EVERY close journal still standing on the period (not only the remembered ref) BEFORE rewriting the period, and stops with 409 INVENTORY_RECLOSE_GL_FAILED if the ledger refuses, so exactly one close journal stands after any number of re-closes; gl_journal_ref is always rewritten. Smoke: TC-INV-PERIOD-GL.',
@@ -72681,7 +72695,8 @@ ${data.tenant.name}`;
            FROM folio_payments p JOIN folios f ON f.id = p.folio_id
           WHERE p.is_voided = 0 AND p.payment_type IN ('ADVANCE','INTERIM')
             AND UPPER(COALESCE(f.folio_kind,'HOTEL')) = 'HOTEL'
-            AND TO_CHAR(p.recorded_at,'YYYY-MM-DD') BETWEEN ? AND ?
+            -- IST days, the day _glPostDate posts each receipt on.
+            AND ${_istDayRange('p.recorded_at')}
           ORDER BY p.recorded_at`, [from, to]).catch(() => []);
       const faDetail: any[] = []; let faAlready = 0; let faPosted = 0;
       for (const p of faRows) {
@@ -74641,9 +74656,9 @@ ${data.tenant.name}`;
       if (isMgr) {
         const t: Record<string, number> = { CASH: 0, CARD: 0, UPI: 0, BANK_TRANSFER: 0, OTHER: 0 };
         const norm = (m: string) => { const u = String(m || '').toUpperCase(); return t[u] !== undefined ? u : 'OTHER'; };
-        const ord: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(total_amount),0) AS v FROM orders WHERE deleted_at IS NULL AND UPPER(COALESCE(status,''))<>'CANCELLED' AND payment_status='PAID' AND created_at::date = ?::date GROUP BY payment_method`, [date]).catch(() => []);
+        const ord: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(total_amount),0) AS v FROM orders WHERE deleted_at IS NULL AND UPPER(COALESCE(status,''))<>'CANCELLED' AND payment_status='PAID' AND ${_istDayRange('created_at')} GROUP BY payment_method`, [date, date]).catch(() => []);
         for (const r of (ord || [])) t[norm(r.m)] += Number(r.v || 0);
-        const fp: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(amount),0) AS v FROM folio_payments WHERE (is_voided IS NULL OR is_voided=0) AND UPPER(COALESCE(payment_type,''))<>'REFUND' AND recorded_at::date = ?::date GROUP BY payment_method`, [date]).catch(() => []);
+        const fp: any[] = await db.query(`SELECT payment_method AS m, COALESCE(SUM(amount),0) AS v FROM folio_payments WHERE (is_voided IS NULL OR is_voided=0) AND UPPER(COALESCE(payment_type,''))<>'REFUND' AND ${_istDayRange('recorded_at')} GROUP BY payment_method`, [date, date]).catch(() => []);
         for (const r of (fp || [])) t[norm(r.m)] += Number(r.v || 0);
         tender = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, _acctRound(v)]));
         cashExpense = await g(`SELECT COALESCE(SUM(amount),0) AS v FROM petty_cash WHERE UPPER(COALESCE(direction,''))='OUT' AND entry_date = ?`, [date]);
