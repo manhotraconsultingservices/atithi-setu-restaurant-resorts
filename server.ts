@@ -9177,6 +9177,36 @@ async function _requireInvWrite(req: AuthRequest, res: Response, modules: any, m
 // or Suppliers & Purchasing, at the required level now qualifies.
 // Roles only the owner (or the platform) may assign to a staff account.
 const _PRIVILEGED_STAFF_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'SALES_REP'];
+
+// Privilege ceiling for staff managers. The owner, the platform and the built-in
+// MANAGER (owner-equivalent) manage anyone. Anyone else with Staff access may only
+// give out a role with the same or less access than their own, tab by tab, and may
+// not edit, remove or reset the password of a colleague whose role has more access
+// than theirs; either would let a lower role reach higher access. Returns the tabs
+// where `targetRole` exceeds the caller ('*' = unrestricted / owner-grade); empty
+// means allowed.
+const _STAFF_ADMIN_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'];
+async function _roleCeilingIssues(req: AuthRequest, tenantId: string, targetRole: any): Promise<string[]> {
+  const caller = String(req.user?.role || '').toUpperCase();
+  if (_STAFF_ADMIN_ROLES.includes(caller)) return [];
+  const target = String(targetRole ?? '').trim();
+  if (!target) return [];
+  if (target.toUpperCase() === caller) return [];
+  if (_PRIVILEGED_STAFF_ROLES.includes(target.toUpperCase()) || target.toUpperCase() === 'MANAGER') return ['*'];
+  let cp: TabPerms | null = null, tp: TabPerms | null = null;
+  try { cp = await getTabPermissionsForRole((req.user as any)?.restaurantId || tenantId, caller); } catch { cp = null; }
+  if (cp === null) return [];            // caller has no saved matrix: unrestricted, nothing to exceed
+  try { tp = await getTabPermissionsForRole(tenantId, target); } catch { tp = null; }
+  if (tp === null) return ['*'];         // target unrestricted: above any restricted caller
+  return Object.keys(tp).filter(k => !k.startsWith('__') && Number((tp as any)[k] || 0) > Number((cp as any)[k] || 0));
+}
+const _tabWords = (id: string) => String(id).toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+function _ceilingMessage(kind: 'give' | 'manage', tabs: string[]): string {
+  const where = tabs.includes('*') ? '' : ` It has more access on: ${tabs.slice(0, 5).map(_tabWords).join(', ')}${tabs.length > 5 ? ` and ${tabs.length - 5} more` : ''}.`;
+  return kind === 'give'
+    ? `You can only give a role with the same or less access than your own.${where} Ask the property owner.`
+    : `This person's role has more access than yours, so only the property owner can change them.${where}`;
+}
 const _SUPPLIER_WRITE_TABS = ['INVENTORY', 'HOTEL_INVENTORY', 'SPA_INVENTORY', 'INVENTORY_EVENTS', 'PROCUREMENT'];
 async function _requireSupplierWrite(req: AuthRequest, res: Response, minLevel: number): Promise<boolean> {
   const role = String(req.user?.role || '').toUpperCase();
@@ -67757,6 +67787,10 @@ ${data.tenant.name}`;
           && _PRIVILEGED_STAFF_ROLES.includes(String(role ?? '').toUpperCase())) {
         return res.status(403).json({ error: 'Only the property owner can give someone the owner role.', code: 'PRIVILEGED_ROLE' });
       }
+      {
+        const ceil = await _roleCeilingIssues(req, resolveTargetRestaurantId(req) || req.user!.restaurantId, role);
+        if (ceil.length) return res.status(403).json({ error: _ceilingMessage('give', ceil), code: 'ROLE_ABOVE_YOURS', tabs: ceil });
+      }
       const db = await getTenantDb(targetId);
       const id = randomUUID();
       const rate = Number(hourly_rate || 0);
@@ -67818,6 +67852,13 @@ ${data.tenant.name}`;
         const password = String(r.password || '');
         if (!name) { errors.push({ row, error: 'Name is required' }); continue; }
         if (!role) { errors.push({ row, error: 'Role is required' }); continue; }
+        if (!['OWNER', 'SUPER_ADMIN', 'CTO'].includes(String(req.user?.role || '').toUpperCase()) && _PRIVILEGED_STAFF_ROLES.includes(role.toUpperCase())) {
+          errors.push({ row, error: 'Only the property owner can give someone the owner role.' }); continue;
+        }
+        {
+          const ceil = await _roleCeilingIssues(req, targetId, role);
+          if (ceil.length) { errors.push({ row, error: _ceilingMessage('give', ceil) }); continue; }
+        }
         if (!!loginId !== !!password) { errors.push({ row, error: 'Give both a login ID and a password, or neither' }); continue; }
         if (password && password.length < 6) { errors.push({ row, error: 'Password must be at least 6 characters' }); continue; }
         if (loginId) {
@@ -67869,6 +67910,11 @@ ${data.tenant.name}`;
         return res.status(400).json({ error: "Password must be at least 6 characters" });
       }
       const db = await getTenantDb(targetId);
+      {
+        const tgt: any = await db.get("SELECT role FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+        const ceil = tgt ? await _roleCeilingIssues(req, targetId, tgt.role) : [];
+        if (ceil.length) return res.status(403).json({ error: _ceilingMessage('manage', ceil), code: 'TARGET_ABOVE_YOURS', tabs: ceil });
+      }
       const hashedPassword = await bcrypt.hash(newPassword, 12);
       await db.run("UPDATE attendance_staff SET password = ? WHERE id = ?", [hashedPassword, req.params.id]);
       await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'PASSWORD_RESET', summary: 'Login password reset' });
@@ -68080,6 +68126,16 @@ ${data.tenant.name}`;
           return res.status(403).json({ error: 'Only the property owner can give someone the owner role.', code: 'PRIVILEGED_ROLE' });
         }
       }
+      {
+        const tenantForCeil = req.user!.restaurantId;
+        const cur: any = await db.get("SELECT role FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+        const above = cur ? await _roleCeilingIssues(req, tenantForCeil, cur.role) : [];
+        if (above.length) return res.status(403).json({ error: _ceilingMessage('manage', above), code: 'TARGET_ABOVE_YOURS', tabs: above });
+        if (Object.prototype.hasOwnProperty.call(body, 'role') && String(body.role ?? '') !== String(cur?.role ?? '')) {
+          const ceil = await _roleCeilingIssues(req, tenantForCeil, body.role);
+          if (ceil.length) return res.status(403).json({ error: _ceilingMessage('give', ceil), code: 'ROLE_ABOVE_YOURS', tabs: ceil });
+        }
+      }
       const STAFF_PATCH_FIELDS = ['name', 'role', 'login_id', 'phone', 'email', 'is_active'];
       const keys = STAFF_PATCH_FIELDS.filter(k => Object.prototype.hasOwnProperty.call(body, k));
       if (!keys.length) {
@@ -68124,6 +68180,10 @@ ${data.tenant.name}`;
       }
       const db = await getTenantDb(req.user!.restaurantId);
       const gone: any = await db.get("SELECT name, role, employee_code FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+      {
+        const ceil = gone ? await _roleCeilingIssues(req, req.user!.restaurantId, gone.role) : [];
+        if (ceil.length) return res.status(403).json({ error: _ceilingMessage('manage', ceil), code: 'TARGET_ABOVE_YOURS', tabs: ceil });
+      }
       await db.run("DELETE FROM attendance_staff WHERE id = ?", [req.params.id]);
       _staffAuthCacheDrop(req.user!.restaurantId, req.params.id);
       if (gone) await writeObjectAudit(db, req, { objectType: 'EMPLOYEE', objectId: String(req.params.id), action: 'DELETED', summary: `Removed ${gone.name} (${gone.role || 'no role'})`, before: gone });
@@ -71103,8 +71163,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-close-ist-and-one-standing-journal',
+    commit_marker: 'staff-role-ceiling',
     code_features: [
+      'staff-role-ceiling  A staff manager who is not the owner, the platform or the built-in MANAGER can only give a role with the same or less access than their own, tab by tab (403 ROLE_ABOVE_YOURS with the tabs), and cannot edit, remove or reset the password of a colleague whose role has more access (403 TARGET_ABOVE_YOURS), since either would let a lower role reach higher access. Applied to staff create, bulk create (which also gains the owner-role guard), edit, delete and password reset. Smoke: TC-STAFF-ROLE-CEILING.',
       'inventory-close-ist-and-one-standing-journal  TC-INV-PERIOD-GL failed from 1 Oct 2026 (asset 1630 stayed 0 after closing October). Cause: the stock-close query cut each day at UTC midnight (05:30 IST), so stock received 00:00-05:30 IST on the 1st counted as the closing stock of the previous month AND of this month, and the close journal released it as opening and capitalised it as closing: net zero. _computeInventoryPeriod now cuts at IST midnight. The close posted on min(period end, today) but its reversal (re-close and reopen) on the period end, so a report up to today saw every re-close journal and none of their reversals; one rule _invCloseGlDate (min of period end and _todayIST) now dates the close and both reversals. A re-close now reverses EVERY close journal still standing on the period (not only the remembered ref) BEFORE rewriting the period, and stops with 409 INVENTORY_RECLOSE_GL_FAILED if the ledger refuses, so exactly one close journal stands after any number of re-closes; gl_journal_ref is always rewritten. Smoke: TC-INV-PERIOD-GL.',
       'messaging-cost-platform-only  Owner request: the messaging Est. cost (Notifications Analytics total and the broadcast audience preview) is the platform rate card and is no longer sent to or shown to property owners or staff; only SUPER_ADMIN / CTO receive it. The admin console WhatsApp page gets a Messaging usage and estimated cost table per tenant (7 / 30 / 90 / 365 days) from /api/admin/messaging/usage. Smoke: TC-MSG-COST-PLATFORM-ONLY.',
       'auth-current-role  A session token carried the role from sign-in and POST /api/auth/refresh copied it forward, so a role change or a switched-off account never reached an open session. authenticate() now reads the current role and active flag for tenant staff and owners (attendance_staff, then central users), cached 60s per user and dropped on staff edit / delete / admin role change; a switched-off account gets 401 ACCOUNT_DEACTIVATED; platform roles are never taken from a staff record; a lookup failure keeps the token as is. Refresh and my-permissions return the current role and the app reloads once when it changed. Smoke: TC-AUTH-CURRENT-ROLE.',
