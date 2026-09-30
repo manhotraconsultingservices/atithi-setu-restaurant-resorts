@@ -9117,6 +9117,29 @@ async function _requireInvWrite(req: AuthRequest, res: Response, modules: any, m
   return false;
 }
 
+// Suppliers are ONE master shared by every module's stock (a linen vendor serves
+// the hotel and the banquet hall alike), but add / edit / deactivate used to check
+// the kitchen INVENTORY tab alone. INVENTORY is restaurant-only, so on a hotel or
+// events property no staff role could ever be granted it: nobody but the owner
+// could add a supplier, and without one the Purchasing tab offers no Raise PO or
+// Receive stock at all (pconvention, 1 Oct 2026). Any inventory tab of any module,
+// or Suppliers & Purchasing, at the required level now qualifies.
+// Roles only the owner (or the platform) may assign to a staff account.
+const _PRIVILEGED_STAFF_ROLES = ['OWNER', 'SUPER_ADMIN', 'CTO', 'SALES_REP'];
+const _SUPPLIER_WRITE_TABS = ['INVENTORY', 'HOTEL_INVENTORY', 'SPA_INVENTORY', 'INVENTORY_EVENTS', 'PROCUREMENT'];
+async function _requireSupplierWrite(req: AuthRequest, res: Response, minLevel: number): Promise<boolean> {
+  const role = String(req.user?.role || '').toUpperCase();
+  if (['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) return true;
+  let perms: TabPerms | null = null;
+  try { perms = await getTabPermissionsForRole((req.user as any)?.restaurantId || req.params.id, role); } catch { perms = null; }
+  if (_SUPPLIER_WRITE_TABS.some(t => Number((perms as any)?.[t] || 0) >= minLevel)) return true;
+  res.status(403).json({
+    error: `Forbidden — managing suppliers needs ${minLevel >= 3 ? 'Full' : 'Edit'} access to an Inventory page or to Suppliers & Purchasing. Ask the property owner to grant it in Staff Access.`,
+    required_tabs: _SUPPLIER_WRITE_TABS, required_level: minLevel,
+  });
+  return false;
+}
+
 // Modules of the given items (plus an optional target module, e.g. an item being
 // moved). Unknown ids fall back to RESTAURANT, so a missing row never widens access.
 async function _invModulesOf(req: AuthRequest, sql: string, params: any[], extra?: any): Promise<string[]> {
@@ -26161,7 +26184,8 @@ ${data.tenant.name}`;
     }
   });
 
-  app.post("/api/restaurant/:id/inventory/suppliers", authenticate, restaurantStaff, requireTabAction('INVENTORY', 'CREATE'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/inventory/suppliers", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireSupplierWrite(req, res, 2))) return;
     try {
       const {
         name, contact_name, phone, email, address, gst_number,
@@ -26205,8 +26229,8 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 2))) return;
+  app.patch("/api/inventory/suppliers/:id", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireSupplierWrite(req, res, 2))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const allowed = [
@@ -26232,8 +26256,8 @@ ${data.tenant.name}`;
   });
 
   // Soft-delete (PO/GRN history references this row)
-  app.delete("/api/inventory/suppliers/:id", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
-    if (!(await _requireTabWrite(req, res, 'INVENTORY', 3))) return;
+  app.delete("/api/inventory/suppliers/:id", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    if (!(await _requireSupplierWrite(req, res, 3))) return;
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       await db.run("UPDATE suppliers SET is_active = 0 WHERE id = ?", [req.params.id]);
@@ -67605,6 +67629,10 @@ ${data.tenant.name}`;
       const targetId = resolveTargetRestaurantId(req);
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
       const { name, role, phone, email, loginId, password, hourly_rate, payroll_id, employee_type } = req.body;
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO'].includes(String(req.user?.role || '').toUpperCase())
+          && _PRIVILEGED_STAFF_ROLES.includes(String(role ?? '').toUpperCase())) {
+        return res.status(403).json({ error: 'Only the property owner can give someone the owner role.', code: 'PRIVILEGED_ROLE' });
+      }
       const db = await getTenantDb(targetId);
       const id = randomUUID();
       const rate = Number(hourly_rate || 0);
@@ -67908,6 +67936,26 @@ ${data.tenant.name}`;
       // Other keys are ignored; HR details go through HR & Payroll, passwords
       // through Reset password.
       const body = req.body || {};
+      // Nobody but the owner changes their OWN role or switches THEMSELVES off, and
+      // nobody but the owner hands out an owner / platform role. A Staff-page Full
+      // grant used to allow both, so a manager could move themselves onto any role
+      // (pconvention, 21 Sep 2026: a PCC Manager set his own role to Front Desk, then
+      // PCC ALL Roles, then back) or make anyone an OWNER.
+      const callerRole = String(req.user?.role || '').toUpperCase();
+      const callerIsOwner = ['OWNER', 'SUPER_ADMIN', 'CTO'].includes(callerRole);
+      if (!callerIsOwner) {
+        const current: any = await db.get("SELECT role, is_active FROM attendance_staff WHERE id = ?", [req.params.id]).catch(() => null);
+        const isSelf = String(req.params.id) === String((req.user as any)?.id || '');
+        if (isSelf && Object.prototype.hasOwnProperty.call(body, 'role') && String(body.role ?? '') !== String(current?.role ?? '')) {
+          return res.status(403).json({ error: 'You cannot change your own role. Ask the property owner to change it.', code: 'SELF_ROLE_CHANGE' });
+        }
+        if (isSelf && Object.prototype.hasOwnProperty.call(body, 'is_active') && !Number(body.is_active)) {
+          return res.status(403).json({ error: 'You cannot switch off your own account. Ask the property owner.', code: 'SELF_DEACTIVATE' });
+        }
+        if (Object.prototype.hasOwnProperty.call(body, 'role') && _PRIVILEGED_STAFF_ROLES.includes(String(body.role ?? '').toUpperCase())) {
+          return res.status(403).json({ error: 'Only the property owner can give someone the owner role.', code: 'PRIVILEGED_ROLE' });
+        }
+      }
       const STAFF_PATCH_FIELDS = ['name', 'role', 'login_id', 'phone', 'email', 'is_active'];
       const keys = STAFF_PATCH_FIELDS.filter(k => Object.prototype.hasOwnProperty.call(body, k));
       if (!keys.length) {
@@ -70929,8 +70977,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'mahurat-remove-paste-dates',
+    commit_marker: 'supplier-gate-and-self-role-guard',
     code_features: [
+      'supplier-gate-and-self-role-guard  Two fixes from the pconvention RCA (1 Oct 2026). (1) Supplier add / edit / deactivate checked the restaurant-only kitchen INVENTORY tab, which no staff role on a hotel or events property can hold, so only the owner could add a supplier and with none the Purchasing tab offered no Raise PO or Receive stock; now any module inventory tab or Suppliers & Purchasing at Edit (Full to deactivate) qualifies, and the Hotel / Events / Spa inventory Purchasing tab gets an Add supplier button. (2) PATCH /api/owner/staff/:id let any Staff-page Full user change their own role (a PCC Manager did, three times) or hand out OWNER; non-owners can no longer change their own role, switch themselves off, or assign an owner or platform role (also on staff create); the Staff form locks the role on your own record. Smoke: TC-SUPPLIER-MODULE-GATE, TC-STAFF-SELF-ROLE.',
       'mahurat-remove-paste-dates  Owner request: removed the Paste many dates at once box from the Mahurat season editor (it confused users); dates are added one row at a time.',
       'events-availability-polish  Public availability calendar opens on next month when fewer than 7 days of the current month remain; Enquiries column renamed Availability.',
       'events-public-availability-enquiries  FEATURE (owner request 30 Sep 2026). (1) Opt-in public venue availability calendar (restaurants.event_public_availability, switched on in Events settings): GET /api/public/restaurant/:id/events/availability returns per venue and day, per session where the hall sells sessions, FREE / HOLD (quoted) / BOOKED (confirmed or in progress) / CLOSED (maintenance block or owner-blocked date), using the same span and turnaround rule as the staff availability check, and never any booking detail. (2) Every public enquiry is kept: one for a blocked or booked date is saved with inquiry_flag DATE_BLOCKED or DATE_BOOKED instead of being refused, and the guest is told the property will suggest alternatives. (3) New Enquiries page (tab EVENTS_ENQUIRIES, not in RBAC_NEWLY_ADDED): every public enquiry with no list cap, follow-up stage NEW / CONTACTED / QUOTED / WON / LOST and a note, audited as ENQUIRY_FOLLOWUP. Smoke: TC-AVAIL-*, TC-ENQ-*.',

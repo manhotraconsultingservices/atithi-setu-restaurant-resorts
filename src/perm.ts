@@ -45,6 +45,12 @@ export const canDeleteInventory = (module?: string): boolean =>
   canDeleteTab('INVENTORY') || (!!invTab(module) && canDeleteTab(invTab(module)));
 
 export const canSeeTab = (tab: string): boolean => tabLevel(tab) >= 1;
+
+// Suppliers are one master shared by every module's stock. Mirrors the server's
+// _requireSupplierWrite: any inventory tab of any module, or Suppliers &
+// Purchasing, at Edit adds and edits a supplier.
+const SUPPLIER_WRITE_TABS = ['INVENTORY', 'HOTEL_INVENTORY', 'SPA_INVENTORY', 'INVENTORY_EVENTS', 'PROCUREMENT'];
+export const canWriteSuppliers = (): boolean => SUPPLIER_WRITE_TABS.some(t => canWriteTab(t));
 // The pages of each module, in the order a home button should try them. A user
 // sees a module tile only if they can open at least one of them, and the tile
 // opens the first one they can — not a fixed page they may not hold (the Events

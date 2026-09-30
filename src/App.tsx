@@ -35,7 +35,7 @@ import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canSeeTab, firstOpenTab, canSeeFloorData } from './perm';
+import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canWriteSuppliers, canSeeTab, firstOpenTab, canSeeFloorData } from './perm';
 import { prettyRoleLabel, prettyTabLabel } from './roleLabel';
 import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -14109,6 +14109,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
+  // Only the owner changes their own role (the server refuses it too).
+  const lockOwnRole = (st: any): boolean => {
+    const r = (localStorage.getItem('role') || '').toUpperCase();
+    if (r === 'OWNER' || r === 'SUPER_ADMIN' || r === 'CTO') return false;
+    try { return String(JSON.parse(atob(String(token).split('.')[1])).id || '') === String(st?.id || ''); } catch { return false; }
+  };
+
   const saveStaffEdit = async (id: string, patch: Record<string, unknown>) => {
     const res = await fetch(`/api/owner/staff/${id}`, {
       method: 'PATCH',
@@ -22141,8 +22148,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div>
                     <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Role</label>
                     <select value={editingStaff.role}
+                      disabled={lockOwnRole(editingStaff)}
                       onChange={e => setEditingStaff({ ...editingStaff, role: e.target.value })}
-                      className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-brand/20 outline-none">
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-brand/20 outline-none disabled:opacity-60">
                       {/* Tenant-aware role list. If this staff already has
                           a role outside the visible set (e.g. legacy data
                           after the tenant changed property type), surface
@@ -22155,6 +22163,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <option value={editingStaff.role}>{staffRoleMetaFor(editingStaff.role).emoji} {staffRoleMetaFor(editingStaff.role).label}</option>
                       )}
                     </select>
+                    {lockOwnRole(editingStaff) && (
+                      <p className="text-[11px] text-zinc-500 mt-1">You cannot change your own role. Ask the property owner.</p>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -58251,6 +58262,10 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
 
   const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
   const canWrite = canWriteInventory(module);
+  // A PO or a receipt needs a supplier, and this screen used to have no way to add
+  // one, so a property with none saw neither Raise PO nor Receive stock.
+  const canAddSupplier = canWriteSuppliers();
+  const [showSupplierEditor, setShowSupplierEditor] = useState(false);
 
   // include_shared=1 so property-wide consumables (cleaning chemicals, bin
   // liners) show here too instead of being invisible to every module.
@@ -58437,6 +58452,11 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
             <p className="text-xs text-[#6b5d52]">
               Purchase orders for {COST_MODULE_LABEL[module] || module}. Drafts raised automatically from par levels appear here for review.
             </p>
+            <div className="flex items-center gap-2">
+              {canAddSupplier && (
+                <button onClick={() => setShowSupplierEditor(true)}
+                  className="px-4 py-2 rounded-2xl text-xs font-bold bg-white border border-brand/25 text-brand">+ Add supplier</button>
+              )}
             {canWrite && suppliers.length > 0 && (
               <div className="flex items-center gap-2">
                 <button onClick={() => setShowGrn({ poId: null })}
@@ -58445,7 +58465,15 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
                   className="px-4 py-2 rounded-2xl text-xs font-bold bg-brand text-white">+ Raise PO</button>
               </div>
             )}
+            </div>
           </div>
+          {suppliers.length === 0 && (
+            <div className="text-xs rounded-2xl border border-amber-200 bg-amber-50 text-amber-800 px-4 py-2.5">
+              {canAddSupplier
+                ? 'Add a supplier first. Raise PO and Receive stock appear once you have at least one.'
+                : 'No suppliers yet. Ask someone with Inventory or Suppliers & Purchasing edit access to add one; Raise PO and Receive stock appear once there is a supplier.'}
+            </div>
+          )}
           <div className="bg-white rounded-2xl border border-brand/10 overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-[#faf7f2] text-[11px] uppercase tracking-widest text-[#6b5d52]">
@@ -58713,6 +58741,11 @@ function ModuleInventoryView({ restaurantId, token, module, title, subtitle }: {
         />
       )}
 
+      {showSupplierEditor && (
+        <SupplierEditorModal token={token} restaurantId={restaurantId} supplier={null}
+          onClose={() => setShowSupplierEditor(false)}
+          onSaved={() => { setShowSupplierEditor(false); loadPurchasing(); }} />
+      )}
       {showGrn && (
         <GRNCreateModal
           token={token} restaurantId={restaurantId}
