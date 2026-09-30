@@ -76,7 +76,9 @@ export function PublicAvailabilityCalendar({ tenantId, mahurat, onPick }: {
 }) {
   const { t, lang } = useT();
   const today = todayIST();
-  const [month, setMonth] = useState(monthStart(today));
+  // Near the end of a month almost every day is already past, so open on the next.
+  const daysLeft = Math.round((toMs(monthEnd(today)) - toMs(today)) / DAY_MS);
+  const [month, setMonth] = useState(daysLeft < 7 ? shiftMonth(monthStart(today), 1) : monthStart(today));
   const [data, setData] = useState<any>(null);
   const [venueId, setVenueId] = useState('');
   const [err, setErr] = useState(false);

@@ -1050,7 +1050,7 @@ export const hi: Record<string, string> = {
   'events.enq.none': "इस अवधि में कोई पूछताछ नहीं।",
   'events.enq.session': "सत्र",
   'events.enq.guests': "अतिथि",
-  'events.enq.flag': "माँगी गई तिथि",
+  'events.enq.flag': "उपलब्धता",
   'events.enq.flagBooked': "तिथि बुक",
   'events.enq.flagBlocked': "तिथि बंद",
   'events.enq.stageCol': "फ़ॉलो-अप",

@@ -938,7 +938,7 @@ export const ta: Record<string, string> = {
   'events.enq.none': "இந்தக் காலத்தில் விசாரணைகள் இல்லை.",
   'events.enq.session': "அமர்வு",
   'events.enq.guests': "விருந்தினர்கள்",
-  'events.enq.flag': "கேட்ட தேதி",
+  'events.enq.flag': "கிடைப்பு",
   'events.enq.flagBooked': "தேதி முன்பதிவானது",
   'events.enq.flagBlocked': "தேதி தடுக்கப்பட்டது",
   'events.enq.stageCol': "தொடர் நிலை",

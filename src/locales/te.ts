@@ -938,7 +938,7 @@ export const te: Record<string, string> = {
   'events.enq.none': "ఈ కాలంలో విచారణలు లేవు.",
   'events.enq.session': "సెషన్",
   'events.enq.guests': "అతిథులు",
-  'events.enq.flag': "అడిగిన తేదీ",
+  'events.enq.flag': "లభ్యత",
   'events.enq.flagBooked': "తేదీ బుక్ అయింది",
   'events.enq.flagBlocked': "తేదీ నిలిపివేయబడింది",
   'events.enq.stageCol': "ఫాలో-అప్",

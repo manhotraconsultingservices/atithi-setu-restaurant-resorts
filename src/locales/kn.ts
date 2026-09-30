@@ -940,7 +940,7 @@ export const kn: Record<string, string> = {
   'events.enq.none': "ಈ ಅವಧಿಯಲ್ಲಿ ವಿಚಾರಣೆಗಳಿಲ್ಲ.",
   'events.enq.session': "ಅವಧಿ",
   'events.enq.guests': "ಅತಿಥಿಗಳು",
-  'events.enq.flag': "ಕೇಳಿದ ದಿನಾಂಕ",
+  'events.enq.flag': "ಲಭ್ಯತೆ",
   'events.enq.flagBooked': "ದಿನಾಂಕ ಬುಕ್ ಆಗಿದೆ",
   'events.enq.flagBlocked': "ದಿನಾಂಕ ತಡೆಹಿಡಿಯಲಾಗಿದೆ",
   'events.enq.stageCol': "ಫಾಲೋ-ಅಪ್",

@@ -1005,7 +1005,7 @@ export const en: Record<string, string> = {
   'events.enq.none': "No enquiries in this period.",
   'events.enq.session': "Session",
   'events.enq.guests': "Guests",
-  'events.enq.flag': "Date asked",
+  'events.enq.flag': "Availability",
   'events.enq.flagBooked': "Date booked",
   'events.enq.flagBlocked': "Date blocked",
   'events.enq.stageCol': "Follow-up",
