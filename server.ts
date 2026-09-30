@@ -70929,8 +70929,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-availability-polish',
+    commit_marker: 'mahurat-remove-paste-dates',
     code_features: [
+      'mahurat-remove-paste-dates  Owner request: removed the Paste many dates at once box from the Mahurat season editor (it confused users); dates are added one row at a time.',
       'events-availability-polish  Public availability calendar opens on next month when fewer than 7 days of the current month remain; Enquiries column renamed Availability.',
       'events-public-availability-enquiries  FEATURE (owner request 30 Sep 2026). (1) Opt-in public venue availability calendar (restaurants.event_public_availability, switched on in Events settings): GET /api/public/restaurant/:id/events/availability returns per venue and day, per session where the hall sells sessions, FREE / HOLD (quoted) / BOOKED (confirmed or in progress) / CLOSED (maintenance block or owner-blocked date), using the same span and turnaround rule as the staff availability check, and never any booking detail. (2) Every public enquiry is kept: one for a blocked or booked date is saved with inquiry_flag DATE_BLOCKED or DATE_BOOKED instead of being refused, and the guest is told the property will suggest alternatives. (3) New Enquiries page (tab EVENTS_ENQUIRIES, not in RBAC_NEWLY_ADDED): every public enquiry with no list cap, follow-up stage NEW / CONTACTED / QUOTED / WON / LOST and a note, audited as ENQUIRY_FOLLOWUP. Smoke: TC-AVAIL-*, TC-ENQ-*.',
       'events-mahurat-calendar-polish  Calendar Mahurat View browser check fixes: the day panel showed a raw venue id for a booking whose hall was since removed (the calendar feed now joins the venue name), and the season editor date row overflowed at phone width (now wraps to two columns).',

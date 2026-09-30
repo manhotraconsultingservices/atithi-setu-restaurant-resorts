@@ -51,28 +51,6 @@ const tint = (hex: string, alpha: number) => {
 const covers = (s: Season, day: string) => s.days.some(d => d.start_date <= day && d.end_date >= day);
 const appliesToVenue = (s: Season, venueId: string) => !venueId || !s.venue_ids || s.venue_ids.includes(venueId);
 
-// Paste box: "2026-11-14", "14-11-2026", "2026-11-14 to 2026-11-18, note".
-const DATE_TOKEN = String.raw`(\d{4}-\d{2}-\d{2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})`;
-const PASTE_RE = new RegExp(`^\\s*${DATE_TOKEN}(?:\\s*(?:to|until|till|–|—|-)\\s*${DATE_TOKEN})?\\s*(?:[,;|]\\s*(.*))?$`, 'i');
-const normDate = (tok: string) => {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(tok)) return tok;
-  const m = tok.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
-  return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : '';
-};
-export function parseMahuratPaste(text: string): { days: Day[]; bad: string[] } {
-  const days: Day[] = []; const bad: string[] = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const m = line.match(PASTE_RE);
-    const a = m ? normDate(m[1]) : '';
-    const b = m && m[2] ? normDate(m[2]) : a;
-    if (!a || !b || isNaN(toMs(a)) || isNaN(toMs(b)) || b < a) { bad.push(line); continue; }
-    days.push({ start_date: a, end_date: b, note: m && m[3] ? m[3].trim().slice(0, 120) : '' });
-  }
-  return { days, bad };
-}
-
 function useApi(restaurantId: string, token: string) {
   return async (path: string, init: RequestInit = {}) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, {
@@ -445,18 +423,9 @@ function SeasonEditor({ season, venues, onClose, onSave }: { season: Season | nu
   const [showPublic, setShowPublic] = useState(season ? season.show_public : true);
   const [notes, setNotes] = useState(season?.notes || '');
   const [days, setDays] = useState<Day[]>(season?.days?.length ? season.days.map(d => ({ ...d, note: d.note || '' })) : [{ start_date: '', end_date: '', note: '' }]);
-  const [paste, setPaste] = useState('');
-  const [pasteMsg, setPasteMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
-  const applyPaste = () => {
-    const { days: got, bad } = parseMahuratPaste(paste);
-    const kept = days.filter(d => d.start_date);
-    setDays([...kept, ...got].length ? [...kept, ...got] : [{ start_date: '', end_date: '', note: '' }]);
-    setPasteMsg(bad.length ? t('events.mahurat.pasteBad', { lines: bad.slice(0, 5).join(' · ') }) : '');
-    if (!bad.length) setPaste('');
-  };
   const submit = async () => {
     setErr('');
     const clean = days.filter(d => d.start_date).map(d => ({ start_date: d.start_date, end_date: d.end_date || d.start_date, note: (d.note || '').trim() || null }));
@@ -521,13 +490,6 @@ function SeasonEditor({ season, venues, onClose, onSave }: { season: Season | nu
               ))}
             </div>
             <button type="button" className={`${BTN_GHOST} mt-2`} onClick={() => setDays([...days, { start_date: '', end_date: '', note: '' }])}><Plus size={12} />{t('events.mahurat.addDate')}</button>
-            <details className="mt-3">
-              <summary className="text-xs font-semibold text-brand cursor-pointer">{t('events.mahurat.paste')}</summary>
-              <p className="text-[11px] text-[#6b5d52] mt-1">{t('events.mahurat.pasteHint')}</p>
-              <textarea className={`${INPUT} mt-1 font-mono text-xs`} rows={5} value={paste} onChange={e => setPaste(e.target.value)} placeholder={'2026-11-14, Dev Uthani\n2026-11-20 to 2026-11-24\n05-12-2026'} />
-              <button type="button" className={`${BTN_GHOST} mt-1`} disabled={!paste.trim()} onClick={applyPaste}>{t('events.mahurat.pasteApply')}</button>
-              {pasteMsg && <p className="text-[11px] text-rose-600 mt-1">{pasteMsg}</p>}
-            </details>
           </div>
           <div><label className={LABEL}>{t('events.mahurat.notes')}</label>
             <textarea className={INPUT} rows={2} maxLength={500} value={notes} onChange={e => setNotes(e.target.value)} /></div>
