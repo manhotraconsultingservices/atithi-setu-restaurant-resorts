@@ -326,7 +326,7 @@ export function MahuratCalendar({ restaurantId, token }: { restaurantId: string;
                 {pickedInfo.bookings.map(b => (
                   <div key={b.id} className="text-xs border-l-4 pl-2 py-0.5" style={{ borderColor: STATUS_COLORS[b.status] || '#9ca3af' }}>
                     <div className="font-semibold text-[#3d3128]">{b.customer_name}</div>
-                    <div className="text-[#6b5d52]">{[b.event_type, b.venue_id ? venueName(b.venue_id) : '', b.status, b.guest_count ? `${b.guest_count} ${t('events.mahurat.guests')}` : ''].filter(Boolean).join(' · ')}</div>
+                    <div className="text-[#6b5d52]">{[b.event_type, b.venue_name || (b.venue_id ? venueName(b.venue_id) : ''), b.status, b.guest_count ? `${b.guest_count} ${t('events.mahurat.guests')}` : ''].filter(Boolean).join(' · ')}</div>
                   </div>
                 ))}
               </div>
@@ -512,11 +512,11 @@ function SeasonEditor({ season, venues, onClose, onSave }: { season: Season | nu
             <label className={LABEL}>{t('events.mahurat.dates')}</label>
             <div className="space-y-2">
               {days.map((d, i) => (
-                <div key={i} className="grid grid-cols-[1fr_1fr_1.4fr_auto] gap-2 items-center">
+                <div key={i} className="grid grid-cols-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] gap-2 items-center">
                   <input type="date" className={INPUT} value={d.start_date} aria-label={t('events.mahurat.from')} onChange={e => setDays(days.map((x, j) => j === i ? { ...x, start_date: e.target.value, end_date: x.end_date && x.end_date >= e.target.value ? x.end_date : e.target.value } : x))} />
                   <input type="date" className={INPUT} value={d.end_date} min={d.start_date} aria-label={t('events.mahurat.to')} onChange={e => setDays(days.map((x, j) => j === i ? { ...x, end_date: e.target.value } : x))} />
                   <input className={INPUT} value={d.note || ''} maxLength={120} placeholder={t('events.mahurat.note')} onChange={e => setDays(days.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} />
-                  <button type="button" className="text-[#9d8b7e] hover:text-rose-600" aria-label={t('common.delete')} onClick={() => setDays(days.length > 1 ? days.filter((_, j) => j !== i) : [{ start_date: '', end_date: '', note: '' }])}><Trash2 size={14} /></button>
+                  <button type="button" className="justify-self-start text-[#9d8b7e] hover:text-rose-600" aria-label={t('common.delete')} onClick={() => setDays(days.length > 1 ? days.filter((_, j) => j !== i) : [{ start_date: '', end_date: '', note: '' }])}><Trash2 size={14} /></button>
                 </div>
               ))}
             </div>

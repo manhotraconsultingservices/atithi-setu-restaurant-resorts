@@ -34579,10 +34579,10 @@ ${data.tenant.name}`;
       const seasons = await _mahuratSeasons(db, { from, to });
       const venues = await db.query("SELECT id, name FROM event_venues WHERE COALESCE(is_active, 1) = 1 ORDER BY name").catch(() => []);
       const brows = await db.query(
-        `SELECT id, customer_name, event_type, status, event_date, end_date, venue_id, guest_count
-           FROM event_bookings
-          WHERE status <> 'CANCELLED' AND event_date <= ? AND COALESCE(end_date, event_date) >= ?
-          ORDER BY event_date LIMIT 3000`, [to, from]
+        `SELECT b.id, b.customer_name, b.event_type, b.status, b.event_date, b.end_date, b.venue_id, b.guest_count, v.name AS venue_name
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.status <> 'CANCELLED' AND b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?
+          ORDER BY b.event_date LIMIT 3000`, [to, from]
       ).catch(() => []);
       const bookings = (brows || []).map((b: any) => ({ ...b, event_date: normaliseDateIso(b.event_date), end_date: b.end_date ? normaliseDateIso(b.end_date) : null }));
       res.json({ settings, seasons, venues, bookings });
@@ -70766,8 +70766,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-mahurat-calendar',
+    commit_marker: 'events-mahurat-calendar-polish',
     code_features: [
+      'events-mahurat-calendar-polish  Calendar Mahurat View browser check fixes: the day panel showed a raw venue id for a booking whose hall was since removed (the calendar feed now joins the venue name), and the season editor date row overflowed at phone width (now wraps to two columns).',
       'events-mahurat-calendar  FEATURE (opt-in per property, owner request 30 Sep 2026): Calendar Mahurat View. A separate Events page, off by default (restaurants.event_mahurat_enabled, switched on in Events, Public Page Settings, with an owner-chosen title), so no existing screen, booking flow or public page changes for tenants who do not use it. Owner-defined religion-agnostic seasons (event_mahurat_seasons + event_mahurat_days: name, colour, HIGHLIGHT or BLOCK, all or chosen venues, show on public page, date ranges with notes, paste many dates) tint a month or year calendar with bookings on top. A BLOCK season is enforced server-side on booking create, venue or date change, confirm and the public enquiry (409 MAHURAT_BLOCKED); owner, manager or EVENTS_MAHURAT Full may override with a reason, audited on the booking as MAHURAT_OVERRIDE. Own tab EVENTS_MAHURAT (View, Edit, Full), not in RBAC_NEWLY_ADDED. Public page shows public seasons as upcoming special dates and refuses a blocked date. Smoke: TC-MAHURAT-*.',
       'guest-id-proof-encrypted  Security fix from the 29 Sep review. room_bookings.guest_id_proof and group_guests.guest_id_proof (the passport / Aadhaar number; Form-C prints it) were plain TEXT. Every write now seals it with sealGuestIdProof (encryptSensitive, AES-256-GCM hr1: values, HR_DATA_KEY or derived from JWT_SECRET): booking create, PATCH, online check-in, group guest upsert, SA booking import, demo seed. Reads are opened in one place, PostgresDb.query, for any column named *id_proof, so Form-C, the booking screens and reports get the plain number; a value that cannot be decrypted reads as null, never ciphertext. The SQL console reads raw (query opts.raw). POST /api/admin/guest-id-proof/encrypt-existing (SUPER_ADMIN, dryRun by default, compare-and-set, time-budgeted, counts only) seals values saved before. Form-C PDF generation now writes FORM_C_PDF_GENERATED to the booking audit log first (503 and no PDF if it cannot). DPDP erase (POST /dpdp/erase) now also deletes the guest ID documents of the matched bookings (private or legacy storage, then the row), clears guest_id_proof on them and anonymises group_guests, writes DPDP_ERASED on each booking, and does the document deletes first so a storage failure (502) leaves the request repeatable. TC-GUESTID-*.',
       'public-booking-idempotent-retry  The public hotel and spa booking pages now get the same protection as the event enquiry form. A shared postWithRetry helper (src/lib/postWithRetry.ts) retries a gateway error or dropped connection twice with ONE Idempotency-Key per click; a new publicIdempotency middleware on the three public POST routes stores the first successful reply in a tenant table public_request_replay (created once per tenant per process) and answers a repeat of the key with that same reply and an Idempotent-Replay header, so a retry after a lost reply returns the same booking and payment link instead of a second booking or a slot that looks just taken. Replies are kept in the database, not memory, because a server restart is the case being handled. Non-JSON replies (a gateway error page) show a clear message instead of Unexpected token. TC-PUBLIC-REPLAY-HOTEL, TC-PUBLIC-REPLAY-INQUIRY.',
