@@ -51154,15 +51154,20 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const { from, to } = req.query as any;
-      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      // IST month and IST days. folios.settled_at and orders.created_at are UTC
+      // timestamps, so DATE(col) put a bill raised between 00:00 and 05:30 IST
+      // on the previous day, and the UTC month start put the 1st's first 5h30m
+      // in the previous month. invoice_date, entry_date and the payroll period
+      // are business dates already and are not shifted.
+      const f = from || _todayIST().slice(0, 7) + '-01';
       const t = to   || _todayIST();
 
       const [hotelFolio, spaFolio, eventFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
         // Hotel folios settle with status='settled' (see server ~4301/37500/42831);
         // 'closed' is the SPA/table-session vocabulary. Filtering hotel on 'closed'
         // matched zero rows → Hotel Room Revenue always showed ₹0.
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         // Events & Convention — absent from this report until Sep 2026, which is
         // why an owner running banquets saw revenue that was missing their
         // largest line. Cash basis like its neighbours (settled folios), NOT the
@@ -51171,8 +51176,8 @@ ${data.tenant.name}`;
         // status, so it cannot double count. Room nights sold as part of an
         // event are billed inside the event folio, so this does not overlap the
         // hotel line above.
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         // Payroll cost = gross pay + employer PF and ESI on approved runs. It was net
@@ -51325,17 +51330,24 @@ ${data.tenant.name}`;
     if (!(await _acctOwnerOnly(req, res))) return;
     try {
       const db = await getTenantDb(req.params.id);
-      const month = (req.query.month as string) || new Date().toISOString().slice(0, 7);
+      // The IST month, cut at IST midnight. Bills are UTC timestamps, so the
+      // UTC cut moved every bill raised between 00:00 and 05:30 IST on the 1st
+      // into the previous month's return.
+      const month = String(req.query.month || _todayIST().slice(0, 7));
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+      // The real last day. Every month used to end on day 31, which is not a date in
+      // a 30-day month or February: Postgres refused every query, each one fell
+      // into its .catch, and the sheet showed zero tax for those months.
       const f = month + '-01';
-      const t = month + '-31';
+      const t = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
 
       const [hotelGst, spaGst, eventGst, restaurantGst, procItc] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         // Banquet GST was missing entirely, so a property running events was
         // under-declaring output tax on this sheet. Same basis as its neighbours.
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
       ]);
 
@@ -71195,8 +71207,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cash-reports-ist-day-cut',
+    commit_marker: 'pnl-gst-ledger-ist-day-cut',
     code_features: [
+      'pnl-gst-ledger-ist-day-cut  The P&L and the GST ledger cut folios.settled_at and orders.created_at at IST midnight (_istDayRange), and default to the IST month. They cut at UTC midnight (05:30 IST), so a bill raised between 00:00 and 05:30 IST counted on the previous day, and on the 1st it moved into the previous month\'s GST sheet. The GST ledger also ended every month on day 31, which is not a date in a 30-day month or February: every query failed into its .catch and the sheet showed zero output tax for those months (September 2026 read Rs 0 against Rs 85,790 in the GL). It now ends on the real last day and refuses a malformed month with 400. invoice_date, entry_date and payroll periods are business dates and are not shifted. Smoke: TC-RPT-PNL-GST-IST-SOURCE, -MONTH-END, -CONSISTENT.',
       'cash-reports-ist-day-cut  folio_payments.recorded_at and orders.created_at are UTC timestamps, and the cash reports cut them at UTC midnight (05:30 IST), so a receipt or bill between 00:00 and 05:30 IST was reported on the previous day. Now IST days everywhere a folio receipt is cut: EOD day-close tender (orders and folio payments together), the cash-flow report (every folio receipt and refund line, its restaurant orders, the daily series, and the default month start), hotel payment-received (filter and TO_CHAR periods), and the hotel-advance GL backfill filter (now the same IST day _glPostDate posts on). The IST SQL helpers (_istCut, _istDayRange, _istDayOf, _istWall, _IST_MONTH_START_SQL) moved to module scope beside _istDate. Cash-flow daily rows were keyed by a JS Date and printed as Fri Sep 04 2026 00:00:00 GMT+0000 in weekday order; keys are now YYYY-MM-DD via normaliseDateIso. Not changed: P&L and GST ledger still cut orders at UTC days. Smoke: TC-RPT-CASH-IST-DAILY, -PAYMENTS, -DAYCLOSE, -SOURCE.',
       'inventory-reports-ist-day-cut  After the close moved to IST days (inventory-close-ist-and-one-standing-journal), every other inventory report still cut stock_movements.recorded_at (UTC) at a bare ?::date, which is 05:30 IST, so movements between 00:00 and 05:30 IST landed on the previous day and the reports disagreed with the close. One helper _istCut (boundary minus 330 minutes) is now used by the close, the stockout report (opening balance, window, and its JS window edges; last_stockout_at is the IST date), the COGS report (consumption, wastage and the order revenue it is compared with), and the audit log from/to filter (now IST calendar days). The dashboard trend buckets by IST day (_istDayOf) and month-to-date consumption and its revenue denominators (orders, folios) start at the IST month (_IST_MONTH_START_SQL). No AT TIME ZONE on TIMESTAMP-without-zone columns. Bind order unchanged. Smoke: TC-INV-IST-DAY-CUT (drives a 04:30 IST movement), TC-INV-IST-DAY-CUT-SOURCE.',
       'staff-role-ceiling  A staff manager who is not the owner, the platform or the built-in MANAGER can only give a role with the same or less access than their own, tab by tab (403 ROLE_ABOVE_YOURS with the tabs), and cannot edit, remove or reset the password of a colleague whose role has more access (403 TARGET_ABOVE_YOURS), since either would let a lower role reach higher access. Applied to staff create, bulk create (which also gains the owner-role guard), edit, delete and password reset. Smoke: TC-STAFF-ROLE-CEILING.',
