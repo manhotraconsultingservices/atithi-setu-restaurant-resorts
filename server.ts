@@ -7881,6 +7881,14 @@ const _istDayOf = (col: string) => `${_istWall(col)}::date`;
 const _istDayRange = (col: string) =>
   `${col} >= ${_istCut('?::date')} AND ${col} < ${_istCut("?::date + INTERVAL '1 day'")}`;
 
+// A hotel credit note is stored as a full POSITIVE copy of the invoice it
+// credits (doc_type CREDIT_NOTE, status 'settled', dated when issued), and its
+// GL journal is the reversal of that invoice. A report that sums folios must
+// count it NEGATIVE on its own date, as the ledger does: added, a credited bill
+// counted twice (Sep 2026 GST ledger: Rs 2,19,353 against Rs 11,363 in the GL);
+// left out, the credited bill still counted once.
+const _folioSign = (alias = '') => `(CASE WHEN ${alias ? alias + '.' : ''}doc_type = 'CREDIT_NOTE' THEN -1 ELSE 1 END)`;
+
 function _glEntryDate(v: unknown): string {
   // A plain calendar date is taken as given. (This pattern had lost its
   // backslashes — d{4} instead of \d{4} — so no date string ever matched.)
@@ -46443,16 +46451,18 @@ ${data.tenant.name}`;
       // services per folio_entry. Here we surface the easy aggregates.)
       // REVENUE-DEDUP: room revenue only — subtract charge-to-room F&B (it's
       // counted as Restaurant/F&B revenue, not hotel revenue).
+      // Credit notes issued today count negative (_folioSign): leaving them out
+      // kept a credited bill in the day's revenue. The day is the IST day.
       const foliosSettledToday: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0)::float AS rev
+        `SELECT COALESCE(SUM(${_folioSign('f')} * (f.grand_total - COALESCE(fnb.fnb_total, 0))), 0)::float AS rev
            FROM folios f
            LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
                         FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                   ON fnb.folio_id = f.id
-          WHERE (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+          WHERE COALESCE(f.doc_type, 'INVOICE') IN ('INVOICE', 'CREDIT_NOTE')
             AND f.status = 'settled'
-            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') = ?`,
-        [asOf]
+            AND ${_istDayRange('f.settled_at')}`,
+        [asOf, asOf]
       );
       const settledRevenueToday = Number(foliosSettledToday?.rev || 0);
       res.json({
@@ -46565,10 +46575,12 @@ ${data.tenant.name}`;
       // (net of reversals, incl. their GST). Same dedup is applied to hotel
       // analytics + night-audit settled revenue.
       const rows: any[] = await tenantDb.query(
+        // A credit note in the window takes its revenue back (_folioSign); stays
+        // and room nights count invoices only, since the stay still happened.
         `SELECT COALESCE(rt.name, r.type, 'Uncategorised') AS room_type,
-                COUNT(DISTINCT f.id)::int AS stays,
-                COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)),0)::float AS revenue,
-                COALESCE(SUM(GREATEST((b.check_out_date::date - b.check_in_date::date),1)),0)::int AS room_nights
+                COUNT(DISTINCT f.id) FILTER (WHERE COALESCE(f.doc_type, 'INVOICE') = 'INVOICE')::int AS stays,
+                COALESCE(SUM(${_folioSign('f')} * (f.grand_total - COALESCE(fnb.fnb_total, 0))),0)::float AS revenue,
+                COALESCE(SUM(GREATEST((b.check_out_date::date - b.check_in_date::date),1)) FILTER (WHERE COALESCE(f.doc_type, 'INVOICE') = 'INVOICE'),0)::int AS room_nights
            FROM folios f
            LEFT JOIN room_bookings b ON b.id = f.booking_id
            LEFT JOIN rooms r ON r.id = f.room_id
@@ -46576,8 +46588,8 @@ ${data.tenant.name}`;
            LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
                         FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                   ON fnb.folio_id = f.id
-          WHERE f.status='settled' AND (f.doc_type IS NULL OR f.doc_type='INVOICE')
-            AND TO_CHAR(f.settled_at,'YYYY-MM-DD') BETWEEN ? AND ?
+          WHERE f.status='settled' AND COALESCE(f.doc_type, 'INVOICE') IN ('INVOICE', 'CREDIT_NOTE')
+            AND ${_istDayRange('f.settled_at')}
           GROUP BY room_type
           ORDER BY revenue DESC`,
         [from, to]
@@ -51166,8 +51178,9 @@ ${data.tenant.name}`;
         // Hotel folios settle with status='settled' (see server ~4301/37500/42831);
         // 'closed' is the SPA/table-session vocabulary. Filtering hotel on 'closed'
         // matched zero rows → Hotel Room Revenue always showed ₹0.
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        // Credit notes count negative (_folioSign), as in the ledger.
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * (grand_total - gst_amount)), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * (grand_total - gst_amount)), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         // Events & Convention — absent from this report until Sep 2026, which is
         // why an owner running banquets saw revenue that was missing their
         // largest line. Cash basis like its neighbours (settled folios), NOT the
@@ -51176,7 +51189,7 @@ ${data.tenant.name}`;
         // status, so it cannot double count. Room nights sold as part of an
         // event are billed inside the event folio, so this does not overlap the
         // hotel line above.
-        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * (grand_total - gst_amount)), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
@@ -51342,11 +51355,13 @@ ${data.tenant.name}`;
       const t = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
 
       const [hotelGst, spaGst, eventGst, restaurantGst, procItc] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        // A credit note's GST is tax given back in the month it is issued, so it
+        // counts negative (_folioSign), exactly as its GL reversal does.
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='settled' AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed'  AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         // Banquet GST was missing entirely, so a property running events was
         // under-declaring output tax on this sheet. Same basis as its neighbours.
-        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(${_folioSign()} * gst_amount), 0) AS val FROM folios WHERE folio_kind='EVENT' AND status IN ('settled','closed') AND ${_istDayRange('settled_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND ${_istDayRange('created_at')}`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
       ]);
@@ -55396,6 +55411,8 @@ ${data.tenant.name}`;
   });
 
   // GET group-revenue report: revenue by group, filterable by date range.
+  // Credit notes count negative (_folioSign). A master folio's credit note
+  // carries no group_id or booking, so it is found through parent_folio_id.
   app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_ANALYTICS), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -55409,10 +55426,12 @@ ${data.tenant.name}`;
                 (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CHECKED_IN')  AS active_rooms,
                 (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CHECKED_OUT') AS checked_out_rooms,
                 (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CANCELLED')   AS cancelled_rooms,
-                COALESCE((SELECT SUM(f.grand_total) FROM folios f
+                COALESCE((SELECT SUM(${_folioSign('f')} * f.grand_total) FROM folios f
                            JOIN room_bookings b ON b.id=f.booking_id
                           WHERE b.group_id=g.id AND f.status='settled'), 0) AS settled_revenue,
-                COALESCE((SELECT f.grand_total FROM folios f WHERE f.group_id=g.id AND f.status='settled' LIMIT 1), 0) AS master_folio_revenue
+                COALESCE((SELECT SUM(${_folioSign('f')} * f.grand_total) FROM folios f
+                          WHERE f.status='settled'
+                            AND (f.group_id=g.id OR f.parent_folio_id IN (SELECT m.id FROM folios m WHERE m.group_id=g.id))), 0) AS master_folio_revenue
            FROM room_booking_groups g
           WHERE 1=1
             ${from ? "AND g.check_in_date >= ?" : ""}
@@ -55538,19 +55557,28 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       const from = String(req.query.from || _todayIST());
       const to   = String(req.query.to   || from);
+      // Entry lines are summed per folio BEFORE the join: joined row by row,
+      // every folio's grand_total and gst_amount were added once per entry
+      // line, so net_billed and gst_collected were a multiple of the truth.
+      // Credit notes count negative (_folioSign); days are IST days.
       const rows = await tenantDb.query(
-        `SELECT TO_CHAR(f.settled_at, 'YYYY-MM-DD')                                                                   AS sale_date,
-                COUNT(DISTINCT f.id)::int                                                                              AS folios_settled,
-                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type = 'ROOM_CHARGE'),      0)::float                  AS room_revenue,
-                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type NOT IN ('ROOM_CHARGE','ADVANCE','PAYMENT')), 0)::float AS service_revenue,
-                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type NOT IN ('ADVANCE','PAYMENT')), 0)::float          AS gross_revenue,
-                COALESCE(SUM(f.grand_total), 0)::float                                                                AS net_billed,
-                COALESCE(SUM(f.gst_amount),  0)::float                                                                AS gst_collected
+        `SELECT ${_istDayOf('f.settled_at')}::text                                                                    AS sale_date,
+                COUNT(*) FILTER (WHERE COALESCE(f.doc_type, 'INVOICE') = 'INVOICE')::int                               AS folios_settled,
+                COUNT(*) FILTER (WHERE f.doc_type = 'CREDIT_NOTE')::int                                                AS credit_notes,
+                COALESCE(SUM(${_folioSign('f')} * COALESCE(fe.room, 0)), 0)::float                                     AS room_revenue,
+                COALESCE(SUM(${_folioSign('f')} * COALESCE(fe.service, 0)), 0)::float                                  AS service_revenue,
+                COALESCE(SUM(${_folioSign('f')} * COALESCE(fe.gross, 0)), 0)::float                                    AS gross_revenue,
+                COALESCE(SUM(${_folioSign('f')} * f.grand_total), 0)::float                                            AS net_billed,
+                COALESCE(SUM(${_folioSign('f')} * f.gst_amount),  0)::float                                            AS gst_collected
            FROM folios f
-      LEFT JOIN folio_entries fe ON fe.folio_id = f.id
+      LEFT JOIN (SELECT folio_id,
+                        SUM(amount) FILTER (WHERE entry_type = 'ROOM_CHARGE')                           AS room,
+                        SUM(amount) FILTER (WHERE entry_type NOT IN ('ROOM_CHARGE','ADVANCE','PAYMENT')) AS service,
+                        SUM(amount) FILTER (WHERE entry_type NOT IN ('ADVANCE','PAYMENT'))               AS gross
+                   FROM folio_entries GROUP BY folio_id) fe ON fe.folio_id = f.id
           WHERE f.status = 'settled'
-            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') BETWEEN ? AND ?
-          GROUP BY TO_CHAR(f.settled_at, 'YYYY-MM-DD')
+            AND ${_istDayRange('f.settled_at')}
+          GROUP BY 1
           ORDER BY sale_date`,
         [from, to]
       );
@@ -55642,16 +55670,18 @@ ${data.tenant.name}`;
   app.get("/api/restaurant/:id/hotel/reports/monthly-pnl", authenticate, hotelStaff, requireHotelAny(HOTEL_READ_MONEY), async (req: AuthRequest, res: Response) => {
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const from = String(req.query.from || new Date().toISOString().slice(0, 8) + '01');
+      const from = String(req.query.from || _todayIST().slice(0, 8) + '01');
       const to   = String(req.query.to   || _todayIST());
 
+      // IST months; credit notes count negative (_folioSign). Petty cash below
+      // is a business date and is not shifted.
       const revenue: any[] = await tenantDb.query(
-        `SELECT SUBSTR(TO_CHAR(f.settled_at, 'YYYY-MM-DD'), 1, 7) AS month,
-                COALESCE(SUM(f.grand_total), 0)::float              AS revenue,
-                COALESCE(SUM(f.gst_amount),  0)::float              AS gst
+        `SELECT TO_CHAR(${_istWall('f.settled_at')}, 'YYYY-MM') AS month,
+                COALESCE(SUM(${_folioSign('f')} * f.grand_total), 0)::float AS revenue,
+                COALESCE(SUM(${_folioSign('f')} * f.gst_amount),  0)::float AS gst
            FROM folios f
           WHERE f.status = 'settled'
-            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+            AND ${_istDayRange('f.settled_at')}
           GROUP BY 1 ORDER BY 1`,
         [from, to]
       ).catch(() => []);
@@ -61741,6 +61771,29 @@ ${data.tenant.name}`;
       if (existing) {
         return res.status(400).json({ error: "A credit note already exists for this folio", credit_note_id: existing.id });
       }
+      // The credit note's journal is the reversal of the invoice's. An invoice
+      // that never reached the ledger left nothing to reverse, and the credit
+      // note was issued anyway with no journal (7 Sep 2026, INV-1014), so the
+      // reports took the refund back and the ledger did not. Post the invoice
+      // first, as the ledger backfill does, and refuse if it still is not
+      // there, BEFORE a credit-note serial is minted. A zero bill has no
+      // journal and needs none.
+      const parentJournal = () => tenantDb.get(
+        "SELECT id FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? AND is_reversed = 0 LIMIT 1",
+        [req.params.id, `FOLIO-${parent.id}`]).catch(() => null);
+      const needsJournal = Number(parent.subtotal || 0) + Number(parent.gst_amount || 0) > 0;
+      if (needsJournal && !(await parentJournal())) {
+        await _postFolioGl(tenantDb, req.params.id, parent.id, {
+          revenueCode: '4000', revenueName: 'Room Revenue', sourceType: 'FOLIO_BACKFILL',
+          postedBy: req.user?.email || req.user?.id || 'CREDIT_NOTE',
+        }).catch(() => {});
+        if (!(await parentJournal())) {
+          return res.status(409).json({
+            error: 'This invoice is not in the ledger and could not be posted now (is its period closed?), so a credit note would have nothing to reverse. Reopen the period or post the invoice, then issue the credit note.',
+            code: 'INVOICE_NOT_IN_LEDGER',
+          });
+        }
+      }
 
       const cnId = `CN-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       // M-1 — credit notes inherit the PARENT folio's snapshot so the
@@ -61775,12 +61828,17 @@ ${data.tenant.name}`;
       // Phase 3.2 — reverse the parent folio's GL settlement as a DATED contra
       // journal keyed to the credit note (FOLIO-<cnId>), so revenue, output GST
       // and AR/cash are backed out in the period the credit note is issued.
-      await _reverseJournal(tenantDb, req.params.id, `FOLIO-${parent.id}`, {
-        reversalRef: `FOLIO-${cnId}`, sourceType: 'CREDIT_NOTE', sourceId: cnId,
-        reason: reason || 'Credit note', postedBy: req.user?.email || req.user?.id || null,
-      });
+      const glRev = needsJournal
+        ? await _reverseJournal(tenantDb, req.params.id, `FOLIO-${parent.id}`, {
+            reversalRef: `FOLIO-${cnId}`, sourceType: 'CREDIT_NOTE', sourceId: cnId,
+            reason: reason || 'Credit note', postedBy: req.user?.email || req.user?.id || null,
+          })
+        : { ok: true, reason: undefined };
+      // Checked above, so this should not happen; if it does it must be seen,
+      // not swallowed (the repair endpoint can post the reversal later).
+      if (!glRev.ok) console.error(`[credit-note] ${cnId} issued but its GL reversal failed: ${glRev.reason}`);
       await writeObjectAudit(tenantDb, req, { objectType: 'FOLIO', objectId: parent.id, action: 'CREDIT_NOTE', summary: `Credit note ${cn?.invoice_number || cnId} issued (${reason || 'Refund / cancellation'})`, after: { credit_note_id: cnId, grand_total: parent.grand_total } }).catch(() => {});
-      res.status(201).json(cn);
+      res.status(201).json({ ...cn, gl_reversed: glRev.ok, ...(glRev.ok ? {} : { gl_warning: `The credit note was issued but its ledger reversal failed (${glRev.reason}).` }) });
     } catch (err: any) {
       console.error("Credit note error:", err);
       res.status(500).json({ error: err?.message || "Failed to generate credit note" });
@@ -62202,38 +62260,27 @@ ${data.tenant.name}`;
 
       // Revenue and ADR from settled folios (last 30 days).
       //
-      // QA-BUGFIX-2 — Exclude CREDIT_NOTE folios from gross revenue.
       // Credit notes are stored with positive amounts (PDF flips sign at
-      // render time), so summing them double-inflated reported revenue:
-      // a ₹5,000 booking later refunded would show as ₹10,000 revenue
-      // instead of ₹0. Filtering doc_type='INVOICE' (or NULL for legacy
-      // rows) gives the correct net-after-refund picture.
+      // render time). A credit note issued in the window counts NEGATIVE
+      // (_folioSign), net of its own charge-to-room F&B like the invoice it
+      // reverses; it was subtracted gross before, by a second query that
+      // also took in non-hotel folios. n counts invoices only (ADR).
       // REVENUE-DEDUP: room/hotel revenue only — subtract charge-to-room F&B
       // (recognised as Restaurant/F&B revenue, not hotel revenue). ADR/RevPAR
       // below are derived from this, so they now reflect pure room revenue.
       const revenueRow: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0) AS rev, COUNT(*) AS n
+        `SELECT COALESCE(SUM(${_folioSign('f')} * (f.grand_total - COALESCE(fnb.fnb_total, 0))), 0) AS rev,
+                COUNT(*) FILTER (WHERE COALESCE(f.doc_type, 'INVOICE') = 'INVOICE') AS n
          FROM folios f
          LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
                       FROM folio_entries WHERE entry_type IN ('F_AND_B', 'SPA_SERVICE', 'SPA_TIP') GROUP BY folio_id) fnb
                 ON fnb.folio_id = f.id
          WHERE f.status = 'settled'
            AND f.settled_at >= NOW() - INTERVAL '30 days'
-           AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')`
+           AND COALESCE(f.doc_type, 'INVOICE') IN ('INVOICE', 'CREDIT_NOTE')`
       );
-      // For accurate NET revenue, also subtract credit notes issued in the
-      // same window (they represent refunds against earlier-period
-      // invoices, but for monthly KPI purposes belong here).
-      const refundRow: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(grand_total), 0) AS refunds
-         FROM folios
-         WHERE doc_type = 'CREDIT_NOTE'
-           AND settled_at >= NOW() - INTERVAL '30 days'`
-      );
-      const grossRevenue = Number(revenueRow?.rev || 0);
-      const totalRefunds = Number(refundRow?.refunds || 0);
-      // Reassign revenueRow.rev for downstream code (ADR, RevPAR) using net.
-      (revenueRow as any).rev = Math.max(0, grossRevenue - totalRefunds);
+      // Net of credit notes; floored at zero for the KPI tiles.
+      (revenueRow as any).rev = Math.max(0, Number(revenueRow?.rev || 0));
       const revenue_30d = Number(revenueRow?.rev || 0);
       const folio_count_30d = Number(revenueRow?.n || 0);
       const adr = folio_count_30d > 0 ? revenue_30d / folio_count_30d : 0;
@@ -70503,6 +70550,63 @@ ${data.tenant.name}`;
     }
   });
 
+  // Credit notes issued with no ledger reversal. The credit-note route used to
+  // ignore a failed _reverseJournal, so a credit note raised while its invoice
+  // had no journal (7 Sep 2026: CN-1788804315069-0NCZ against INV-1014) never
+  // reached the ledger, and when the invoice was posted later its output tax
+  // stood although it had been credited. For each such credit note whose
+  // invoice now has a live journal and no other reversal, post the reversal as
+  // the route would have: FOLIO-<cnId>, dated the credit note's IST issue day.
+  // A credit note whose invoice is still not in the ledger is reported, not
+  // fixed (both sides are missing, so the ledger nets to zero already). Closed
+  // periods are skipped. dry_run by default.
+  app.post("/api/admin/tenants/:id/gl/repair-credit-note-reversals", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tid = req.params.id;
+      const db = await getTenantDb(tid);
+      const cns: any[] = await db.query(
+        `SELECT c.id, c.invoice_number, c.settled_at, c.gst_amount, c.parent_folio_id,
+                p.invoice_number AS parent_invoice_number, p.gst_amount AS parent_gst
+           FROM folios c LEFT JOIN folios p ON p.id = c.parent_folio_id
+          WHERE c.doc_type = 'CREDIT_NOTE'
+            AND NOT EXISTS (SELECT 1 FROM gl_entries g WHERE g.journal_ref = 'FOLIO-' || c.id)
+          ORDER BY c.settled_at`).catch(() => []);
+      const closed: any[] = await db.query("SELECT from_date, to_date FROM accounting_periods WHERE UPPER(COALESCE(status, '')) IN ('CLOSED', 'LOCKED')").catch(() => []);
+      const inClosed = (d: string) => closed.some((p: any) => String(p.from_date || '') <= d && d <= String(p.to_date || ''));
+      const plan: any[] = [];
+      const skipped: any[] = [];
+      for (const c of cns) {
+        const date = _glPostDate(c.settled_at);
+        const item = { credit_note: c.id, credit_note_number: c.invoice_number, invoice: c.parent_folio_id, invoice_number: c.parent_invoice_number, date, credit_note_gst: Number(c.gst_amount || 0), invoice_gst: Number(c.parent_gst || 0) };
+        if (!c.parent_folio_id) { skipped.push({ ...item, reason: 'no parent invoice' }); continue; }
+        const live: any = await db.get("SELECT id FROM gl_entries WHERE restaurant_id = ? AND journal_ref = ? AND is_reversed = 0 LIMIT 1", [tid, `FOLIO-${c.parent_folio_id}`]).catch(() => null);
+        if (!live) { skipped.push({ ...item, reason: 'the invoice is not in the ledger either, so the ledger already nets to zero' }); continue; }
+        const other: any = await db.get(
+          "SELECT journal_ref FROM gl_entries WHERE restaurant_id = ? AND (journal_ref = ? OR (source_type = 'CREDIT_NOTE' AND narration LIKE ?)) LIMIT 1",
+          [tid, `REV-FOLIO-${c.parent_folio_id}`, `Reversal of FOLIO-${c.parent_folio_id}%`]).catch(() => null);
+        if (other) { skipped.push({ ...item, reason: `the invoice is already reversed (${other.journal_ref})` }); continue; }
+        if (inClosed(date)) { skipped.push({ ...item, reason: `${date} is in a closed period` }); continue; }
+        plan.push(item);
+      }
+      if (req.body?.dry_run !== false) {
+        return res.json({ dry_run: true, missing: cns.length, to_post: plan.length, plan, skipped });
+      }
+      const posted: any[] = [];
+      for (const p of plan) {
+        const r = await _reverseJournal(db, tid, `FOLIO-${p.invoice}`, {
+          reversalRef: `FOLIO-${p.credit_note}`, date: p.date, sourceType: 'CREDIT_NOTE', sourceId: p.credit_note,
+          reason: 'Credit note reversal posted late (repair)', postedBy: req.user?.email || req.user?.id || 'REPAIR',
+        });
+        posted.push({ ...p, ok: r.ok, lines: r.reversed, reason: r.reason });
+        if (r.ok) await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: String(p.credit_note), action: 'GL_REPAIR', summary: `Ledger reversal of ${p.invoice_number || p.invoice} posted for credit note ${p.credit_note_number || p.credit_note}, dated ${p.date}` }).catch(() => {});
+      }
+      res.json({ dry_run: false, posted, skipped });
+    } catch (err: any) {
+      console.error('[admin] gl repair-credit-note-reversals failed:', err);
+      res.status(500).json({ error: 'Failed to repair credit-note reversals' });
+    }
+  });
+
   // ── Data Loader: Ayurvedic & Spa appointments ─────────────────────────────
   // List, delete and import, like the hotel bookings above. Delete is guarded:
   // an appointment that was billed, or that carries clinical / treatment records
@@ -71207,8 +71311,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'pnl-gst-ledger-ist-day-cut',
+    commit_marker: 'credit-note-report-sign',
     code_features: [
+      'credit-note-report-sign  A hotel credit note is stored as a full POSITIVE copy of its invoice (doc_type CREDIT_NOTE, settled on issue) and its GL journal reverses the invoice. The P&L, GST ledger, hotel-sales, monthly-pnl and group-revenue added it as a sale (a credited bill counted twice: Sep 2026 GST ledger hotel Rs 2,19,353 against Rs 11,363 in the GL); night-audit and revenue-by-room-type left it out (the credited bill still counted); analytics subtracted it gross. All now count it negative on its own date (_folioSign), matching the ledger. hotel-sales also summed grand_total and gst_amount once per entry line (join fan-out); entries are now summed per folio first. The touched hotel reports cut IST days. The credit-note route posts a missing invoice journal first and refuses (409 INVOICE_NOT_IN_LEDGER) if it still cannot, before a serial is minted; a failed reversal is logged and returned as gl_warning. backfill-gl no longer posts credit notes (it booked them as sales). POST /api/admin/tenants/:id/gl/repair-credit-note-reversals (SUPER_ADMIN, dry_run default) posts a missing credit-note reversal dated on the credit note. Smoke: TC-CN-REPORT-SIGN-*.',
       'pnl-gst-ledger-ist-day-cut  The P&L and the GST ledger cut folios.settled_at and orders.created_at at IST midnight (_istDayRange), and default to the IST month. They cut at UTC midnight (05:30 IST), so a bill raised between 00:00 and 05:30 IST counted on the previous day, and on the 1st it moved into the previous month\'s GST sheet. The GST ledger also ended every month on day 31, which is not a date in a 30-day month or February: every query failed into its .catch and the sheet showed zero output tax for those months (September 2026 read Rs 0 against Rs 85,790 in the GL). It now ends on the real last day and refuses a malformed month with 400. invoice_date, entry_date and payroll periods are business dates and are not shifted. Smoke: TC-RPT-PNL-GST-IST-SOURCE, -MONTH-END, -CONSISTENT.',
       'cash-reports-ist-day-cut  folio_payments.recorded_at and orders.created_at are UTC timestamps, and the cash reports cut them at UTC midnight (05:30 IST), so a receipt or bill between 00:00 and 05:30 IST was reported on the previous day. Now IST days everywhere a folio receipt is cut: EOD day-close tender (orders and folio payments together), the cash-flow report (every folio receipt and refund line, its restaurant orders, the daily series, and the default month start), hotel payment-received (filter and TO_CHAR periods), and the hotel-advance GL backfill filter (now the same IST day _glPostDate posts on). The IST SQL helpers (_istCut, _istDayRange, _istDayOf, _istWall, _IST_MONTH_START_SQL) moved to module scope beside _istDate. Cash-flow daily rows were keyed by a JS Date and printed as Fri Sep 04 2026 00:00:00 GMT+0000 in weekday order; keys are now YYYY-MM-DD via normaliseDateIso. Not changed: P&L and GST ledger still cut orders at UTC days. Smoke: TC-RPT-CASH-IST-DAILY, -PAYMENTS, -DAYCLOSE, -SOURCE.',
       'inventory-reports-ist-day-cut  After the close moved to IST days (inventory-close-ist-and-one-standing-journal), every other inventory report still cut stock_movements.recorded_at (UTC) at a bare ?::date, which is 05:30 IST, so movements between 00:00 and 05:30 IST landed on the previous day and the reports disagreed with the close. One helper _istCut (boundary minus 330 minutes) is now used by the close, the stockout report (opening balance, window, and its JS window edges; last_stockout_at is the IST date), the COGS report (consumption, wastage and the order revenue it is compared with), and the audit log from/to filter (now IST calendar days). The dashboard trend buckets by IST day (_istDayOf) and month-to-date consumption and its revenue denominators (orders, folios) start at the IST month (_IST_MONTH_START_SQL). No AT TIME ZONE on TIMESTAMP-without-zone columns. Bind order unchanged. Smoke: TC-INV-IST-DAY-CUT (drives a 04:30 IST movement), TC-INV-IST-DAY-CUT-SOURCE.',
@@ -72669,6 +72774,10 @@ ${data.tenant.name}`;
       const folios: any[] = !want('folios') ? [] : await db.query(
         `SELECT id FROM folios
           WHERE UPPER(COALESCE(folio_kind,'HOTEL')) = 'HOTEL' AND status IN ('settled','closed')
+            -- Not credit notes: _postFolioGl would book one as a POSITIVE sale.
+            -- A credit note's journal is the reversal of its invoice; a missing
+            -- one is posted by POST /api/admin/tenants/:id/gl/repair-credit-note-reversals.
+            AND COALESCE(doc_type, 'INVOICE') <> 'CREDIT_NOTE'
             AND TO_CHAR(COALESCE(settled_at, created_at),'YYYY-MM-DD') BETWEEN ? AND ?`, [from, to]
       ).catch(() => []);
       for (const f of folios) {
