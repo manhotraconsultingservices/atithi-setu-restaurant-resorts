@@ -10930,7 +10930,11 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
       const anyChannelOn = !!(setting.email_enabled || setting.sms_enabled || setting.whatsapp_enabled);
       if (anyChannelOn && uniqueRecipients.length === 0) {
         tally.skipped++;
-        const roleName = String(setting.role || '').toUpperCase();
+        let roleName = String(setting.role || '').toUpperCase();
+        if (roleName.startsWith('CUSTOM_')) {
+          const cr: any = await db.get("SELECT name FROM custom_roles WHERE UPPER(id) = ?", [roleName]).catch(() => null);
+          if (cr?.name) roleName = String(cr.name);
+        }
         await diag('NO_RECIPIENTS', [setting.email_enabled ? 'EMAIL' : '', setting.whatsapp_enabled ? 'WHATSAPP' : '', setting.sms_enabled ? 'SMS' : ''].filter(Boolean).join('+'),
           roleName || '-', isGuestAudience
             ? 'No email or phone on the guest record.'
@@ -15396,6 +15400,38 @@ async function startServer() {
     }
   });
 
+  // Who can receive a team notification: the property's custom roles (every staff
+  // login holds one now) plus the built-in role names the event catalogue still
+  // uses, each with how many active staff hold it and how many have an email or
+  // phone, so the owner can see when a role reaches nobody (Oct 2026: pconvention
+  // sent its Front Desk alerts to a built-in role no staff member holds).
+  app.get("/api/owner/notification-settings/roles", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!(await _notifCanRead(req))) return res.status(403).json({ error: 'You do not have access to Notifications.' });
+    try {
+      const rid = req.user!.restaurantId;
+      const db = await getTenantDb(rid);
+      const custom: any[] = await db.query("SELECT id, name, emoji FROM custom_roles WHERE restaurant_id = ? AND is_active = 1 ORDER BY name", [rid]).catch(() => []);
+      const staff: any[] = await db.query(
+        `SELECT UPPER(COALESCE(role, '')) AS role, COUNT(*) AS staff,
+                SUM(CASE WHEN COALESCE(email, '') <> '' OR COALESCE(phone, '') <> '' THEN 1 ELSE 0 END) AS reachable
+           FROM attendance_staff WHERE is_active = 1 GROUP BY UPPER(COALESCE(role, ''))`
+      ).catch(() => []);
+      const owners: any[] = await centralDb.query(
+        `SELECT UPPER(role) AS role, COUNT(*) AS staff,
+                SUM(CASE WHEN COALESCE(email, '') <> '' OR COALESCE(phone, '') <> '' THEN 1 ELSE 0 END) AS reachable
+           FROM users WHERE restaurant_id = ? AND is_active = 1 GROUP BY UPPER(role)`, [rid]
+      ).catch(() => []);
+      const counts = new Map<string, { staff: number; reachable: number }>();
+      for (const r of [...staff, ...owners]) counts.set(String(r.role), { staff: Number(r.staff) || 0, reachable: Number(r.reachable) || 0 });
+      res.json({
+        custom: custom.map(c => ({ id: c.id, name: c.name, emoji: c.emoji || '', ...(counts.get(String(c.id).toUpperCase()) || { staff: 0, reachable: 0 }) })),
+        counts: Object.fromEntries(counts),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: 'Failed to list roles' });
+    }
+  });
+
   app.post("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
     // RBAC — this owner-scoped route has no :id, so requireTabAction can't gate it.
     // Allow OWNER/MANAGER/SUPER_ADMIN/CTO (trusted built-ins) + any custom role
@@ -15407,9 +15443,27 @@ async function startServer() {
       }
     }
     const { settings } = req.body;
+    const remove: any[] = Array.isArray(req.body?.remove) ? req.body.remove : [];
     try {
       const db = await getTenantDb(req.user!.restaurantId);
-      for (const s of settings) {
+      // A custom role must be one of this property's active roles, or a row would
+      // be saved for a role nobody can ever hold.
+      const customIds = new Set<string>(
+        ((await db.query("SELECT id FROM custom_roles WHERE restaurant_id = ? AND is_active = 1", [req.user!.restaurantId]).catch(() => [])) as any[])
+          .map((r: any) => String(r.id).toUpperCase())
+      );
+      for (const s of (Array.isArray(settings) ? settings : [])) {
+        if (/^CUSTOM_/i.test(String(s?.role || '')) && !customIds.has(String(s.role).toUpperCase())) {
+          return res.status(400).json({ error: 'That role no longer exists. Refresh the page and choose again.', code: 'UNKNOWN_ROLE' });
+        }
+      }
+      // Only rows the owner added for a custom role can be taken off an event; the
+      // catalogue's own audiences are switched off, never deleted.
+      for (const r of remove) {
+        if (!r?.event_name || !/^CUSTOM_/i.test(String(r?.role || ''))) continue;
+        await db.run("DELETE FROM notification_settings WHERE event_name = ? AND role = ?", [String(r.event_name), String(r.role)]);
+      }
+      for (const s of (Array.isArray(settings) ? settings : [])) {
         await db.run(`
           INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, telegram_enabled, telegram_chat_id, recipients, schedule_time)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -71466,8 +71520,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-engine-diagnostics',
+    commit_marker: 'notif-custom-role-recipients',
     code_features: [
+      'notif-custom-role-recipients  Team notifications could only go to the built-in role names in the event catalogue (Front Desk, Housekeeping), which no staff member holds now that every login has a custom role, so those alerts reached nobody. Each event in Notifications, Automations now takes any of the property custom roles as extra team recipients, sharing the team channel switches, and every recipient role shows how many active staff it reaches. New GET /api/owner/notification-settings/roles; the save takes a remove list for custom-role rows and refuses a role that does not exist. NO_RECIPIENTS names a custom role by its name.',
       'notif-engine-diagnostics  pconvention sent no booking notifications for a week with nothing in its Notifications log: an engine error went only to the server console, and a switched-on setting with nobody to send to wrote nothing. Both now write a log row (ENGINE_ERROR with the error text, NO_RECIPIENTS naming the role) so the owner can see why. Diagnostics never throw.',
       'aiosell-fetch-counts-new  Fetch now reported every already-imported booking as imported (3 imported on each press); it now reports how many are new, and any that could not be imported, matching the scheduled pull.',
       'aiosell-scheduled-reservation-pull  Aiosell was not pushing reservations to the PMS (pconvention, Oct 2026), so OTA bookings only arrived when someone pressed Fetch now. A scheduled pull now runs per property, ON by default every 2 hours over the last 3 days of booking dates (owner-set in Channel Manager, Reservations and ops: on/off, 1 to 24 hours, 1 to 30 days back), through the same idempotent import. A newly imported booking re-sends availability to Aiosell and fires the owner channel-manager alert like a booking made here; one that cannot be placed is logged as FAIL. GET/PUT /hotel/aiosell/auto-fetch (CHANNEL_MANAGER). Smoke: TC-AIOSELL-AUTOFETCH-CONFIG.',

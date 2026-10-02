@@ -20,6 +20,7 @@ import { useT } from './i18n';
 import { canWriteTab } from './perm';
 import { moduleOn } from './tenantModules';
 import { cn } from './lib/utils';
+import { prettyRoleLabel } from './roleLabel';
 
 type Tpl = { name: string; language: string; status: string; category: string; body: string; variable_count: number };
 type EventDef = { id: string; label: string; roles: string[]; group: string; description: string };
@@ -645,28 +646,61 @@ function EventMatrix({ token, canEdit, events, channels }: { token: string; canE
   const [group, setGroup] = useState('');
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const timer = useRef<any>(null);
+  const pendingRemove = useRef<Array<{ event_name: string; role: string }>>([]);
+  const [roleInfo, setRoleInfo] = useState<{ custom: any[]; counts: Record<string, { staff: number; reachable: number }> }>({ custom: [], counts: {} });
   const chans = channels.filter(c => c.id !== 'whatsapp_enabled' || moduleOn('whatsapp'));
   useEffect(() => { api.get('/api/owner/notification-settings').then(d => setSettings(Array.isArray(d) ? d : [])).catch(() => {}); }, []);
+  useEffect(() => { api.get('/api/owner/notification-settings/roles').then(d => setRoleInfo({ custom: d.custom || [], counts: d.counts || {} })).catch(() => {}); }, []);
   const groups = Array.from(new Set(events.map(e => e.group)));
   const shown = group ? events.filter(e => e.group === group) : events;
   const isGuest = (r: string) => String(r).toUpperCase() === 'CUSTOMER';
+  const isCustom = (r: string) => /^CUSTOM_/i.test(String(r));
   const setting = (ev: string, role: string) => settings.find(s => s.event_name === ev && s.role === role);
-  const on = (ev: EventDef, guest: boolean, ch: string) => ev.roles.filter(r => isGuest(r) === guest).some(r => !!setting(ev.id, r)?.[ch]);
+  // The team of an event = the catalogue's own team roles plus any custom roles
+  // the owner added to it (a settings row is what adds one).
+  const audience = (ev: EventDef, guest: boolean) => guest
+    ? ev.roles.filter(isGuest)
+    : [...ev.roles.filter(r => !isGuest(r)), ...settings.filter(s => s.event_name === ev.id && isCustom(s.role) && !ev.roles.includes(s.role)).map(s => s.role)];
+  const on = (ev: EventDef, guest: boolean, ch: string) => audience(ev, guest).some(r => !!setting(ev.id, r)?.[ch]);
+  const roleName = (r: string) => roleInfo.custom.find(c => c.id === r)?.name || prettyRoleLabel(r);
+  const reach = (r: string) => {
+    const u = String(r).toUpperCase();
+    return roleInfo.custom.find(c => String(c.id).toUpperCase() === u) || roleInfo.counts[u] || { staff: 0, reachable: 0 };
+  };
 
   const persist = (next: any[]) => {
     clearTimeout(timer.current);
     setSaveState('saving');
     timer.current = setTimeout(() => {
-      api.send('POST', '/api/owner/notification-settings', { settings: next })
+      const remove = pendingRemove.current;
+      pendingRemove.current = [];
+      api.send('POST', '/api/owner/notification-settings', { settings: next, remove })
         .then(() => { setSaveState('saved'); setTimeout(() => setSaveState('idle'), 1500); })
-        .catch((e: any) => { setSaveState('idle'); toast.error(e.message); });
+        .catch((e: any) => { setSaveState('idle'); pendingRemove.current = [...remove, ...pendingRemove.current]; toast.error(e.message); });
     }, 700);
+  };
+  // A custom role added to an event takes the team switches already on for it.
+  const addRole = (ev: EventDef, role: string) => {
+    if (!canEdit || !role || setting(ev.id, role)) return;
+    const row: any = { event_name: ev.id, role, whatsapp_enabled: 0, sms_enabled: 0, email_enabled: 0, telegram_enabled: 0, telegram_chat_id: '' };
+    for (const c of chans) row[c.id] = on(ev, false, c.id) ? 1 : 0;
+    pendingRemove.current = pendingRemove.current.filter(x => !(x.event_name === ev.id && x.role === role));
+    const next = [...settings, row];
+    setSettings(next);
+    persist(next);
+  };
+  const removeRole = (ev: EventDef, role: string) => {
+    if (!canEdit || !isCustom(role)) return;
+    pendingRemove.current = [...pendingRemove.current, { event_name: ev.id, role }];
+    const next = settings.filter(s => !(s.event_name === ev.id && s.role === role));
+    setSettings(next);
+    persist(next);
   };
   // A team channel applies to every team role of the event at once.
   const toggle = (ev: EventDef, guest: boolean, ch: string) => {
     if (!canEdit) return;
     const val = on(ev, guest, ch) ? 0 : 1;
-    const roles = ev.roles.filter(r => isGuest(r) === guest);
+    const roles = audience(ev, guest);
     const next = [...settings];
     for (const role of roles) {
       const i = next.findIndex(s => s.event_name === ev.id && s.role === role);
@@ -679,13 +713,46 @@ function EventMatrix({ token, canEdit, events, channels }: { token: string; canE
   const test = (id: string) => api.send('POST', '/api/owner/test-notification', { eventName: id })
     .then(() => toast.success(t('nw.testSent'))).catch((e: any) => toast.error(e.message));
 
-  const cell = (ev: EventDef, guest: boolean) => ev.roles.some(r => isGuest(r) === guest)
-    ? <div className="flex gap-1">{chans.map(c => {
-        const o = on(ev, guest, c.id);
-        return <button key={c.id} disabled={!canEdit} title={c.label} onClick={() => toggle(ev, guest, c.id)}
-          className={cn('w-7 h-7 rounded-lg flex items-center justify-center border transition-colors disabled:cursor-default', o ? 'bg-brand text-white border-brand' : 'bg-white text-[#c4b6a8] border-[#e8dccf] hover:border-brand/40')}><c.icon size={13} /></button>;
-      })}</div>
-    : <span className="text-[#d8ccbf] text-xs">—</span>;
+  const buttons = (ev: EventDef, guest: boolean) => (
+    <div className="flex gap-1">{chans.map(c => {
+      const o = on(ev, guest, c.id);
+      return <button key={c.id} disabled={!canEdit} title={c.label} onClick={() => toggle(ev, guest, c.id)}
+        className={cn('w-7 h-7 rounded-lg flex items-center justify-center border transition-colors disabled:cursor-default', o ? 'bg-brand text-white border-brand' : 'bg-white text-[#c4b6a8] border-[#e8dccf] hover:border-brand/40')}><c.icon size={13} /></button>;
+    })}</div>
+  );
+  const cell = (ev: EventDef, guest: boolean) => {
+    if (guest) return ev.roles.some(isGuest) ? buttons(ev, true) : <span className="text-[#d8ccbf] text-xs">—</span>;
+    const team = audience(ev, false);
+    const addable = roleInfo.custom.filter(c => !team.includes(c.id));
+    return (
+      <div className="space-y-1">
+        {team.length > 0 && buttons(ev, false)}
+        <div className="flex flex-wrap items-center gap-1">
+          {team.map(r => {
+            const n = reach(r);
+            const nobody = !n.reachable;
+            return (
+              <span key={r} title={nobody ? t('nw.roleReachesNobody') : t('nw.roleReaches', { n: n.reachable })}
+                className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold border',
+                  nobody ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-[#faf7f2] text-[#6b5d52] border-[#eadfce]')}>
+                {roleName(r)}<span className="font-normal opacity-70">· {n.reachable}</span>
+                {canEdit && isCustom(r) && !ev.roles.includes(r) && (
+                  <button onClick={() => removeRole(ev, r)} title={t('nw.removeRole')} className="hover:text-rose-600"><X size={10} /></button>
+                )}
+              </span>
+            );
+          })}
+          {canEdit && addable.length > 0 && (
+            <select value="" onChange={e => addRole(ev, e.target.value)} title={t('nw.addRoleHint')}
+              className="text-[10px] font-bold text-brand bg-transparent border border-dashed border-brand/30 rounded-full px-1.5 py-0.5 cursor-pointer">
+              <option value="">+ {t('nw.addRole')}</option>
+              {addable.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="grid gap-3 grid-cols-1 md:grid-cols-[200px_1fr] h-full">
