@@ -47481,12 +47481,31 @@ ${data.tenant.name}`;
         scheduleAiosellResync(restaurantId, { days: cfg.schedule_days_ahead, rates: ev.ota === 'SYNC_AVAIL_RATES' });
       }
       if (ev.alert) {
-        const pretty = evt.toLowerCase().replace('_', ' ');
-        // Owner/manager alert via the existing multi-channel pipeline (no guest PII;
-        // fire-and-forget so it never blocks — already off the request path).
+        // Owner/manager alert. It used to read only "A booking was created. availability
+        // + rates re-synced to Aiosell", which owners took for an OTA booking arriving
+        // (pconvention, 2 Oct 2026: it was an Events booking). Say which booking, where
+        // it came from, and that the sync went OUT to Aiosell. Fire-and-forget, already
+        // off the request path.
+        const bk: any = bookingId ? await tenantDb.get(
+          `SELECT b.id, b.guest_name, b.booking_source, b.check_in_date, b.check_out_date, r.name AS room_name
+             FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id WHERE b.id = ?`, [bookingId]
+        ).catch(() => null) : null;
+        const src = String(bk?.booking_source || '').trim();
+        const SOURCE_LABELS: Record<string, string> = {
+          DIRECT: 'Front desk', WALK_IN: 'Walk-in', DIRECT_WEB: 'Your booking website', EVENT: 'Events',
+          GROUP: 'Group booking', PHONE: 'Phone', EMAIL: 'Email', AGENT: 'Travel agent', CORPORATE: 'Corporate',
+        };
+        const fromOta = /^AIOSELL:/i.test(src);
+        const sourceLabel = fromOta ? `${src.slice(8) || 'OTA'} via Aiosell`
+          : (SOURCE_LABELS[src.toUpperCase()] || (src ? src.replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) : ''));
         notifyBilling(restaurantId, 'AIOSELL_BOOKING_EVENT', {
-          event: pretty, bookingId: bookingId || '',
-          action: ev.ota === 'NONE' ? 'no OTA sync (per your settings)' : `availability${ev.ota === 'SYNC_AVAIL_RATES' ? ' + rates' : ''} re-synced to Aiosell`,
+          evt, bookingId: bookingId || '',
+          guest: bk?.guest_name ? String(bk.guest_name).trim() : '',
+          source: sourceLabel, fromOta,
+          room: bk?.room_name ? String(bk.room_name) : '',
+          checkIn: bk?.check_in_date ? _humanDate(bk.check_in_date) : '',
+          checkOut: bk?.check_out_date ? _humanDate(bk.check_out_date) : '',
+          synced: ev.ota !== 'NONE', rates: ev.ota === 'SYNC_AVAIL_RATES',
         }).catch(() => {});
       }
     } catch (e: any) { console.error('[aiosell-auto] event handler failed', restaurantId, evt, e?.message || e); }
@@ -47495,7 +47514,12 @@ ${data.tenant.name}`;
   // for `evt`. Hooked on the response 'finish' event so it fires regardless of
   // which success path returned, only on 2xx, and after the client has its answer.
   const aiosellEventHook = (evt: AiosellEvt) => (req: AuthRequest, res: Response, next: NextFunction) => {
-    res.on('finish', () => { try { if (res.statusCode >= 200 && res.statusCode < 300) handleAiosellBookingEvent(String((req.params as any)?.id), evt, (req.params as any)?.bookingId); } catch { /* never break the request */ } });
+    // A create has no :bookingId in the URL, so keep the id from the reply body
+    // (the create returns the booking row) for the owner alert.
+    let replyId: string | null = null;
+    const origJson = res.json.bind(res);
+    (res as any).json = (body: any) => { try { replyId = body?.id || body?.booking_id || body?.booking?.id || null; } catch { /* */ } return origJson(body); };
+    res.on('finish', () => { try { if (res.statusCode >= 200 && res.statusCode < 300) handleAiosellBookingEvent(String((req.params as any)?.id), evt, (req.params as any)?.bookingId || replyId); } catch { /* never break the request */ } });
     next();
   };
 
@@ -71311,8 +71335,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'credit-note-report-sign',
+    commit_marker: 'aiosell-alert-wording',
     code_features: [
+      'aiosell-alert-wording  The channel-manager alert said only A booking was created, availability + rates re-synced to Aiosell, which owners read as an OTA booking arriving (pconvention, 2 Oct 2026: it was an Events booking). It now names the booking (guest, room, dates), where it came from (Front desk, Events, Your booking website, or <OTA> via Aiosell) and says the update went OUT to Aiosell, with an explicit line that it is not an OTA booking unless it came through Aiosell. A create now passes the booking id (taken from the reply body) so the alert can describe it.',
       'credit-note-report-sign  A hotel credit note is stored as a full POSITIVE copy of its invoice (doc_type CREDIT_NOTE, settled on issue) and its GL journal reverses the invoice. The P&L, GST ledger, hotel-sales, monthly-pnl and group-revenue added it as a sale (a credited bill counted twice: Sep 2026 GST ledger hotel Rs 2,19,353 against Rs 11,363 in the GL); night-audit and revenue-by-room-type left it out (the credited bill still counted); analytics subtracted it gross. All now count it negative on its own date (_folioSign), matching the ledger. hotel-sales also summed grand_total and gst_amount once per entry line (join fan-out); entries are now summed per folio first. The touched hotel reports cut IST days. The credit-note route posts a missing invoice journal first and refuses (409 INVOICE_NOT_IN_LEDGER) if it still cannot, before a serial is minted; a failed reversal is logged and returned as gl_warning. backfill-gl no longer posts credit notes (it booked them as sales). POST /api/admin/tenants/:id/gl/repair-credit-note-reversals (SUPER_ADMIN, dry_run default) posts a missing credit-note reversal dated on the credit note. Smoke: TC-CN-REPORT-SIGN-*.',
       'pnl-gst-ledger-ist-day-cut  The P&L and the GST ledger cut folios.settled_at and orders.created_at at IST midnight (_istDayRange), and default to the IST month. They cut at UTC midnight (05:30 IST), so a bill raised between 00:00 and 05:30 IST counted on the previous day, and on the 1st it moved into the previous month\'s GST sheet. The GST ledger also ended every month on day 31, which is not a date in a 30-day month or February: every query failed into its .catch and the sheet showed zero output tax for those months (September 2026 read Rs 0 against Rs 85,790 in the GL). It now ends on the real last day and refuses a malformed month with 400. invoice_date, entry_date and payroll periods are business dates and are not shifted. Smoke: TC-RPT-PNL-GST-IST-SOURCE, -MONTH-END, -CONSISTENT.',
       'cash-reports-ist-day-cut  folio_payments.recorded_at and orders.created_at are UTC timestamps, and the cash reports cut them at UTC midnight (05:30 IST), so a receipt or bill between 00:00 and 05:30 IST was reported on the previous day. Now IST days everywhere a folio receipt is cut: EOD day-close tender (orders and folio payments together), the cash-flow report (every folio receipt and refund line, its restaurant orders, the daily series, and the default month start), hotel payment-received (filter and TO_CHAR periods), and the hotel-advance GL backfill filter (now the same IST day _glPostDate posts on). The IST SQL helpers (_istCut, _istDayRange, _istDayOf, _istWall, _IST_MONTH_START_SQL) moved to module scope beside _istDate. Cash-flow daily rows were keyed by a JS Date and printed as Fri Sep 04 2026 00:00:00 GMT+0000 in weekday order; keys are now YYYY-MM-DD via normaliseDateIso. Not changed: P&L and GST ledger still cut orders at UTC days. Smoke: TC-RPT-CASH-IST-DAILY, -PAYMENTS, -DAYCLOSE, -SOURCE.',

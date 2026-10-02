@@ -574,19 +574,42 @@ export function buildNotificationContent(
     /* ── Channel manager (Aiosell) — owner alert on a booking event ─────── */
 
     case 'AIOSELL_BOOKING_EVENT': {
-      const ev = String(data.event || 'updated');
-      const bk = data.bookingId ? ` (${data.bookingId})` : '';
-      const act = String(data.action || 'availability re-synced to Aiosell');
+      // Owner alert after a booking change in Atithi-Setu. Says which booking, where
+      // it came from, and that the update went OUT to Aiosell, so it is never read
+      // as an OTA booking arriving (2 Oct 2026).
+      const EVT: Record<string, { what: string; effect: string }> = {
+        CREATED:     { what: 'New booking',           effect: 'so your OTAs now show the room as taken' },
+        MODIFIED:    { what: 'Booking changed',       effect: 'so your OTAs show the new dates and room' },
+        CHECKED_IN:  { what: 'Guest checked in',      effect: 'to keep your OTAs in step' },
+        CHECKED_OUT: { what: 'Guest checked out',     effect: 'so any nights freed up are on sale again' },
+        CANCELLED:   { what: 'Booking cancelled',     effect: 'so your OTAs show the room as free again' },
+      };
+      const key = String(data.evt || '').toUpperCase();
+      const e = EVT[key] || { what: 'Booking updated', effect: 'to keep your OTAs in step' };
+      const who = [data.guest, data.room, (data.checkIn && data.checkOut) ? `${data.checkIn} to ${data.checkOut}` : (data.checkIn || '')]
+        .filter(Boolean).join(' · ');
+      const src = data.source ? String(data.source) : '';
+      const head = `${e.what}${src ? ` (${src})` : ''}`;
+      const synced = data.synced !== false;
+      const sent = synced
+        ? `Atithi-Setu sent the updated availability${data.rates ? ' and rates' : ''} to Aiosell, ${e.effect}.`
+        : 'No update was sent to Aiosell (OTA sync is off for this event in your settings).';
+      const origin = data.fromOta
+        ? `This booking came from ${src || 'an OTA'}.`
+        : 'This booking was made in Atithi-Setu. It is not an OTA booking.';
       return {
-        subject: `🔄 OTA sync — booking ${ev} — ${r}`,
+        subject: `🔄 ${head}${data.guest ? ` · ${data.guest}` : ''} · Aiosell ${synced ? 'updated' : 'not updated'} — ${r}`,
         text:
           `🔄 *Channel manager — ${r}*\n` +
-          `A booking was *${ev}*${bk}.\n` +
-          `${act}.`,
+          `*${head}*${who ? `\n${who}` : ''}${data.bookingId ? `\nBooking ${data.bookingId}` : ''}\n\n` +
+          `${sent}\n${origin}`,
         html:
-          `<h2 style="color:#0E7490">🔄 Channel manager</h2>` +
-          `<p style="font-size:15px;margin:0 0 8px">A booking was <strong>${ev}</strong>${bk}.</p>` +
-          `<p style="color:#6b5d52;margin:0">${act}.</p>`,
+          `<h2 style="color:#0E7490;margin:0 0 6px">🔄 Channel manager</h2>` +
+          `<p style="font-size:15px;margin:0 0 4px"><strong>${head}</strong></p>` +
+          (who ? `<p style="margin:0 0 4px">${who}</p>` : '') +
+          (data.bookingId ? `<p style="color:#6b5d52;margin:0 0 10px;font-size:13px">Booking ${data.bookingId}</p>` : '') +
+          `<p style="margin:10px 0 4px">${sent}</p>` +
+          `<p style="color:#6b5d52;margin:0">${origin}</p>`,
       };
     }
 
