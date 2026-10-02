@@ -946,7 +946,7 @@ function AnalyticsTab({ token }: { token: string }) {
         <div className="px-3 py-2 border-b border-brand/10 flex flex-wrap items-center gap-2">
           <h3 className="font-bold text-sm">{t('nw.messageLog')}</h3>
           <select value={status} onChange={e => setStatus(e.target.value)} className="border border-brand/15 rounded-lg px-2 py-1 text-xs">
-            {['ALL', 'SENT', 'DELIVERED', 'READ', 'FAILED', 'SKIPPED', 'NOT_IN_PLAN', 'RECEIVED'].map(s => <option key={s} value={s}>{t(`nw.rs.${s}`)}</option>)}
+            {['ALL', 'SENT', 'DELIVERED', 'READ', 'FAILED', 'SKIPPED', 'NOT_IN_PLAN', 'NO_RECIPIENTS', 'ENGINE_ERROR', 'RECEIVED'].map(s => <option key={s} value={s}>{t(`nw.rs.${s}`)}</option>)}
           </select>
           <input value={who} onChange={e => setWho(e.target.value)} placeholder={t('nw.searchContacts')} className="ml-auto border border-brand/15 rounded-lg px-2 py-1 text-xs w-40" />
         </div>
@@ -961,7 +961,7 @@ function AnalyticsTab({ token }: { token: string }) {
                   <td className="px-2 py-1.5 max-w-[140px] truncate" title={d.recipient}>{d.contact_name || d.recipient}</td>
                   <td className="px-2 py-1.5 max-w-[200px] truncate text-[#6b5d52]" title={d.preview}>{d.template_name || String(d.event_name || '').replace(/_/g, ' ').toLowerCase()}</td>
                   <td className="px-3 py-1.5 text-right" title={d.error || ''}>
-                    <span className={cn('font-bold', d.status === 'FAILED' ? 'text-rose-700' : (d.status === 'SKIPPED' || d.status === 'NOT_IN_PLAN') ? 'text-amber-700' : String(d.direction) === 'IN' ? 'text-brand' : 'text-emerald-700')}>
+                    <span className={cn('font-bold', (d.status === 'FAILED' || d.status === 'NO_RECIPIENTS' || d.status === 'ENGINE_ERROR') ? 'text-rose-700' : (d.status === 'SKIPPED' || d.status === 'NOT_IN_PLAN') ? 'text-amber-700' : String(d.direction) === 'IN' ? 'text-brand' : 'text-emerald-700')}>
                       {t(`nw.rs.${String(d.direction) === 'IN' ? 'RECEIVED' : d.status}`)}
                     </span>
                   </td>

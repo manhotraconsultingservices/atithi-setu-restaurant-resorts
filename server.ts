@@ -10833,6 +10833,18 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
     if (ok) { tally.sent++; if (!tally.channels.includes(ch)) tally.channels.push(ch); }
     else tally.failed++;
   };
+  // Diagnostics (Oct 2026): two outcomes used to leave no trace in the owner's
+  // Notifications log — an error inside the engine (console only) and a switched-on
+  // setting with nobody to send to. pconvention went silent for a week that way.
+  // Both now write a log row the owner can see; neither ever throws.
+  let diagDb: any = null;
+  const diag = async (status: string, channel: string, recipient: string, error: string) => {
+    try {
+      const d = diagDb || await getTenantDb(restaurantId);
+      await d.run("INSERT INTO notification_deliveries (id, event_name, channel, recipient, status, error, audience, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [`ND-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, eventName, channel, recipient, status, String(error || '').slice(0, 300), 'TEAM', '']);
+    } catch { /* diagnostics must never break a send */ }
+  };
   try {
     // Inject restaurant name so all notifications display the correct restaurant
     if (!data.restaurantName) {
@@ -10841,6 +10853,7 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
     }
 
     const db = await getTenantDb(restaurantId);
+    diagDb = db;
     await ensureNotifDeliveries(db, restaurantId);
     const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
     if (!settings || settings.length === 0) return tally;
@@ -10912,6 +10925,17 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
       } catch { /* fall back to default content */ }
       // Deduplicate recipients (same email/phone might appear via role lookup + manual list)
       const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
+      // A setting switched on with nobody to reach (e.g. a retired built-in role
+      // that no staff member holds any more, or a contact with no email/phone).
+      const anyChannelOn = !!(setting.email_enabled || setting.sms_enabled || setting.whatsapp_enabled);
+      if (anyChannelOn && uniqueRecipients.length === 0) {
+        tally.skipped++;
+        const roleName = String(setting.role || '').toUpperCase();
+        await diag('NO_RECIPIENTS', [setting.email_enabled ? 'EMAIL' : '', setting.whatsapp_enabled ? 'WHATSAPP' : '', setting.sms_enabled ? 'SMS' : ''].filter(Boolean).join('+'),
+          roleName || '-', isGuestAudience
+            ? 'No email or phone on the guest record.'
+            : `Nobody to send to: no active ${roleName === 'OWNER' ? 'owner account' : `staff member with the role ${roleName}`} has an email or phone. Add a recipient or choose the role your staff hold.`);
+      }
       _logAndSendTenant = restaurantId;
       const audienceTag = isGuestAudience ? 'GUEST' : 'TEAM';
       // WhatsApp copy is written separately from email copy where the owner has
@@ -11021,8 +11045,9 @@ async function _triggerNotificationRun(restaurantId: string, eventName: string, 
         record(await logAndSend(db, eventName, 'TELEGRAM', setting.telegram_chat_id || 'default', content.text, () => sendTelegram(setting.telegram_chat_id || null, content.text)), 'TELEGRAM');
       }
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error(`Failed to trigger notification for ${eventName}:`, err);
+    await diag('ENGINE_ERROR', 'ENGINE', '-', `The notification could not be prepared: ${err?.message || err}`);
   }
   return tally;
 }
@@ -71441,8 +71466,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-fetch-counts-new',
+    commit_marker: 'notif-engine-diagnostics',
     code_features: [
+      'notif-engine-diagnostics  pconvention sent no booking notifications for a week with nothing in its Notifications log: an engine error went only to the server console, and a switched-on setting with nobody to send to wrote nothing. Both now write a log row (ENGINE_ERROR with the error text, NO_RECIPIENTS naming the role) so the owner can see why. Diagnostics never throw.',
       'aiosell-fetch-counts-new  Fetch now reported every already-imported booking as imported (3 imported on each press); it now reports how many are new, and any that could not be imported, matching the scheduled pull.',
       'aiosell-scheduled-reservation-pull  Aiosell was not pushing reservations to the PMS (pconvention, Oct 2026), so OTA bookings only arrived when someone pressed Fetch now. A scheduled pull now runs per property, ON by default every 2 hours over the last 3 days of booking dates (owner-set in Channel Manager, Reservations and ops: on/off, 1 to 24 hours, 1 to 30 days back), through the same idempotent import. A newly imported booking re-sends availability to Aiosell and fires the owner channel-manager alert like a booking made here; one that cannot be placed is logged as FAIL. GET/PUT /hotel/aiosell/auto-fetch (CHANNEL_MANAGER). Smoke: TC-AIOSELL-AUTOFETCH-CONFIG.',
       'aiosell-alert-wording  The channel-manager alert said only A booking was created, availability + rates re-synced to Aiosell, which owners read as an OTA booking arriving (pconvention, 2 Oct 2026: it was an Events booking). It now names the booking (guest, room, dates), where it came from (Front desk, Events, Your booking website, or <OTA> via Aiosell) and says the update went OUT to Aiosell, with an explicit line that it is not an OTA booking unless it came through Aiosell. A create now passes the booking id (taken from the reply body) so the alert can describe it.',
