@@ -65923,7 +65923,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     try {
       const r = await api('/aiosell/fetch-reservations', { method: 'POST', body: JSON.stringify({ startDate: fetchFrom, endDate: fetchTo, ingest: fetchIngest }) });
       setFetchResult(r);
-      toast.success(`Fetched ${r.count} reservation(s)${fetchIngest ? `, imported ${r.ingested}` : ''}.`);
+      toast.success(`Fetched ${r.count} reservation(s)${fetchIngest ? `, ${r.created ?? r.ingested} new${(r.failed || []).length ? `, ${r.failed.length} could not be imported (see Sync Log)` : ''}` : ''}.`);
     } catch (e: any) { setErr(e.message || 'Fetch failed.'); }
     finally { setFetching(false); }
   };
@@ -66573,7 +66573,7 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
               </button>
               {fetchResult && (
                 <div className="mt-2 bg-[#f5f0ea] rounded-xl px-3 py-2 text-[12px] text-[#6b5d52]">
-                  {fetchResult.count} reservation(s) found{fetchIngest ? `, ${fetchResult.ingested} imported` : ' (not imported)'}.
+                  {fetchResult.count} reservation(s) found{fetchIngest ? `, ${fetchResult.created ?? fetchResult.ingested} new${(fetchResult.failed || []).length ? `, ${fetchResult.failed.length} could not be imported (see Sync Log)` : ''}` : ' (not imported)'}.
                 </div>
               )}
             </div>

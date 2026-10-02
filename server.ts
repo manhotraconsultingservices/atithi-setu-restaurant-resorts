@@ -49662,8 +49662,9 @@ ${data.tenant.name}`;
       if (!pull.ok) return res.status(pull.status).json({ error: pull.error, ...(pull.code ? { code: pull.code } : {}) });
       const list = pull.list;
       const ingested = pull.ingested;
-      logAiosellSync(tenantDb, { direction: 'IN', operation: 'FETCH', trigger: 'manual', actor: req.user?.email, status: 'OK', summary: `Pulled reservations ${startDate}→${endDate} — ${list.length} found${req.body?.ingest ? `, ${ingested} imported` : ''}` });
-      res.json({ success: true, count: list.length, ingested, reservations: list });
+      logAiosellSync(tenantDb, { direction: 'IN', operation: 'FETCH', trigger: 'manual', actor: req.user?.email, status: 'OK', summary: `Pulled reservations ${startDate}→${endDate} — ${list.length} found${req.body?.ingest ? `, ${pull.created} new${pull.failed.length ? `, ${pull.failed.length} could not be imported` : ''}` : ''}` });
+      // created = bookings new to Atithi-Setu; ingested also counts ones already imported.
+      res.json({ success: true, count: list.length, ingested, created: pull.created, failed: pull.failed, reservations: list });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
@@ -71440,8 +71441,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-scheduled-reservation-pull',
+    commit_marker: 'aiosell-fetch-counts-new',
     code_features: [
+      'aiosell-fetch-counts-new  Fetch now reported every already-imported booking as imported (3 imported on each press); it now reports how many are new, and any that could not be imported, matching the scheduled pull.',
       'aiosell-scheduled-reservation-pull  Aiosell was not pushing reservations to the PMS (pconvention, Oct 2026), so OTA bookings only arrived when someone pressed Fetch now. A scheduled pull now runs per property, ON by default every 2 hours over the last 3 days of booking dates (owner-set in Channel Manager, Reservations and ops: on/off, 1 to 24 hours, 1 to 30 days back), through the same idempotent import. A newly imported booking re-sends availability to Aiosell and fires the owner channel-manager alert like a booking made here; one that cannot be placed is logged as FAIL. GET/PUT /hotel/aiosell/auto-fetch (CHANNEL_MANAGER). Smoke: TC-AIOSELL-AUTOFETCH-CONFIG.',
       'aiosell-alert-wording  The channel-manager alert said only A booking was created, availability + rates re-synced to Aiosell, which owners read as an OTA booking arriving (pconvention, 2 Oct 2026: it was an Events booking). It now names the booking (guest, room, dates), where it came from (Front desk, Events, Your booking website, or <OTA> via Aiosell) and says the update went OUT to Aiosell, with an explicit line that it is not an OTA booking unless it came through Aiosell. A create now passes the booking id (taken from the reply body) so the alert can describe it.',
       'credit-note-report-sign  A hotel credit note is stored as a full POSITIVE copy of its invoice (doc_type CREDIT_NOTE, settled on issue) and its GL journal reverses the invoice. The P&L, GST ledger, hotel-sales, monthly-pnl and group-revenue added it as a sale (a credited bill counted twice: Sep 2026 GST ledger hotel Rs 2,19,353 against Rs 11,363 in the GL); night-audit and revenue-by-room-type left it out (the credited bill still counted); analytics subtracted it gross. All now count it negative on its own date (_folioSign), matching the ledger. hotel-sales also summed grand_total and gst_amount once per entry line (join fan-out); entries are now summed per folio first. The touched hotel reports cut IST days. The credit-note route posts a missing invoice journal first and refuses (409 INVOICE_NOT_IN_LEDGER) if it still cannot, before a serial is minted; a failed reversal is logged and returned as gl_warning. backfill-gl no longer posts credit notes (it booked them as sales). POST /api/admin/tenants/:id/gl/repair-credit-note-reversals (SUPER_ADMIN, dry_run default) posts a missing credit-note reversal dated on the credit note. Smoke: TC-CN-REPORT-SIGN-*.',
