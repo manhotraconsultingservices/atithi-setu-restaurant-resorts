@@ -9963,7 +9963,13 @@ async function _resolveRecipients(
       "SELECT email, phone FROM users WHERE restaurant_id = ? AND role = ? AND is_active = 1",
       [restaurantId, role]
     ).catch(() => []);
-    return (users || []).map((u: any) => ({ email: u.email, phone: u.phone }));
+    // A Manager can be a staff login as well as an owner-level account (Oct 2026:
+    // staff holding the built-in Manager role on three tenants never received a
+    // Manager notification because only the owner accounts were read).
+    const staffMgrs: any[] = r === 'MANAGER'
+      ? await tenantDb.query("SELECT email, phone FROM attendance_staff WHERE is_active = 1 AND UPPER(COALESCE(role, '')) = 'MANAGER'").catch(() => [])
+      : [];
+    return [...(users || []), ...(staffMgrs || [])].map((u: any) => ({ email: u.email, phone: u.phone }));
   }
   // Tenant-staff roles live in the tenant's attendance_staff table.
   // role='ANY' (or empty) → every active staff row regardless of role.
@@ -15422,7 +15428,11 @@ async function startServer() {
            FROM users WHERE restaurant_id = ? AND is_active = 1 GROUP BY UPPER(role)`, [rid]
       ).catch(() => []);
       const counts = new Map<string, { staff: number; reachable: number }>();
-      for (const r of [...staff, ...owners]) counts.set(String(r.role), { staff: Number(r.staff) || 0, reachable: Number(r.reachable) || 0 });
+      // Summed, not overwritten: a Manager can be a staff login and an owner account.
+      for (const r of [...staff, ...owners]) {
+        const k = String(r.role), c = counts.get(k) || { staff: 0, reachable: 0 };
+        counts.set(k, { staff: c.staff + (Number(r.staff) || 0), reachable: c.reachable + (Number(r.reachable) || 0) });
+      }
       res.json({
         custom: custom.map(c => ({ id: c.id, name: c.name, emoji: c.emoji || '', ...(counts.get(String(c.id).toUpperCase()) || { staff: 0, reachable: 0 }) })),
         counts: Object.fromEntries(counts),
@@ -15457,10 +15467,11 @@ async function startServer() {
           return res.status(400).json({ error: 'That role no longer exists. Refresh the page and choose again.', code: 'UNKNOWN_ROLE' });
         }
       }
-      // Only rows the owner added for a custom role can be taken off an event; the
-      // catalogue's own audiences are switched off, never deleted.
+      // A custom role, or one of the retired built-in staff roles (Front Desk, Chef,
+      // Housekeeping, ...), can be taken off an event. Owner, Manager and the guest
+      // audience are only ever switched off, never deleted.
       for (const r of remove) {
-        if (!r?.event_name || !/^CUSTOM_/i.test(String(r?.role || ''))) continue;
+        if (!r?.event_name || ['OWNER', 'MANAGER', 'CUSTOMER', ''].includes(String(r?.role || '').toUpperCase())) continue;
         await db.run("DELETE FROM notification_settings WHERE event_name = ? AND role = ?", [String(r.event_name), String(r.role)]);
       }
       for (const s of (Array.isArray(settings) ? settings : [])) {
@@ -71520,8 +71531,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-custom-role-recipients',
+    commit_marker: 'notif-retire-builtin-audiences',
     code_features: [
+      'notif-retire-builtin-audiences  The Notifications event list still defaulted team messages to the retired built-in staff roles (Front Desk, Chef, Housekeeping, Waiter, Maintenance), which only one tenant still holds, so new switches created rows that reached nobody. Those defaults are gone (Owner, Manager and Guest stay); owners add their own custom roles per event. An old built-in role row that is still switched on stays visible and can be removed. The engine still delivers to built-in role names for staff who hold them. Manager notifications now also reach staff logins holding the Manager role, not only owner-level accounts, and the role counts sum both.',
       'notif-custom-role-recipients  Team notifications could only go to the built-in role names in the event catalogue (Front Desk, Housekeeping), which no staff member holds now that every login has a custom role, so those alerts reached nobody. Each event in Notifications, Automations now takes any of the property custom roles as extra team recipients, sharing the team channel switches, and every recipient role shows how many active staff it reaches. New GET /api/owner/notification-settings/roles; the save takes a remove list for custom-role rows and refuses a role that does not exist. NO_RECIPIENTS names a custom role by its name.',
       'notif-engine-diagnostics  pconvention sent no booking notifications for a week with nothing in its Notifications log: an engine error went only to the server console, and a switched-on setting with nobody to send to wrote nothing. Both now write a log row (ENGINE_ERROR with the error text, NO_RECIPIENTS naming the role) so the owner can see why. Diagnostics never throw.',
       'aiosell-fetch-counts-new  Fetch now reported every already-imported booking as imported (3 imported on each press); it now reports how many are new, and any that could not be imported, matching the scheduled pull.',

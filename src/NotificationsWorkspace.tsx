@@ -655,12 +655,18 @@ function EventMatrix({ token, canEdit, events, channels }: { token: string; canE
   const shown = group ? events.filter(e => e.group === group) : events;
   const isGuest = (r: string) => String(r).toUpperCase() === 'CUSTOMER';
   const isCustom = (r: string) => /^CUSTOM_/i.test(String(r));
+  // Owner, Manager and the guest are the catalogue's fixed audiences; any other
+  // role on a row was added by the owner (custom) or is an old built-in staff role.
+  const FIXED = ['OWNER', 'MANAGER', 'CUSTOMER'];
+  const removable = (r: string) => !FIXED.includes(String(r).toUpperCase());
+  const anyOn = (s: any) => !!(s?.email_enabled || s?.sms_enabled || s?.whatsapp_enabled || s?.telegram_enabled);
   const setting = (ev: string, role: string) => settings.find(s => s.event_name === ev && s.role === role);
   // The team of an event = the catalogue's own team roles plus any custom roles
   // the owner added to it (a settings row is what adds one).
   const audience = (ev: EventDef, guest: boolean) => guest
     ? ev.roles.filter(isGuest)
-    : [...ev.roles.filter(r => !isGuest(r)), ...settings.filter(s => s.event_name === ev.id && isCustom(s.role) && !ev.roles.includes(s.role)).map(s => s.role)];
+    : [...ev.roles.filter(r => !isGuest(r)), ...settings.filter(s => s.event_name === ev.id && !ev.roles.includes(s.role) && !isGuest(s.role)
+        && (isCustom(s.role) || anyOn(s))).map(s => s.role)];
   const on = (ev: EventDef, guest: boolean, ch: string) => audience(ev, guest).some(r => !!setting(ev.id, r)?.[ch]);
   const roleName = (r: string) => roleInfo.custom.find(c => c.id === r)?.name || prettyRoleLabel(r);
   const reach = (r: string) => {
@@ -690,7 +696,7 @@ function EventMatrix({ token, canEdit, events, channels }: { token: string; canE
     persist(next);
   };
   const removeRole = (ev: EventDef, role: string) => {
-    if (!canEdit || !isCustom(role)) return;
+    if (!canEdit || !removable(role)) return;
     pendingRemove.current = [...pendingRemove.current, { event_name: ev.id, role }];
     const next = settings.filter(s => !(s.event_name === ev.id && s.role === role));
     setSettings(next);
@@ -736,7 +742,7 @@ function EventMatrix({ token, canEdit, events, channels }: { token: string; canE
                 className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold border',
                   nobody ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-[#faf7f2] text-[#6b5d52] border-[#eadfce]')}>
                 {roleName(r)}<span className="font-normal opacity-70">· {n.reachable}</span>
-                {canEdit && isCustom(r) && !ev.roles.includes(r) && (
+                {canEdit && removable(r) && !ev.roles.includes(r) && (
                   <button onClick={() => removeRole(ev, r)} title={t('nw.removeRole')} className="hover:text-rose-600"><X size={10} /></button>
                 )}
               </span>

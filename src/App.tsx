@@ -74094,6 +74094,11 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
   );
 }
 
+// Default audiences are Owner, Manager and the guest (CUSTOMER) only. The old
+// built-in staff roles (Front Desk, Chef, Housekeeping, Waiter, Maintenance) were
+// removed in Oct 2026: nearly no staff hold them now that every login has a
+// custom role, so they created switches that reached nobody. Owners add their
+// own roles per event with "+ Add role" in Notifications → Automations.
 const NOTIFICATION_EVENTS: {
   id: string; label: string; roles: string[];
   group: 'Orders' | 'Payments' | 'Bookings' | 'Feedback & Reports' | 'Hotel'
@@ -74102,9 +74107,9 @@ const NOTIFICATION_EVENTS: {
   schedulable?: boolean;
 }[] = [
   // Orders
-  { id: 'ORDER_PLACED',               label: 'New Order Received',            roles: ['OWNER', 'CHEF'],     group: 'Orders',              description: 'Fired when a customer places a new order' },
-  { id: 'ORDER_READY',                label: 'Order Ready to Serve',          roles: ['WAITER'],             group: 'Orders',              description: 'Fired when chef marks an order as ready' },
-  { id: 'ORDER_CANCELLED',            label: 'Order Cancelled',               roles: ['OWNER', 'CHEF'],     group: 'Orders',              description: 'Fired when an order is cancelled' },
+  { id: 'ORDER_PLACED',               label: 'New Order Received',            roles: ['OWNER'],     group: 'Orders',              description: 'Fired when a customer places a new order' },
+  { id: 'ORDER_READY',                label: 'Order Ready to Serve',          roles: [],             group: 'Orders',              description: 'Fired when chef marks an order as ready' },
+  { id: 'ORDER_CANCELLED',            label: 'Order Cancelled',               roles: ['OWNER'],     group: 'Orders',              description: 'Fired when an order is cancelled' },
   { id: 'CUSTOMER_ORDER_CONFIRMATION',label: 'Order Confirmation (Customer)', roles: ['CUSTOMER'],           group: 'Orders',              description: 'Confirmation sent to the customer after order is placed' },
   { id: 'CUSTOMER_INVOICE',           label: 'Invoice to Customer',           roles: ['CUSTOMER'],           group: 'Orders',              description: 'Invoice sent to the customer after payment' },
   // Payments
@@ -74121,13 +74126,13 @@ const NOTIFICATION_EVENTS: {
   { id: 'DAILY_REPORT',               label: 'Daily Sales Summary',           roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'End-of-day summary of orders and revenue', schedulable: true },
   { id: 'STAFF_ATTENDANCE',           label: 'Staff Check-In / Check-Out',    roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'Fired when a staff member logs attendance' },
   // Hotel / Hospitality (Phase 2)
-  { id: 'HOUSEKEEPING_REQUESTED',     label: 'New Service Request',           roles: ['OWNER', 'HOUSEKEEPING', 'MAINTENANCE', 'FRONT_DESK'], group: 'Hotel', description: 'Fired when a guest submits an in-room service request' },
+  { id: 'HOUSEKEEPING_REQUESTED',     label: 'New Service Request',           roles: ['OWNER'], group: 'Hotel', description: 'Fired when a guest submits an in-room service request' },
   { id: 'SERVICE_REQUEST_COMPLETED',  label: 'Service Request Completed',     roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent to the guest when their request is marked complete' },
   { id: 'SLA_BREACH',                 label: 'Service SLA Breach',            roles: ['OWNER', 'MANAGER'],                                  group: 'Hotel', description: 'Fired when a service request exceeds 1.5× its SLA' },
-  { id: 'BOOKING_CREATED',            label: 'New Hotel Booking',             roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired when a new room booking is made' },
-  { id: 'GUEST_CHECKED_IN',           label: 'Guest Checked In',              roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired on guest check-in' },
-  { id: 'GUEST_CHECKED_OUT',          label: 'Guest Checked Out',             roles: ['OWNER', 'FRONT_DESK', 'HOUSEKEEPING'],               group: 'Hotel', description: 'Fired on guest check-out (housekeeping is notified to prepare cleaning)' },
-  { id: 'BOOKING_NO_SHOW',            label: 'Booking No-Show',               roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired when a booking is marked as a no-show' },
+  { id: 'BOOKING_CREATED',            label: 'New Hotel Booking',             roles: ['OWNER'],                               group: 'Hotel', description: 'Fired when a new room booking is made' },
+  { id: 'GUEST_CHECKED_IN',           label: 'Guest Checked In',              roles: ['OWNER'],                               group: 'Hotel', description: 'Fired on guest check-in' },
+  { id: 'GUEST_CHECKED_OUT',          label: 'Guest Checked Out',             roles: ['OWNER'],               group: 'Hotel', description: 'Fired on guest check-out (add your housekeeping role to have cleaning notified)' },
+  { id: 'BOOKING_NO_SHOW',            label: 'Booking No-Show',               roles: ['OWNER'],                               group: 'Hotel', description: 'Fired when a booking is marked as a no-show' },
   { id: 'GUEST_PRE_ARRIVAL',          label: 'Pre-Arrival Message',           roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent to the guest before their arrival date' },
   { id: 'HOTEL_INVOICE_SENT',         label: 'Invoice Sent (on demand)',      roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent when a staff member sends the guest their invoice from the folio' },
   // Loyalty
@@ -74141,8 +74146,8 @@ const NOTIFICATION_EVENTS: {
   { id: 'PAYROLL_RUN_AUTOCREATED',    label: 'Payroll Run Created',           roles: ['OWNER'],                                             group: 'Staff', description: 'Fired when a monthly payroll run is auto-created' },
   { id: 'HR_DOCUMENT_EXPIRING',       label: 'Employee Documents Expiring',   roles: ['OWNER'],                                             group: 'Staff', description: 'Daily at 09:15: employee documents 30 or 7 days from expiry, or expired (each once per stage)' },
   // Delivery & OTA
-  { id: 'NEW_PLATFORM_ORDER',         label: 'New Delivery-Platform Order',   roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired on a new order from a delivery platform (Swiggy / Zomato / ONDC)' },
-  { id: 'PLATFORM_ORDER_CANCELLED',   label: 'Platform Order Cancelled',      roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired when a delivery-platform order is cancelled' },
+  { id: 'NEW_PLATFORM_ORDER',         label: 'New Delivery-Platform Order',   roles: ['OWNER'],                                     group: 'Delivery & OTA', description: 'Fired on a new order from a delivery platform (Swiggy / Zomato / ONDC)' },
+  { id: 'PLATFORM_ORDER_CANCELLED',   label: 'Platform Order Cancelled',      roles: ['OWNER'],                                     group: 'Delivery & OTA', description: 'Fired when a delivery-platform order is cancelled' },
   { id: 'RIDER_ASSIGNED',             label: 'Delivery Rider Assigned',       roles: ['CUSTOMER'],                                          group: 'Delivery & OTA', description: 'Sent to the customer when a delivery rider is assigned' },
   { id: 'SETTLEMENT_RECEIVED',        label: 'OTA Settlement Received',       roles: ['OWNER'],                                             group: 'Delivery & OTA', description: 'Fired when a platform settlement/payout is received' },
   { id: 'SETTLEMENT_VARIANCE',        label: 'Settlement Variance',           roles: ['OWNER'],                                             group: 'Delivery & OTA', description: 'Fired when a settlement amount differs from expected' },
