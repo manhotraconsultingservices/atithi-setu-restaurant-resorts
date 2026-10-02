@@ -65596,8 +65596,14 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     { channel: 'gommt', label: 'MakeMyTrip / Goibibo (GoMMT)', mult: '1.00' },
   ]);
   const [multResult, setMultResult] = useState<any>(null);
-  const [fetchFrom, setFetchFrom] = useState(() => todayIST());
-  const [fetchTo, setFetchTo] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
+  // Aiosell filters reservations by the day the booking was MADE (not the stay), so a
+  // stay-style "today to +30 days" window found nothing; default to the last 7 days.
+  const _shiftYmd = (ymd: string, d: number) => new Date(Date.parse(ymd + 'T00:00:00Z') + d * 86400000).toISOString().slice(0, 10);
+  const [fetchFrom, setFetchFrom] = useState(() => _shiftYmd(todayIST(), -7));
+  const [fetchTo, setFetchTo] = useState(() => _shiftYmd(todayIST(), 1));
+  // Scheduled reservation pull (server cron; GET/PUT /hotel/aiosell/auto-fetch).
+  const [autoFetch, setAutoFetch] = useState<any>(null);
+  const [savingAutoFetch, setSavingAutoFetch] = useState(false);
   const [fetchIngest, setFetchIngest] = useState(true);
   const [fetchResult, setFetchResult] = useState<any>(null);
   const [fetching, setFetching] = useState(false);
@@ -65659,6 +65665,21 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
     try { const a = await api('/aiosell/automation'); setAutomation(a.automation); } catch { /* non-fatal (403 for non-owner) */ }
   }, [api]);
   useEffect(() => { loadAutomation(); }, [loadAutomation]);
+
+  const loadAutoFetch = useCallback(async () => {
+    try { setAutoFetch(await api('/aiosell/auto-fetch')); } catch { /* non-fatal (403 without Channel Manager access) */ }
+  }, [api]);
+  useEffect(() => { loadAutoFetch(); }, [loadAutoFetch]);
+  const saveAutoFetch = async (patch: any) => {
+    if (!canWriteTab('CHANNEL_MANAGER')) { toast.error('View-only access — you cannot change this.'); return; }
+    setSavingAutoFetch(true);
+    try {
+      const next = await api('/aiosell/auto-fetch', { method: 'PUT', body: JSON.stringify({ ...autoFetch, ...patch }) });
+      setAutoFetch(next);
+      toast.success(next.fetch_enabled ? 'Automatic fetch saved.' : 'Automatic fetch switched off.');
+    } catch (e: any) { toast.error(e.message || 'Could not save.'); }
+    finally { setSavingAutoFetch(false); }
+  };
 
   const setAuto = (patch: any) => setAutomation((a: any) => ({ ...a, ...patch }));
   const setAutoEvent = (evt: string, patch: any) => setAutomation((a: any) => ({ ...a, events: { ...a.events, [evt]: { ...(a.events?.[evt] || {}), ...patch } } }));
@@ -66502,8 +66523,42 @@ function AiosellPanel({ restaurantId, token }: { restaurantId: string; token: st
             <p className="text-xs text-[#6b5d52] mt-0.5">Bookings arrive automatically via webhook. Pull on demand or report a no-show.</p>
           </div>
           <div className="p-5 space-y-3">
+            {autoFetch && (
+              <div className="bg-[#f5f0ea] rounded-2xl p-4">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <div className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Automatic fetch</div>
+                    <p className="text-[12px] text-[#6b5d52] mt-0.5">Brings new OTA bookings from Aiosell into the calendar on a schedule, then updates availability on the other OTAs.</p>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm font-semibold text-[#1a1208] cursor-pointer">
+                    <input type="checkbox" checked={!!autoFetch.fetch_enabled} disabled={savingAutoFetch || !canWriteTab('CHANNEL_MANAGER')}
+                      onChange={e => saveAutoFetch({ fetch_enabled: e.target.checked ? 1 : 0 })} className="w-4 h-4 accent-brand" />
+                    {autoFetch.fetch_enabled ? 'On' : 'Off'}
+                  </label>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap mt-3 text-[12px] text-[#6b5d52]">
+                  <span>Every</span>
+                  <select value={autoFetch.fetch_interval_minutes} disabled={savingAutoFetch || !canWriteTab('CHANNEL_MANAGER')}
+                    onChange={e => saveAutoFetch({ fetch_interval_minutes: Number(e.target.value) })} className={fieldCls}>
+                    {[60, 120, 240, 360, 720, 1440].map(m => <option key={m} value={m}>{m / 60} hour{m === 60 ? '' : 's'}</option>)}
+                  </select>
+                  <span>covering bookings made in the last</span>
+                  <select value={autoFetch.fetch_lookback_days} disabled={savingAutoFetch || !canWriteTab('CHANNEL_MANAGER')}
+                    onChange={e => saveAutoFetch({ fetch_lookback_days: Number(e.target.value) })} className={fieldCls}>
+                    {[1, 3, 7, 14, 30].map(d => <option key={d} value={d}>{d} day{d === 1 ? '' : 's'}</option>)}
+                  </select>
+                </div>
+                <p className="text-[11px] text-[#9c8e85] mt-2">
+                  {autoFetch.last_fetch_at
+                    ? `Last run ${new Date(autoFetch.last_fetch_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}: ${autoFetch.last_fetch_summary || 'done'}.`
+                    : (autoFetch.fetch_enabled ? 'First run within the next few minutes.' : 'Not running.')}
+                  {' '}Bookings already imported are never duplicated.
+                </p>
+              </div>
+            )}
             <div>
-              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Fetch reservations</label>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Fetch reservations now</label>
+              <p className="text-[11px] text-[#9c8e85] mb-1.5">Dates are when the booking was <b>made</b> on the OTA, not the stay dates.</p>
               <div className="flex items-center gap-2 flex-wrap">
                 <input type="date" value={fetchFrom} onChange={e => setFetchFrom(e.target.value)} className={fieldCls} />
                 <span className="text-[#9c8e85]">→</span>

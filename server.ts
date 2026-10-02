@@ -47413,14 +47413,31 @@ ${data.tenant.name}`;
   function aiosellDefaultAutomation() {
     const events: Record<string, { ota: string; alert: number }> = {};
     for (const e of AIOSELL_EVENTS) events[e] = aiosellDefaultEvent(e);
-    return { live_enabled: 1, events, schedule_enabled: 1, schedule_interval_minutes: 30, schedule_days_ahead: AIOSELL_DEFAULT_DAYS, schedule_push_rates: 1, last_scheduled_at: null as string | null };
+    return { live_enabled: 1, events, schedule_enabled: 1, schedule_interval_minutes: 30, schedule_days_ahead: AIOSELL_DEFAULT_DAYS, schedule_push_rates: 1, last_scheduled_at: null as string | null,
+      // Scheduled reservation pull (Aiosell -> Atithi-Setu). ON by default every 2 hours
+      // over the last 3 days of BOOKING dates: Aiosell's push to the PMS was not
+      // reaching us at all (pconvention, Oct 2026), and an import is idempotent on
+      // the Aiosell booking id, so pulling is always safe.
+      fetch_enabled: 1, fetch_interval_minutes: 120, fetch_lookback_days: 3,
+      last_fetch_at: null as string | null, last_fetch_summary: null as string | null };
   }
+  const __aiosellAutoTableReady = new WeakSet<object>();
   async function aiosellEnsureAutomationTable(tenantDb: any) {
+    if (__aiosellAutoTableReady.has(tenantDb)) return;
     await tenantDb.run(`CREATE TABLE IF NOT EXISTS aiosell_automation (
       id TEXT PRIMARY KEY, live_enabled INTEGER DEFAULT 1, events_json TEXT,
       schedule_enabled INTEGER DEFAULT 1, schedule_interval_minutes INTEGER DEFAULT 30,
       schedule_days_ahead INTEGER DEFAULT 120, schedule_push_rates INTEGER DEFAULT 1,
       last_scheduled_at TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`).catch(() => {});
+    // Scheduled reservation pull settings (added Oct 2026).
+    for (const ddl of [
+      "ALTER TABLE aiosell_automation ADD COLUMN IF NOT EXISTS fetch_enabled INTEGER DEFAULT 1",
+      "ALTER TABLE aiosell_automation ADD COLUMN IF NOT EXISTS fetch_interval_minutes INTEGER DEFAULT 120",
+      "ALTER TABLE aiosell_automation ADD COLUMN IF NOT EXISTS fetch_lookback_days INTEGER DEFAULT 3",
+      "ALTER TABLE aiosell_automation ADD COLUMN IF NOT EXISTS last_fetch_at TIMESTAMP",
+      "ALTER TABLE aiosell_automation ADD COLUMN IF NOT EXISTS last_fetch_summary TEXT",
+    ]) await tenantDb.run(ddl).catch(() => {});
+    __aiosellAutoTableReady.add(tenantDb);
   }
   async function aiosellAutomationConfig(tenantDb: any): Promise<ReturnType<typeof aiosellDefaultAutomation>> {
     await aiosellEnsureAutomationTable(tenantDb);
@@ -47440,6 +47457,11 @@ ${data.tenant.name}`;
       schedule_days_ahead: Number(row.schedule_days_ahead || AIOSELL_DEFAULT_DAYS),
       schedule_push_rates: row.schedule_push_rates == null ? 1 : (row.schedule_push_rates ? 1 : 0),
       last_scheduled_at: row.last_scheduled_at || null,
+      fetch_enabled: row.fetch_enabled == null ? 1 : (row.fetch_enabled ? 1 : 0),
+      fetch_interval_minutes: Number(row.fetch_interval_minutes || 120),
+      fetch_lookback_days: Number(row.fetch_lookback_days || 3),
+      last_fetch_at: row.last_fetch_at ? (row.last_fetch_at instanceof Date ? row.last_fetch_at.toISOString() : String(row.last_fetch_at)) : null,
+      last_fetch_summary: row.last_fetch_summary || null,
     };
   }
 
@@ -49561,22 +49583,85 @@ ${data.tenant.name}`;
       res.json({ success: true, automation: cfg });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
+  app.get("/api/restaurant/:id/hotel/aiosell/auto-fetch", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    try {
+      const c = await aiosellAutomationConfig(await getTenantDb(req.params.id));
+      res.json({ fetch_enabled: c.fetch_enabled, fetch_interval_minutes: c.fetch_interval_minutes, fetch_lookback_days: c.fetch_lookback_days, last_fetch_at: c.last_fetch_at, last_fetch_summary: c.last_fetch_summary });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.put("/api/restaurant/:id/hotel/aiosell/auto-fetch", authenticate, hotelStaff, requireTabAction('CHANNEL_MANAGER', 'UPDATE'), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await aiosellEnsureAutomationTable(tenantDb);
+      const b = req.body || {};
+      const cur = await aiosellAutomationConfig(tenantDb);
+      const enabled = b.fetch_enabled === undefined ? cur.fetch_enabled : (b.fetch_enabled ? 1 : 0);
+      const interval = b.fetch_interval_minutes === undefined ? cur.fetch_interval_minutes : Math.min(1440, Math.max(60, Math.round(Number(b.fetch_interval_minutes) || 120)));
+      const lookback = b.fetch_lookback_days === undefined ? cur.fetch_lookback_days : Math.min(30, Math.max(1, Math.round(Number(b.fetch_lookback_days) || 3)));
+      // Insert a full default row if none exists yet, then touch only the pull columns.
+      await tenantDb.run(
+        `INSERT INTO aiosell_automation (id, live_enabled, events_json, schedule_enabled, schedule_interval_minutes, schedule_days_ahead, schedule_push_rates, updated_at)
+         VALUES ('DEFAULT', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING`,
+        [cur.live_enabled, JSON.stringify(cur.events), cur.schedule_enabled, cur.schedule_interval_minutes, cur.schedule_days_ahead, cur.schedule_push_rates]
+      );
+      await tenantDb.run("UPDATE aiosell_automation SET fetch_enabled = ?, fetch_interval_minutes = ?, fetch_lookback_days = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 'DEFAULT'", [enabled, interval, lookback]);
+      logAiosellSync(tenantDb, { direction: 'IN', operation: 'FETCH', trigger: 'manual', actor: req.user?.email || 'system', status: 'INFO',
+        summary: enabled ? `Automatic reservation pull switched on: every ${interval / 60 >= 1 && interval % 60 === 0 ? `${interval / 60} hour(s)` : `${interval} minutes`}, bookings made in the last ${lookback} day(s)` : 'Automatic reservation pull switched off' });
+      const c = await aiosellAutomationConfig(tenantDb);
+      res.json({ fetch_enabled: c.fetch_enabled, fetch_interval_minutes: c.fetch_interval_minutes, fetch_lookback_days: c.fetch_lookback_days, last_fetch_at: c.last_fetch_at, last_fetch_summary: c.last_fetch_summary });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Pull reservations from Aiosell for a BOOKING-date window and (optionally) import
+  // them. Shared by the Fetch now button and the scheduled pull. A booking imported
+  // for the first time goes through the same lifecycle as one made here
+  // (handleAiosellBookingEvent CREATED: availability re-sent to Aiosell + the owner
+  // alert when switched on), and one that cannot be placed is logged as FAIL, so an
+  // OTA booking we could not seat (overbooking risk) is never silent.
+  async function aiosellPullReservations(restaurantId: string, startDate: string, endDate: string, ingest: boolean, trigger: string, actor?: string | null): Promise<{ ok: boolean; status: number; error?: string; code?: string; list: AiosellReservation[]; ingested: number; created: number; failed: Array<{ bookingId: string; reason: string }> }> {
+    const tenantDb = await getTenantDb(restaurantId);
+    await aiosellEnsureCredCols(tenantDb, restaurantId);
+    const cfg = await aiosellCfgForTenant(tenantDb);
+    if (!aiosellConfigured(cfg)) return { ok: false, status: 400, error: 'Enter the Aiosell credentials for this property first.', list: [], ingested: 0, created: 0, failed: [] };
+    const t = await aiosellTenantConfig(tenantDb);
+    if (!t.hotelCode) return { ok: false, status: 400, error: 'Hotel code not set.', list: [], ingested: 0, created: 0, failed: [] };
+    const r = await aiosellFetchData(cfg, t.hotelCode, 'reservation', startDate, endDate);
+    if (!r.ok) return { ok: false, status: 400, error: r.message, code: 'AIOSELL_REJECTED', list: [], ingested: 0, created: 0, failed: [] };
+    const list: AiosellReservation[] = Array.isArray(r.data) ? r.data : (Array.isArray(r.data?.reservations) ? r.data.reservations : []);
+    let ingested = 0, created = 0;
+    const failed: Array<{ bookingId: string; reason: string }> = [];
+    if (ingest) for (const rv of list) {
+      const out: any = await aiosellIngestReservation(restaurantId, rv).catch((e: any) => ({ ok: false, reason: e?.message || 'import failed' }));
+      if (out.ok) {
+        ingested++;
+        if (!out.duplicate && out.booking_id && String(rv.action || 'book').toLowerCase() !== 'cancel') {
+          created++;
+          handleAiosellBookingEvent(restaurantId, 'CREATED', out.booking_id).catch(() => {});
+        }
+      } else {
+        failed.push({ bookingId: String(rv.bookingId || ''), reason: String(out.reason || 'import failed') });
+        logAiosellSync(tenantDb, {
+          direction: 'IN', operation: 'FETCH', trigger, actor: actor || 'system', status: 'FAIL',
+          summary: `Could not import ${String(rv.channel || 'OTA')} booking ${rv.bookingId || ''} for ${rv.checkin || ''} to ${rv.checkout || ''}`,
+          detail: String(out.reason || 'import failed'),
+        });
+      }
+    }
+    return { ok: true, status: 200, list, ingested, created, failed };
+  }
+
   app.post("/api/restaurant/:id/hotel/aiosell/fetch-reservations", authenticate, hotelStaff, requireTabAction('CHANNEL_MANAGER', 'CREATE'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id); if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      await aiosellEnsureCredCols(tenantDb, req.params.id);
-      const cfg = await aiosellCfgForTenant(tenantDb); if (!aiosellConfigured(cfg)) return res.status(400).json({ error: 'Enter the Aiosell credentials for this property first.' });
-      const t = await aiosellTenantConfig(tenantDb); if (!t.hotelCode) return res.status(400).json({ error: 'Hotel code not set.' });
       const startDate = String(req.body?.startDate || '').trim();
       const endDate = String(req.body?.endDate || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return res.status(400).json({ error: 'startDate and endDate (YYYY-MM-DD) required.' });
-      const r = await aiosellFetchData(cfg, t.hotelCode, 'reservation', startDate, endDate);
-      // 400, not 502 — see the property lookup above.
-      if (!r.ok) return res.status(400).json({ error: r.message, code: 'AIOSELL_REJECTED' });
-      const list: AiosellReservation[] = Array.isArray(r.data) ? r.data : (Array.isArray(r.data?.reservations) ? r.data.reservations : []);
-      let ingested = 0;
-      if (req.body?.ingest) for (const rv of list) { const out = await aiosellIngestReservation(req.params.id, rv).catch(() => ({ ok: false } as any)); if (out.ok) ingested++; }
+      // 400, not 502, on an Aiosell refusal (Cloudflare swallows 502 bodies).
+      const pull = await aiosellPullReservations(req.params.id, startDate, endDate, !!req.body?.ingest, 'manual', req.user?.email || null);
+      if (!pull.ok) return res.status(pull.status).json({ error: pull.error, ...(pull.code ? { code: pull.code } : {}) });
+      const list = pull.list;
+      const ingested = pull.ingested;
       logAiosellSync(tenantDb, { direction: 'IN', operation: 'FETCH', trigger: 'manual', actor: req.user?.email, status: 'OK', summary: `Pulled reservations ${startDate}→${endDate} — ${list.length} found${req.body?.ingest ? `, ${ingested} imported` : ''}` });
       res.json({ success: true, count: list.length, ingested, reservations: list });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
@@ -70031,6 +70116,26 @@ ${data.tenant.name}`;
           try {
             const tdb = await getTenantDb(h.restaurant_id);
             const cfg = await aiosellAutomationConfig(tdb);
+            // Scheduled reservation PULL (Aiosell -> Atithi-Setu), independent of the push.
+            if (cfg.fetch_enabled) {
+              const lastF = cfg.last_fetch_at ? new Date(cfg.last_fetch_at).getTime() : 0;
+              if (nowMs - lastF >= Math.max(60, cfg.fetch_interval_minutes) * 60 * 1000) {
+                const today = _todayIST();
+                const from = new Date(Date.parse(today + 'T00:00:00Z') - Math.max(1, cfg.fetch_lookback_days) * 86400000).toISOString().slice(0, 10);
+                const to = new Date(Date.parse(today + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+                let summary = '';
+                try {
+                  const pull = await aiosellPullReservations(h.restaurant_id, from, to, true, 'scheduled', 'system');
+                  summary = pull.ok
+                    ? `${pull.list.length} found, ${pull.created} new${pull.failed.length ? `, ${pull.failed.length} could not be imported` : ''}`
+                    : `Aiosell refused: ${pull.error || 'unknown error'}`;
+                  logAiosellSync(tdb, { direction: 'IN', operation: 'FETCH', trigger: 'scheduled', actor: 'system', status: pull.ok ? (pull.failed.length ? 'PARTIAL' : 'OK') : 'FAIL',
+                    summary: `Scheduled pull, bookings made ${from} to ${to}: ${summary}` });
+                } catch (e: any) { summary = `failed: ${e?.message || e}`; }
+                // Stamp even on failure so an outage is retried on the next interval, not every 5 minutes.
+                await tdb.run("UPDATE aiosell_automation SET last_fetch_at = CURRENT_TIMESTAMP, last_fetch_summary = ? WHERE id='DEFAULT'", [summary.slice(0, 300)]).catch(() => {});
+              }
+            }
             if (!cfg.schedule_enabled) continue;
             const lastMs = cfg.last_scheduled_at ? new Date(cfg.last_scheduled_at).getTime() : 0;
             const dueMs = Math.max(5, cfg.schedule_interval_minutes) * 60 * 1000;
@@ -71335,8 +71440,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-alert-wording',
+    commit_marker: 'aiosell-scheduled-reservation-pull',
     code_features: [
+      'aiosell-scheduled-reservation-pull  Aiosell was not pushing reservations to the PMS (pconvention, Oct 2026), so OTA bookings only arrived when someone pressed Fetch now. A scheduled pull now runs per property, ON by default every 2 hours over the last 3 days of booking dates (owner-set in Channel Manager, Reservations and ops: on/off, 1 to 24 hours, 1 to 30 days back), through the same idempotent import. A newly imported booking re-sends availability to Aiosell and fires the owner channel-manager alert like a booking made here; one that cannot be placed is logged as FAIL. GET/PUT /hotel/aiosell/auto-fetch (CHANNEL_MANAGER). Smoke: TC-AIOSELL-AUTOFETCH-CONFIG.',
       'aiosell-alert-wording  The channel-manager alert said only A booking was created, availability + rates re-synced to Aiosell, which owners read as an OTA booking arriving (pconvention, 2 Oct 2026: it was an Events booking). It now names the booking (guest, room, dates), where it came from (Front desk, Events, Your booking website, or <OTA> via Aiosell) and says the update went OUT to Aiosell, with an explicit line that it is not an OTA booking unless it came through Aiosell. A create now passes the booking id (taken from the reply body) so the alert can describe it.',
       'credit-note-report-sign  A hotel credit note is stored as a full POSITIVE copy of its invoice (doc_type CREDIT_NOTE, settled on issue) and its GL journal reverses the invoice. The P&L, GST ledger, hotel-sales, monthly-pnl and group-revenue added it as a sale (a credited bill counted twice: Sep 2026 GST ledger hotel Rs 2,19,353 against Rs 11,363 in the GL); night-audit and revenue-by-room-type left it out (the credited bill still counted); analytics subtracted it gross. All now count it negative on its own date (_folioSign), matching the ledger. hotel-sales also summed grand_total and gst_amount once per entry line (join fan-out); entries are now summed per folio first. The touched hotel reports cut IST days. The credit-note route posts a missing invoice journal first and refuses (409 INVOICE_NOT_IN_LEDGER) if it still cannot, before a serial is minted; a failed reversal is logged and returned as gl_warning. backfill-gl no longer posts credit notes (it booked them as sales). POST /api/admin/tenants/:id/gl/repair-credit-note-reversals (SUPER_ADMIN, dry_run default) posts a missing credit-note reversal dated on the credit note. Smoke: TC-CN-REPORT-SIGN-*.',
       'pnl-gst-ledger-ist-day-cut  The P&L and the GST ledger cut folios.settled_at and orders.created_at at IST midnight (_istDayRange), and default to the IST month. They cut at UTC midnight (05:30 IST), so a bill raised between 00:00 and 05:30 IST counted on the previous day, and on the 1st it moved into the previous month\'s GST sheet. The GST ledger also ended every month on day 31, which is not a date in a 30-day month or February: every query failed into its .catch and the sheet showed zero output tax for those months (September 2026 read Rs 0 against Rs 85,790 in the GL). It now ends on the real last day and refuses a malformed month with 400. invoice_date, entry_date and payroll periods are business dates and are not shifted. Smoke: TC-RPT-PNL-GST-IST-SOURCE, -MONTH-END, -CONSISTENT.',
