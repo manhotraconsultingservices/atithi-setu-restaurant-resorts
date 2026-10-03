@@ -12341,7 +12341,7 @@ async function startServer() {
                 COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
                 r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
                 (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at,
-                COALESCE(r.signup_source, CASE WHEN r.id LIKE 'RESTO\_%' THEN 'PUBLIC' WHEN r.sales_rep_id IS NOT NULL THEN 'SALES_REP' ELSE 'REGISTER_FORM' END) AS signup_source,
+                COALESCE(r.signup_source, CASE WHEN LEFT(r.id, 6) = 'RESTO_' THEN 'PUBLIC' WHEN r.sales_rep_id IS NOT NULL THEN 'SALES_REP' ELSE 'REGISTER_FORM' END) AS signup_source,
                 (r.signup_source IS NULL) AS signup_source_inferred, r.approved_at
            ${from} WHERE ${whereSql}
           ORDER BY ${SORT[sortKey]} ${dir} NULLS LAST, r.id
@@ -71659,7 +71659,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-signup-source-inference',
+    commit_marker: 'tenant-signup-source-inference-2',
     code_features: [
       'tenant-signup-source-inference  Older tenants have no recorded sign-up channel, and inferring it from sales_rep_id labelled every one as sales-rep onboarding because reps were assigned later. The account id is the reliable clue: self sign-up mints RESTO_<timestamp>_<rand>, the register and sales-rep form mints RESTO-<n>. Directory and tenant panel now infer from the id first.',
       'tenant-registration-record  The admin tenant directory now keeps each business registration record. Sign-up writes the channel (PUBLIC self-signup, SALES_REP onboarding or the REGISTER_FORM) and exactly what the owner entered; the first approval stamps approved_at and approved_by. A new Onboarding node in the tenant panel shows it with billing start, legacy expiry, cuisine and the owner account date, and the directory gains a Signed up column (date and channel). Older tenants have no record, so their channel is inferred from the sales rep and labelled as such; nothing is backfilled.',
