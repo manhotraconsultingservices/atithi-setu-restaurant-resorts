@@ -112,7 +112,8 @@ export async function tenantBillingProfile(rid: string): Promise<any | null> {
     name: clean(r.name) || clean(signup.business_name) || null,
     address: [clean(r.hotel_full_address), clean(r.city) || clean(signup.city)].filter(Boolean).join(', ') || null,
     state: realState(r.state) || realState(signup.state) || null,
-    gstin: clean(r.gst_number).toUpperCase() || null,
+    // Only a well-formed GSTIN is printed; junk like a test value means unregistered.
+    gstin: GSTIN_RE.test(clean(r.gst_number).toUpperCase()) ? clean(r.gst_number).toUpperCase() : null,
     email: clean(r.owner_email) || clean(signup.email) || null,
     phone: clean(r.owner_phone) || clean(signup.phone) || null,
   };
@@ -128,7 +129,7 @@ export async function tenantBillingProfile(rid: string): Promise<any | null> {
       name: clean(card?.bill_to_name) || defaults.name,
       address: clean(card?.bill_to_address) || defaults.address,
       state: clean(card?.bill_to_state) || defaults.state,
-      gstin: (clean(card?.bill_to_gstin) || defaults.gstin || '').toUpperCase() || null,
+      gstin: ((v: string) => GSTIN_RE.test(v) ? v : null)((clean(card?.bill_to_gstin) || defaults.gstin || '').toUpperCase()),
       email: clean(card?.bill_email) || defaults.email,
       phone: clean(card?.bill_phone) || defaults.phone,
       contact: r.owner_name || signup.owner_name || null,
@@ -297,9 +298,16 @@ export async function listInvoices(f: { restaurantId?: string; status?: string; 
   if (isYmd(f.from)) { where.push('i.issue_date >= ?'); params.push(f.from); }
   if (isYmd(f.to)) { where.push('i.issue_date <= ?'); params.push(f.to); }
   const rows: any[] = await centralDb.query(
-    `SELECT i.*, r.name AS tenant_name FROM platform_invoices i LEFT JOIN restaurants r ON r.id = i.restaurant_id
+    `SELECT i.*, r.name AS tenant_name,
+            (SELECT a.detail FROM platform_invoice_audit a WHERE a.invoice_id = i.id AND a.action IN ('SENT', 'RECEIPT_SENT') ORDER BY a.created_at DESC LIMIT 1) AS last_send_detail,
+            (SELECT a.created_at FROM platform_invoice_audit a WHERE a.invoice_id = i.id AND a.action IN ('SENT', 'RECEIPT_SENT') ORDER BY a.created_at DESC LIMIT 1) AS last_send_at
+       FROM platform_invoices i LEFT JOIN restaurants r ON r.id = i.restaurant_id
       WHERE ${where.join(' AND ')} ORDER BY i.created_at DESC LIMIT ${Math.min(2000, Math.max(1, f.limit || 500))}`, params).catch(() => []);
-  return rows.map(shapeInvoice);
+  return rows.map(r => {
+    let last_send: any[] = [];
+    try { last_send = r.last_send_detail ? JSON.parse(r.last_send_detail) : []; } catch { last_send = []; }
+    return { ...shapeInvoice(r), last_send, last_send_at: ts(r.last_send_at) };
+  });
 }
 
 // ── Token for the public invoice page ────────────────────────────────────────
@@ -542,8 +550,23 @@ export function registerPlatformBilling(app: Express, deps: PlatformBillingDeps)
         const g = computeGst(subtotal, { state: s.state, gstin: s.gstin }, { state: profile.bill_to.state, gstin: profile.bill_to.gstin }, num(s.gst_rate ?? 18));
         return { cycle: c, label: CYCLE_LABEL[c], subtotal, gst: g.tax, total: g.total, period: nextPeriod(profile.due_date, c, nowIstYmd()) };
       });
+      const lead = Math.max(1, Math.min(30, num(s.auto_invoice_lead_days || 7)));
+      const today = nowIstYmd();
+      const reasons: string[] = [];
+      if (!profile.card) reasons.push('the rate card has not been saved for this tenant (list prices are only a suggestion)');
+      else if (!Number(profile.card.auto_invoice ?? 1)) reasons.push('automatic invoicing is switched off on the rate card');
+      if (!profile.due_date) reasons.push('no subscription due date is set (Billing tab)');
+      if (Number(profile.is_active) !== 1) reasons.push('the tenant is not active');
+      if (settingsView(s).missing.length) reasons.push('PLM Pundits company details are incomplete');
+      const nextRun = profile.due_date ? (addDaysYmd(profile.due_date, -lead) < today ? today : addDaysYmd(profile.due_date, -lead)) : null;
+      const openRenewal: any = profile.due_date ? await centralDb.get("SELECT invoice_number FROM platform_invoices WHERE restaurant_id = ? AND kind = 'RENEWAL' AND period_from = ? AND status <> 'CANCELLED' LIMIT 1", [req.params.id, profile.due_date]).catch(() => null) : null;
+      const auto = {
+        active: reasons.length === 0, reasons, lead_days: lead, next_run: reasons.length ? null : nextRun,
+        already_raised: openRenewal?.invoice_number || null,
+        channels: { email: !!profile.bill_to.email, whatsapp: !!profile.bill_to.phone },
+      };
       res.json({
-        ...card, due_date: profile.due_date, property_type: profile.property_type,
+        ...card, due_date: profile.due_date, property_type: profile.property_type, auto,
         bill_to: profile.bill_to, defaults: profile.defaults, overrides: {
           bill_to_name: profile.card?.bill_to_name || '', bill_to_address: profile.card?.bill_to_address || '', bill_to_state: profile.card?.bill_to_state || '',
           bill_to_gstin: profile.card?.bill_to_gstin || '', bill_email: profile.card?.bill_email || '', bill_phone: profile.card?.bill_phone || '',

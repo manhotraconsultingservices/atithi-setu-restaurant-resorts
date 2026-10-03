@@ -9,7 +9,7 @@ import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { usePaymentDialog } from '../components/PaymentDialog';
 import { todayIST } from '../lib/utils';
-import { TenantInvoices } from './TenantInvoices';
+import { TenantInvoices, TenantRateCard } from './TenantInvoices';
 
 type TRow = any;
 const CHIPS: [string, string][] = [
@@ -377,7 +377,7 @@ function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }:
   const bv = (k: string) => (bill[k] !== undefined ? bill[k] : (k.endsWith('_date') ? d10(t[k]) : (t[k] ?? '')));
 
   return (
-    <Shell onClose={onClose} title={t.name} sub={<><Pill label={sl} tone={st} /><span className="font-mono">{t.id}</span><span>{[t.city, t.state].filter(Boolean).join(', ')}</span></>}
+    <Shell onClose={onClose} wide={tab === 'Invoices'} title={t.name} sub={<><Pill label={sl} tone={st} /><span className="font-mono">{t.id}</span><span>{[t.city, t.state].filter(Boolean).join(', ')}</span></>}
       actions={<>
         <button type="button" onClick={() => { navigator.clipboard?.writeText(t.id); toast.success('Tenant ID copied.'); }} className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><Copy size={13} />Copy ID</button>
         {t.slug && <a href={`https://${t.slug}.${apex}`} target="_blank" rel="noreferrer" className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><ExternalLink size={13} />Open site</a>}
@@ -507,7 +507,7 @@ function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }:
         </>);
       })()}
 
-      {tab === 'Invoices' && !isRep && <TenantInvoices tenantId={t.id} token={token} api={api} isSuper={isSuper} />}
+      {tab === 'Invoices' && !isRep && <TenantInvoices tenantId={t.id} token={token} api={api} isSuper={isSuper} onOpenBilling={() => setTab('Billing')} />}
 
       {tab === 'Billing' && (<>
         <div className="flex items-center gap-2"><Pill label={bl} tone={bt} />{Number(t.access_revoked) === 1 && t.access_revoked_reason && <span className="text-[12px] text-slate-500">Reason: {t.access_revoked_reason}</span>}</div>
@@ -526,6 +526,7 @@ function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }:
             ? <Btn off={off} onClick={async () => { if (await confirm({ title: `Restore access for ${t.name}?`, body: 'The property can sign in again straight away.', confirmLabel: 'Restore' })) run(() => api(`/api/admin/tenants/${t.id}/restore-access`, { method: 'POST' }), 'Access restored.'); }}>Restore access</Btn>
             : <Btn off={off} tone="danger" onClick={suspend}>Suspend access</Btn>}
         </div>
+        {!isRep && <TenantRateCard tenantId={t.id} api={api} isSuper={isSuper} />}
       </>)}
     </Shell>
   );
@@ -580,11 +581,11 @@ function Section({ title, action, children }: { title: string; action?: any; chi
 function KV({ k, v }: { k: string; v: any }) {
   return <><dt className="text-slate-500">{k}</dt><dd className="m-0 min-w-0 break-words">{v}</dd></>;
 }
-function Shell({ title, sub, actions, tabs, onClose, children }: { title: string; sub?: any; actions?: any; tabs?: any; onClose: () => void; children: any }) {
+function Shell({ title, sub, actions, tabs, onClose, children, wide = false }: { title: string; sub?: any; actions?: any; tabs?: any; onClose: () => void; children: any; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-slate-900/30" onClick={onClose} />
-      <aside role="dialog" aria-modal="true" aria-label={title} className="absolute top-0 right-0 bottom-0 w-full max-w-[580px] bg-white border-l border-slate-200 shadow-2xl flex flex-col text-slate-900">
+      <aside role="dialog" aria-modal="true" aria-label={title} className={`absolute top-0 right-0 bottom-0 w-full ${wide ? 'max-w-[1080px]' : 'max-w-[580px]'} bg-white transition-[max-width] border-l border-slate-200 shadow-2xl flex flex-col text-slate-900`}>
         <div className="px-5 pt-5 space-y-2.5">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0"><h2 className="text-[19px] font-semibold leading-tight">{title}</h2>{sub && <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[12.5px] text-slate-500">{sub}</div>}</div>
