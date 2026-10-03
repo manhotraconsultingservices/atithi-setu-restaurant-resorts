@@ -12341,7 +12341,7 @@ async function startServer() {
                 COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
                 r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
                 (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at,
-                COALESCE(r.signup_source, CASE WHEN r.sales_rep_id IS NOT NULL THEN 'SALES_REP' ELSE 'PUBLIC' END) AS signup_source,
+                COALESCE(r.signup_source, CASE WHEN r.id LIKE 'RESTO\_%' THEN 'PUBLIC' WHEN r.sales_rep_id IS NOT NULL THEN 'SALES_REP' ELSE 'REGISTER_FORM' END) AS signup_source,
                 (r.signup_source IS NULL) AS signup_source_inferred, r.approved_at
            ${from} WHERE ${whereSql}
           ORDER BY ${SORT[sortKey]} ${dir} NULLS LAST, r.id
@@ -12391,7 +12391,8 @@ async function startServer() {
       res.json({
         ...r, signup_details: signupDetails,
         // Rows from before the registration record existed: the channel is inferred.
-        signup_source: r.signup_source || (r.sales_rep_id ? 'SALES_REP' : 'PUBLIC'),
+        // Self sign-up mints RESTO_<ts>_<rand>; the register / sales-rep form mints RESTO-<n>.
+        signup_source: r.signup_source || (/^RESTO_/.test(String(r.id)) ? 'PUBLIC' : r.sales_rep_id ? 'SALES_REP' : 'REGISTER_FORM'),
         signup_source_inferred: !r.signup_source,
         counts: { staff_logins: Number(staff?.n || 0), rooms, halls },
       });
@@ -71658,8 +71659,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-registration-record',
+    commit_marker: 'tenant-signup-source-inference',
     code_features: [
+      'tenant-signup-source-inference  Older tenants have no recorded sign-up channel, and inferring it from sales_rep_id labelled every one as sales-rep onboarding because reps were assigned later. The account id is the reliable clue: self sign-up mints RESTO_<timestamp>_<rand>, the register and sales-rep form mints RESTO-<n>. Directory and tenant panel now infer from the id first.',
       'tenant-registration-record  The admin tenant directory now keeps each business registration record. Sign-up writes the channel (PUBLIC self-signup, SALES_REP onboarding or the REGISTER_FORM) and exactly what the owner entered; the first approval stamps approved_at and approved_by. A new Onboarding node in the tenant panel shows it with billing start, legacy expiry, cuisine and the owner account date, and the directory gains a Signed up column (date and channel). Older tenants have no record, so their channel is inferred from the sales rep and labelled as such; nothing is backfilled.',
       'platform-billing-p3  Automation and self-serve for tenant billing. A daily 09:15 IST run raises each tenant renewal invoice the configured days before its due date (saved rate card with auto-invoice on, preferred cycle) and sends it; admins can preview or run it from the console. The owner Subscription tab shows the price for each cycle with GST, raises an invoice for the cycle they choose (an open renewal for another cycle is cancelled and replaced), pays it on the public invoice page and lists the history; these routes stay open in read-only mode. Due-soon and overdue reminders now carry the open invoice number, amount and pay link, and the billing banner offers Pay now.',
       'platform-billing-p2  Tenants pay PLM Pundits online. Each invoice gets a Razorpay payment link on PLM Pundits own account (one live link per invoice, a fresh one when it expires). A signed webhook (raw-body HMAC, de-duplicated) and a 5-minute sweep re-read Razorpay, and a captured payment marks the invoice paid through the same markInvoicePaid as offline payments, moves the subscription due date, sends the owner a receipt and alerts the admin. Money for an invoice already paid or cancelled is kept on record and flagged for review. New public invoice page /?billing_invoice=<signed token>: view, PDF, Pay online, bank details; the tenant panel gains Payment link and Check payment.',
