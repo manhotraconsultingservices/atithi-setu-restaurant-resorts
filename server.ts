@@ -31804,6 +31804,57 @@ ${data.tenant.name}`;
     }));
   };
 
+  // POST /inventory/ledger-integrity/:ingId/record-opening — the one way to heal
+  // an item whose stock figure has no movements behind it (an opening balance
+  // never logged: the spa demo seed, the hotel fold). Adjust-stock and stock
+  // counts compute their change FROM the stock figure, so they carry the gap
+  // forward for ever; this writes the missing line instead. It books the gap
+  // (stock figure minus ledger) as one movement dated today and leaves the
+  // stock figure alone, so history then agrees with it; a normal stock count
+  // afterwards corrects the real quantity. Full inventory access for the item's
+  // module, a reason, refused inside a closed stock period, audited, and a
+  // no-op 409 once the two agree (the insert re-checks the gap itself).
+  app.post("/api/restaurant/:id/inventory/ledger-integrity/:ingId/record-opening", authenticate, inventoryStaff, async (req: AuthRequest, res: Response) => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (req.user?.restaurantId !== req.params.id && !['SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Not your property.' });
+    if (!(await _requireInvWrite(req, res, await _invItemModules(req, [req.params.ingId]), 3))) return;
+    const reason = String(req.body?.reason || '').trim();
+    if (reason.length < 5) return res.status(400).json({ error: 'Give a reason for the correction (at least 5 characters).', code: 'REASON_REQUIRED' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const [gap] = await _inventoryLedgerGaps(db, { sql: ' AND i.id = ?', params: [req.params.ingId] }, true);
+      if (!gap) {
+        const exists: any = await db.get("SELECT id FROM ingredients WHERE id = ?", [req.params.ingId]).catch(() => null);
+        return exists
+          ? res.status(409).json({ error: 'The stock figure and the movement history already agree.', code: 'NO_GAP' })
+          : res.status(404).json({ error: 'Item not found' });
+      }
+      if (await _blockIfClosed(res, db, [req.params.ingId], _todayIST())) return;
+      const movId = `MOV-LEDGERFIX-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const note = `Opening stock never recorded \u2014 history brought in line with the stock figure (${gap.gap > 0 ? '+' : ''}${gap.gap} ${gap.unit || ''}). ${reason}`.slice(0, 500);
+      const rows: any[] = await db.query(
+        `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+         SELECT ?::text, i.id, COALESCE(i.current_stock_qty, 0) - COALESCE((SELECT SUM(sm.qty_delta) FROM stock_movements sm WHERE sm.ingredient_id = i.id), 0),
+                i.unit, 'MANUAL', COALESCE(i.current_stock_qty, 0), ?::text, ?::text
+           FROM ingredients i
+          WHERE i.id = ?::text
+            AND ABS(COALESCE(i.current_stock_qty, 0) - COALESCE((SELECT SUM(sm.qty_delta) FROM stock_movements sm WHERE sm.ingredient_id = i.id), 0)) > ${_INV_LEDGER_TOLERANCE}
+         RETURNING id, qty_delta, balance_after`,
+        [movId, req.user!.id, note, req.params.ingId]
+      );
+      if (!rows.length) return res.status(409).json({ error: 'The stock figure and the movement history already agree.', code: 'NO_GAP' });
+      await writeObjectAudit(db, req, {
+        objectType: 'INVENTORY_ITEM', objectId: req.params.ingId, action: 'LEDGER_CORRECTED',
+        summary: `Missing opening stock recorded for ${gap.ingredient_name}: ${Number(rows[0].qty_delta)} ${gap.unit || ''}`,
+        before: { stock_qty: gap.stock_qty, ledger_qty: gap.ledger_qty }, after: { stock_qty: gap.stock_qty, ledger_qty: gap.stock_qty, movement_id: rows[0].id, reason },
+      }).catch(() => {});
+      res.json({ success: true, ingredient_id: req.params.ingId, movement_id: rows[0].id, recorded_qty: Number(rows[0].qty_delta), stock_qty: gap.stock_qty });
+    } catch (err: any) {
+      console.error('/inventory/ledger-integrity record-opening error:', err);
+      res.status(500).json({ error: 'Failed to record the missing opening stock' });
+    }
+  });
+
   // GET /inventory/ledger-integrity?module=&include_shared=1&include_inactive=1
   // Read-only. The items whose stock figure and movement ledger disagree; an
   // empty list is the healthy answer.
@@ -71571,8 +71622,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'aiosell-webhook-noauth-log',
+    commit_marker: 'inventory-ledger-record-opening',
     code_features: [
+      'inventory-ledger-record-opening  An item whose stock figure had no opening movement behind it (spa demo seed, hotel fold) could never be healed: adjust-stock and counts compute their change from the stock figure, so the gap carried forward for ever and the item stayed banded LEDGER_MISMATCH. New POST /inventory/ledger-integrity/:ingId/record-opening books the gap as one movement dated today without touching the stock figure (Full inventory access for the module, a reason, closed-period check, audited LEDGER_CORRECTED, 409 NO_GAP once healed, the insert re-checks the gap). Stock turns shows a Fix history button on flagged rows for roles allowed to use it.',
       'aiosell-webhook-noauth-log  A reservation push with no login was refused with no trace on our side, so Aiosell not attaching its credentials stayed invisible for days at pconvention. It now writes a red Sync Log line (and a NO_AUTH inbound attempt) telling the owner to ask Aiosell for Basic auth: after the reply, once per hotel code per 10 minutes, registered hotel codes only. The Sync Log also names the guest from firstName and lastName (it read a guest.name field Aiosell never sends, so every line said Guest).',
       'notif-retire-builtin-audiences  The Notifications event list still defaulted team messages to the retired built-in staff roles (Front Desk, Chef, Housekeeping, Waiter, Maintenance), which only one tenant still holds, so new switches created rows that reached nobody. Those defaults are gone (Owner, Manager and Guest stay); owners add their own custom roles per event. An old built-in role row that is still switched on stays visible and can be removed. The engine still delivers to built-in role names for staff who hold them. Manager notifications now also reach staff logins holding the Manager role, not only owner-level accounts, and the role counts sum both.',
       'notif-custom-role-recipients  Team notifications could only go to the built-in role names in the event catalogue (Front Desk, Housekeeping), which no staff member holds now that every login has a custom role, so those alerts reached nobody. Each event in Notifications, Automations now takes any of the property custom roles as extra team recipients, sharing the team channel switches, and every recipient role shows how many active staff it reaches. New GET /api/owner/notification-settings/roles; the save takes a remove list for custom-role rows and refuses a role that does not exist. NO_RECIPIENTS names a custom role by its name.',

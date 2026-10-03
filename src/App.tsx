@@ -35,7 +35,7 @@ import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
 import { tenantSlugFromHost } from '../tenantHost';
 import { EventsModule, EventBookingPage } from './EventViews';
-import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canWriteSuppliers, canSeeTab, firstOpenTab, canSeeFloorData } from './perm';
+import { canWriteTab, canDeleteTab, tabLevel, canWriteInventory, canDeleteInventory, canWriteSuppliers, canSeeTab, firstOpenTab, canSeeFloorData } from './perm';
 import { prettyRoleLabel, prettyTabLabel } from './roleLabel';
 import { computeTabVisibility, ACCOUNTS_MODULE_TABS, PEOPLE_MODULE_TABS } from './navVisibility';
 import { StaffPayrollGrid } from './StaffPayroll';
@@ -49290,10 +49290,38 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
   const [turnsDays, setTurnsDays] = useState(90);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [fixingId, setFixingId] = useState<string | null>(null);
+  const toast = useToast();
+  const showConfirm = useConfirm();
   const api = async (path: string) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, { headers: { Authorization: `Bearer ${token}` } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
+  };
+  // Heal a stock figure that has no movements behind it (an opening balance that
+  // was never logged): records the missing line so the history agrees with it.
+  const fixLedger = async (i: any) => {
+    if (!canDeleteInventory(module)) return;
+    const gap = Math.round((Number(i.stock_qty) - Number(i.on_hand_qty)) * 10000) / 10000;
+    const ok = await showConfirm({
+      title: `Fix the movement history for ${i.ingredient_name}?`,
+      body: `The stock figure says ${i.stock_qty} ${i.unit} but the movements add up to ${i.on_hand_qty} ${i.unit}. This records the missing opening stock (${gap > 0 ? '+' : ''}${gap} ${i.unit}) as one movement dated today, so the history agrees with the stock figure. The stock figure itself does not change: count the shelf afterwards and adjust if it is wrong.`,
+      confirmLabel: 'Record missing stock',
+    });
+    if (!ok) return;
+    setFixingId(i.ingredient_id);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ledger-integrity/${encodeURIComponent(i.ingredient_id)}/record-opening`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason: 'Corrected from Stock turns: opening stock was never recorded' }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      toast.success(`${i.ingredient_name}: history now matches the stock figure.`);
+      setReloadKey(k => k + 1);
+    } catch (e: any) { toast.error(e.message || 'Could not fix the history.'); }
+    finally { setFixingId(null); }
   };
   useEffect(() => {
     setLoading(true);
@@ -49331,7 +49359,7 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
       })
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restaurantId, module, includeShared, turnsDays]);
+  }, [restaurantId, module, includeShared, turnsDays, reloadKey]);
 
   if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
 
@@ -49443,7 +49471,15 @@ function InventoryAnalyticsView({ restaurantId, token, module, includeShared }: 
                           <td className="px-2 py-1.5 text-right font-mono text-[#6b5d52]">{i.avg_daily_qty ? `${i.avg_daily_qty} ${i.unit}` : '—'}</td>
                           <td className="px-2 py-1.5 text-right font-mono">{i.days_of_cover == null ? '—' : i.days_of_cover}</td>
                           <td className="px-2 py-1.5 text-right font-mono">{i.turns_annualised == null ? '—' : `${i.turns_annualised}x`}</td>
-                          <td className="px-2 py-1.5"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${b.cls}`}>{b.label}</span></td>
+                          <td className="px-2 py-1.5">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${b.cls}`}>{b.label}</span>
+                            {i.ledger_mismatch && canDeleteInventory(module) && (
+                              <button onClick={() => fixLedger(i)} disabled={fixingId === i.ingredient_id}
+                                className="ml-1.5 text-[10px] font-bold text-brand hover:underline disabled:opacity-50">
+                                {fixingId === i.ingredient_id ? 'Fixing…' : 'Fix history'}
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
