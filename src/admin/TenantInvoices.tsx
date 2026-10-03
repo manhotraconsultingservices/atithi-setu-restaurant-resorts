@@ -104,13 +104,18 @@ export function TenantInvoices({ tenantId, token, api, isSuper, onOpenBilling }:
     } catch (e: any) { toast.error(e.message); }
   };
   const share = async (inv: any) => {
-    const email = inv.buyer?.email, phone = inv.buyer?.phone;
+    // Sends go to the tenant's current billing contact, not the invoice snapshot.
+    const email = card?.bill_to?.email || inv.buyer?.email, phone = card?.bill_to?.phone || inv.buyer?.phone;
     const v = await prompt({ title: `Share ${inv.invoice_number}`,
       body: `Email: ${email || 'none on file'} · WhatsApp: ${phone || 'none on file — add a billing phone in Billing → Rate card'}`,
-      fields: [{ name: 'via', label: 'Send by', type: 'select', defaultValue: phone ? 'BOTH' : 'EMAIL', options: [{ value: 'BOTH', label: 'Email and WhatsApp' }, { value: 'EMAIL', label: 'Email only' }, { value: 'WHATSAPP', label: 'WhatsApp only' }] }], confirmLabel: 'Send' });
+      fields: [
+        { name: 'via', label: 'Send by', type: 'select', defaultValue: phone ? 'BOTH' : 'EMAIL', options: [{ value: 'BOTH', label: 'Email and WhatsApp' }, { value: 'EMAIL', label: 'Email only' }, { value: 'WHATSAPP', label: 'WhatsApp only' }] },
+        { name: 'to_email', label: 'Send to a different email (optional, this time only)', type: 'text', placeholder: email || 'name@example.com' },
+        { name: 'to_phone', label: 'Send to a different WhatsApp number (optional, this time only)', type: 'text', placeholder: 'India: 98765 43210 · US/Canada: +1 415 555 0123' },
+      ], confirmLabel: 'Send' });
     if (!v) return;
     const channels = v.via === 'BOTH' ? ['EMAIL', 'WHATSAPP'] : [v.via];
-    const r = await act(() => api(`/api/admin/platform-invoices/${inv.id}/send`, { method: 'POST', body: JSON.stringify({ channels }) }));
+    const r = await act(() => api(`/api/admin/platform-invoices/${inv.id}/send`, { method: 'POST', body: JSON.stringify({ channels, to_email: v.to_email || '', to_phone: v.to_phone || '' }) }));
     if (r) (r.sent || []).some((s: any) => !s.ok) ? toast.error(sentSummary(r.sent)) : toast.success(sentSummary(r.sent));
   };
   const copyLink = async (inv: any) => {
@@ -333,6 +338,7 @@ export function TenantRateCard({ tenantId, api, isSuper }: { tenantId: string; a
                     : missing && (k === 'bill_phone' || k === 'bill_email') ? <span className="text-[11px] font-semibold text-rose-700">needed to send invoices</span>
                     : (form[k] && def ? <button type="button" className="text-[11px] font-semibold text-brand" onClick={() => setForm({ ...form, [k]: def })}>Use profile value</button> : null)}</span>
                 <input disabled={off} placeholder={def ? '' : 'Not on the tenant profile'} value={form[k] ?? ''} onChange={e => setForm({ ...form, [k]: e.target.value })} className={`${INPUT} ${missing && (k === 'bill_phone' || k === 'bill_email') ? 'border-rose-300' : ''}`} />
+                {k === 'bill_phone' && <span className="text-[11.5px] text-slate-600">India: 10 digits, +91 is added. Any other country: start with + and the country code, e.g. +1 415 555 0123 (US / Canada).</span>}
               </label>
             );
           })}

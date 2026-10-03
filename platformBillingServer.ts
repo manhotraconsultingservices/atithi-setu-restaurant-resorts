@@ -405,10 +405,20 @@ async function logPlatformMessage(rid: string, channel: string, providerId: stri
     [providerId, rid, channel, templateName, eventName, status]).catch(() => {});
 }
 export interface SendOutcome { channel: string; ok: boolean; to?: string | null; error?: string }
-export async function sendInvoice(inv: any, channels: string[], origin: string, actor: string, kind: 'INVOICE' | 'RECEIPT' = 'INVOICE'): Promise<SendOutcome[]> {
+export async function sendInvoice(inv: any, channels: string[], origin: string, actor: string, kind: 'INVOICE' | 'RECEIPT' = 'INVOICE', override?: { email?: string | null; phone?: string | null }): Promise<SendOutcome[]> {
   const s = await getBillingSettings();
   const brand = s.brand_name || 'Atithi-Setu';
-  const to = inv.buyer || {};
+  // A one-off recipient replaces the tenant's address for this send only (the
+  // invoice itself is unchanged): "send me a copy", or a test to your own phone.
+  // Where to send is NOT part of the invoice: the buyer snapshot keeps the legal
+  // fields frozen, but email and WhatsApp follow the tenant's CURRENT billing
+  // contact, so a phone added after the invoice was raised is used.
+  const current = await tenantBillingProfile(inv.restaurant_id).catch(() => null);
+  const to = {
+    ...(inv.buyer || {}),
+    email: override?.email || current?.bill_to?.email || inv.buyer?.email || null,
+    phone: override?.phone || current?.bill_to?.phone || inv.buyer?.phone || null,
+  };
   const pageUrl = invoicePageUrl(origin, inv.id);
   const out: SendOutcome[] = [];
   const isReceipt = kind === 'RECEIPT' || inv.status === 'PAID';
@@ -439,15 +449,30 @@ export async function sendInvoice(inv: any, channels: string[], origin: string, 
     if (!to.phone) out.push({ channel: 'WHATSAPP', ok: false, error: 'No billing phone on this tenant' });
     else {
       const eventName = isReceipt ? 'PLATFORM_RECEIPT' : 'PLATFORM_INVOICE';
-      const map: any = await centralDb.get('SELECT template_name, language FROM wa_template_map WHERE event_name = ?', [eventName]).catch(() => null);
+      // Meta only accepts a business-initiated message as an approved template.
+      // Use the platform event's own template when one is mapped; otherwise the
+      // approved guest templates whose variables fit: payment_request (sender,
+      // name, amount, link) for an invoice, invoice_ready (sender, name, amount,
+      // number) for a receipt.
+      let map: any = await centralDb.get('SELECT template_name, language FROM wa_template_map WHERE event_name = ?', [eventName]).catch(() => null);
+      let fallback = false;
+      if (!map?.template_name) {
+        map = await centralDb.get('SELECT template_name, language FROM wa_template_map WHERE event_name = ?', [isReceipt ? 'HOTEL_INVOICE_SENT' : 'PAYMENT_LINK_SENT']).catch(() => null);
+        fallback = !!map?.template_name;
+      }
+      const rupee = (n: number) => '\u20b9' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
       const msg = isReceipt
         ? `${brand}: payment of ${money(inv.total)} received for invoice ${inv.invoice_number}. Thank you! Invoice: ${pageUrl}`
         : `${brand}: invoice ${inv.invoice_number} for ${money(inv.total)}${period} is due ${inv.due_date || ''}. View and pay online: ${pageUrl}`;
       const tpl = map?.template_name ? {
         name: map.template_name, languageCode: map.language || 'en',
-        variables: isReceipt
-          ? [to.business || to.name || 'Customer', inv.invoice_number, money(inv.total), pageUrl]
-          : [to.business || to.name || 'Customer', inv.invoice_number, money(inv.total), inv.due_date || '-', pageUrl],
+        variables: fallback
+          ? (isReceipt
+            ? [brand, to.business || to.name || 'Customer', rupee(inv.total), inv.invoice_number]
+            : [brand, to.business || to.name || 'Customer', rupee(inv.total), pageUrl])
+          : (isReceipt
+            ? [to.business || to.name || 'Customer', inv.invoice_number, money(inv.total), pageUrl]
+            : [to.business || to.name || 'Customer', inv.invoice_number, money(inv.total), inv.due_date || '-', pageUrl]),
       } : null;
       try {
         const r = await sendWhatsAppDetailed(to.phone, msg, tpl);
@@ -456,7 +481,7 @@ export async function sendInvoice(inv: any, channels: string[], origin: string, 
       } catch (e: any) { out.push({ channel: 'WHATSAPP', ok: false, to: to.phone, error: e?.message || 'WhatsApp failed' }); }
     }
   }
-  await auditInvoice(inv.id, isReceipt ? 'RECEIPT_SENT' : 'SENT', actor, out.map(o => ({ channel: o.channel, ok: o.ok, error: o.error })));
+  await auditInvoice(inv.id, isReceipt ? 'RECEIPT_SENT' : 'SENT', actor, out.map(o => ({ channel: o.channel, ok: o.ok, error: o.error, ...(override?.email || override?.phone ? { to: o.to, one_off: true } : {}) })));
   return out;
 }
 
@@ -693,7 +718,10 @@ export function registerPlatformBilling(app: Express, deps: PlatformBillingDeps)
       if (inv.status === 'CANCELLED') throw new BillingError('A cancelled invoice cannot be sent.', 409, 'INVOICE_CANCELLED');
       const channels = (Array.isArray(req.body?.channels) ? req.body.channels : ['EMAIL', 'WHATSAPP']).map((c: any) => String(c).toUpperCase()).filter((c: string) => ['EMAIL', 'WHATSAPP'].includes(c));
       if (!channels.length) throw new BillingError('Choose email, WhatsApp or both.', 400, 'NO_CHANNEL');
-      res.json({ sent: await sendInvoice(inv, channels, appOriginFromReq(req), actorOf(req)) });
+      const toEmail = clean(req.body?.to_email, 200), toPhone = clean(req.body?.to_phone, 30);
+      if (toEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(toEmail)) throw new BillingError('That email address does not look right.', 400, 'BAD_EMAIL');
+      if (toPhone && String(toPhone).replace(/[^0-9]/g, '').length < 10) throw new BillingError('Enter the WhatsApp number with at least 10 digits (add +country code outside India).', 400, 'BAD_PHONE');
+      res.json({ sent: await sendInvoice(inv, channels, appOriginFromReq(req), actorOf(req), inv.status === 'PAID' ? 'RECEIPT' : 'INVOICE', { email: toEmail || null, phone: toPhone || null }) });
     } catch (e) { fail(res, e); }
   });
   app.post('/api/admin/platform-invoices/:invId/cancel', authenticate, isAdmin, async (req: any, res) => {
