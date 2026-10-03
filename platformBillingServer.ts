@@ -94,7 +94,7 @@ export function razorpayCreds(s: any): Record<string, string> | null {
 // ── Tenant: who is billed ────────────────────────────────────────────────────
 export async function tenantBillingProfile(rid: string): Promise<any | null> {
   const r: any = await centralDb.get(
-    `SELECT r.id, r.name, r.city, r.state, r.gst_number, r.hotel_full_address, COALESCE(r.property_type, 'RESTAURANT') AS property_type,
+    `SELECT r.id, r.name, r.city, r.state, r.gst_number, r.hotel_full_address, r.signup_details, COALESCE(r.property_type, 'RESTAURANT') AS property_type,
             r.subscription_plan, r.subscription_due_date, r.is_active, COALESCE(r.access_revoked, 0) AS access_revoked,
             COALESCE(oa.owner_name, u.name) AS owner_name, COALESCE(oa.email, u.email, r.admin_id) AS owner_email,
             COALESCE(oa.phone_number, u.phone) AS owner_phone
@@ -104,18 +104,34 @@ export async function tenantBillingProfile(rid: string): Promise<any | null> {
       WHERE r.id = ?`, [rid]).catch(() => null);
   if (!r) return null;
   const card: any = await centralDb.get('SELECT * FROM tenant_rate_cards WHERE restaurant_id = ?', [rid]).catch(() => null);
+  let signup: any = {};
+  try { signup = r.signup_details ? JSON.parse(r.signup_details) : {}; } catch { signup = {}; }
+  // Self-signup stores the state as 'N/A'; that is no state at all.
+  const realState = (v: any) => { const t = clean(v); return t && !/^n\/?a$/i.test(t) ? t : ''; };
+  const defaults = {
+    name: clean(r.name) || clean(signup.business_name) || null,
+    address: [clean(r.hotel_full_address), clean(r.city) || clean(signup.city)].filter(Boolean).join(', ') || null,
+    state: realState(r.state) || realState(signup.state) || null,
+    gstin: clean(r.gst_number).toUpperCase() || null,
+    email: clean(r.owner_email) || clean(signup.email) || null,
+    phone: clean(r.owner_phone) || clean(signup.phone) || null,
+  };
   return {
     ...r,
     due_date: ymd(r.subscription_due_date),
     card,
+    // What the tenant's own profile and registration say. An admin override on
+    // the rate card wins field by field; a blank override follows the profile,
+    // so later profile changes keep reaching the invoice.
+    defaults,
     bill_to: {
-      name: clean(card?.bill_to_name) || r.name,
-      address: clean(card?.bill_to_address) || [r.hotel_full_address, r.city].filter(Boolean).join(', ') || null,
-      state: clean(card?.bill_to_state) || r.state || null,
-      gstin: (clean(card?.bill_to_gstin) || clean(r.gst_number)).toUpperCase() || null,
-      email: clean(card?.bill_email) || r.owner_email || null,
-      phone: clean(card?.bill_phone) || r.owner_phone || null,
-      contact: r.owner_name || null,
+      name: clean(card?.bill_to_name) || defaults.name,
+      address: clean(card?.bill_to_address) || defaults.address,
+      state: clean(card?.bill_to_state) || defaults.state,
+      gstin: (clean(card?.bill_to_gstin) || defaults.gstin || '').toUpperCase() || null,
+      email: clean(card?.bill_email) || defaults.email,
+      phone: clean(card?.bill_phone) || defaults.phone,
+      contact: r.owner_name || signup.owner_name || null,
     },
   };
 }
@@ -528,7 +544,7 @@ export function registerPlatformBilling(app: Express, deps: PlatformBillingDeps)
       });
       res.json({
         ...card, due_date: profile.due_date, property_type: profile.property_type,
-        bill_to: profile.bill_to, overrides: {
+        bill_to: profile.bill_to, defaults: profile.defaults, overrides: {
           bill_to_name: profile.card?.bill_to_name || '', bill_to_address: profile.card?.bill_to_address || '', bill_to_state: profile.card?.bill_to_state || '',
           bill_to_gstin: profile.card?.bill_to_gstin || '', bill_email: profile.card?.bill_email || '', bill_phone: profile.card?.bill_phone || '',
         },

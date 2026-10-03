@@ -16,6 +16,8 @@ const STATUS: Record<string, string> = { ISSUED: 'bg-amber-50 text-amber-800', P
 const STATUS_LABEL: Record<string, string> = { ISSUED: 'Payment due', PAID: 'Paid', CANCELLED: 'Cancelled' };
 const SOURCE_LABEL: Record<string, string> = { AUTO: 'System', ADMIN: 'Admin', TENANT: 'Tenant' };
 const INPUT = 'w-full h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] outline-none focus:border-brand disabled:bg-slate-50';
+// Rate-card override field → the tenant-profile field it falls back to.
+const BILL_TO_KEYS: [string, string][] = [['bill_to_name', 'name'], ['bill_to_gstin', 'gstin'], ['bill_to_address', 'address'], ['bill_to_state', 'state'], ['bill_email', 'email'], ['bill_phone', 'phone']];
 
 export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: string; token: string; api: Api; isSuper: boolean }) {
   const toast = useToast();
@@ -39,7 +41,11 @@ export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: st
     try {
       const [c, l] = await Promise.all([api(`/api/admin/tenants/${tenantId}/rate-card`), api(`/api/admin/tenants/${tenantId}/platform-invoices`)]);
       setCard(c);
-      setForm({ rate_monthly: c.rate_monthly, rate_quarterly: c.rate_quarterly, rate_yearly: c.rate_yearly, preferred_cycle: c.preferred_cycle, auto_invoice: c.auto_invoice, ...c.overrides });
+      // Bill-to fields open filled with the tenant's own details (profile +
+      // registration); a saved override shows instead where one exists.
+      const filled: any = {};
+      for (const [k, dk] of BILL_TO_KEYS) filled[k] = (c.overrides || {})[k] || (c.defaults || {})[dk] || '';
+      setForm({ rate_monthly: c.rate_monthly, rate_quarterly: c.rate_quarterly, rate_yearly: c.rate_yearly, preferred_cycle: c.preferred_cycle, auto_invoice: c.auto_invoice, ...filled });
       setRenewCycle(c.preferred_cycle || 'MONTHLY');
       setInvoices(l.invoices || []);
     } catch (e: any) { toast.error(e.message); }
@@ -55,7 +61,13 @@ export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: st
   };
   const off = busy || !isSuper;
 
-  const saveCard = () => act(() => api(`/api/admin/tenants/${tenantId}/rate-card`, { method: 'PUT', body: JSON.stringify(form) }), 'Rate card saved.');
+  // A bill-to value equal to the tenant's own detail is not an override: send it
+  // blank so the invoice keeps following the profile when the tenant updates it.
+  const saveCard = () => {
+    const body: any = { ...form };
+    for (const [k, dk] of BILL_TO_KEYS) if (String(body[k] || '').trim() === String((card?.defaults || {})[dk] || '').trim()) body[k] = '';
+    return act(() => api(`/api/admin/tenants/${tenantId}/rate-card`, { method: 'PUT', body: JSON.stringify(body) }), 'Rate card saved.');
+  };
   const addAddon = () => {
     if (!addon.description.trim() || !(Number(addon.monthly_amount) > 0)) { toast.error('Give the add-on a description and a monthly amount.'); return; }
     act(() => api(`/api/admin/tenants/${tenantId}/addons`, { method: 'POST', body: JSON.stringify(addon) }), 'Add-on added.').then(r => { if (r) setAddon({ description: '', monthly_amount: '' }); });
@@ -251,12 +263,18 @@ export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: st
         <button type="button" onClick={() => setShowBillTo(!showBillTo)} className="text-[12px] text-brand font-medium">{showBillTo ? 'Hide' : 'Edit'} bill-to details</button>
         {showBillTo && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {[['bill_to_name', 'Bill-to name', card.bill_to?.name], ['bill_to_gstin', 'GSTIN', card.bill_to?.gstin], ['bill_to_address', 'Address', card.bill_to?.address], ['bill_to_state', 'State', card.bill_to?.state], ['bill_email', 'Billing email', card.bill_to?.email], ['bill_phone', 'Billing WhatsApp / phone', card.bill_to?.phone]].map(([k, l, ph]) => (
-              <label key={k as string} className="flex flex-col gap-1 text-[12px] text-slate-500">{l}
-                <input disabled={off} placeholder={ph || ''} value={form[k as string] ?? ''} onChange={e => setForm({ ...form, [k as string]: e.target.value })} className={INPUT} />
-              </label>
-            ))}
-            <div className="sm:col-span-2 text-[11px] text-slate-400">Left blank, each falls back to the business and owner details shown in grey.</div>
+            {([['bill_to_name', 'Bill-to name'], ['bill_to_gstin', 'GSTIN'], ['bill_to_address', 'Address'], ['bill_to_state', 'State'], ['bill_email', 'Billing email'], ['bill_phone', 'Billing WhatsApp / phone']] as [string, string][]).map(([k, l]) => {
+              const dk = (BILL_TO_KEYS.find(x => x[0] === k) || [k, k])[1];
+              const def = String((card.defaults || {})[dk] || '');
+              const fromProfile = !!def && String(form[k] || '').trim() === def.trim();
+              return (
+                <label key={k} className="flex flex-col gap-1 text-[12px] text-slate-500">
+                  <span className="flex items-center justify-between gap-2">{l}{fromProfile ? <span className="text-[10px] text-slate-400">from tenant profile</span> : (form[k] && def ? <button type="button" className="text-[10px] text-brand" onClick={() => setForm({ ...form, [k]: def })}>Use profile value</button> : null)}</span>
+                  <input disabled={off} placeholder={def ? '' : 'Not on the tenant profile'} value={form[k] ?? ''} onChange={e => setForm({ ...form, [k]: e.target.value })} className={INPUT} />
+                </label>
+              );
+            })}
+            <div className="sm:col-span-2 text-[11px] text-slate-400">Filled from the tenant's profile and registration. Change a field only to bill differently; an unchanged field keeps following the profile.</div>
           </div>
         )}
         {isSuper && <button type="button" disabled={busy} onClick={saveCard} className="h-8 px-3 rounded-lg bg-brand text-white text-[12.5px] font-medium disabled:opacity-40">Save rate card</button>}

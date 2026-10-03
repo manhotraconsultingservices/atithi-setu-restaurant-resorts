@@ -34,6 +34,8 @@ const TONE: Record<string, string> = {
   info: 'bg-sky-50 text-sky-700', mute: 'bg-slate-100 text-slate-600',
 };
 const TYPE_LABEL: Record<string, string> = { RESTAURANT: 'Restaurant', HOTEL: 'Hotel', BOTH: 'Hotel + Restaurant' };
+// How the business signed up (restaurants.signup_source).
+const SOURCE_LABEL: Record<string, string> = { PUBLIC: 'Self sign-up', SALES_REP: 'Sales rep', REGISTER_FORM: 'Registration form' };
 const PLANS = [['', '—'], ['STARTER', 'Starter'], ['PROFESSIONAL', 'Professional'], ['MULTI_OUTLET', 'Multi-outlet'], ['BOUTIQUE', 'Boutique'], ['RESORT', 'Resort']];
 
 const d10 = (v: any) => (v ? String(v).slice(0, 10) : '');
@@ -125,7 +127,7 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
   ];
 
   const exportCsv = (rows: TRow[]) => {
-    const cols = ['id', 'name', 'city', 'state', 'property_type', 'owner_name', 'owner_email', 'owner_phone', 'subscription_plan', 'subscription_due_date', 'billing_status', 'sales_rep_name', 'last_active_at', 'is_active'];
+    const cols = ['id', 'name', 'city', 'state', 'property_type', 'owner_name', 'owner_email', 'owner_phone', 'registered_at', 'signup_source', 'approved_at', 'subscription_plan', 'subscription_due_date', 'billing_status', 'sales_rep_name', 'last_active_at', 'is_active'];
     const esc = (v: any) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const csv = [cols.join(','), ...rows.map(r => cols.map(k => esc(r[k])).join(','))].join('\n');
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
@@ -222,15 +224,16 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
                 <SortTh k="due" sort={sort} onSort={sortBy}>Plan · due</SortTh>
                 <SortTh k="billing" sort={sort} onSort={sortBy}>Billing</SortTh>
                 <SortTh k="rep" sort={sort} onSort={sortBy}>Sales rep</SortTh>
+                <SortTh k="joined" sort={sort} onSort={sortBy}>Signed up</SortTh>
                 <SortTh k="active" sort={sort} onSort={sortBy}>Last active</SortTh>
                 <SortTh k="status" sort={sort} onSort={sortBy}>Status</SortTh>
               </tr>
             </thead>
             <tbody className="text-[13px]">
               {loading && !data.rows.length ? (
-                <tr><td colSpan={10} className="py-14 text-center text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={11} className="py-14 text-center text-slate-400">Loading…</td></tr>
               ) : !data.rows.length ? (
-                <tr><td colSpan={10} className="py-14 text-center text-slate-500">No tenant matches. Try a shorter search or another filter.</td></tr>
+                <tr><td colSpan={11} className="py-14 text-center text-slate-500">No tenant matches. Try a shorter search or another filter.</td></tr>
               ) : data.rows.map(r => {
                 const [sl, st] = statusOf(r); const [bl, bt] = BILL[r.billing_status] || ['—', 'mute'];
                 return (
@@ -244,6 +247,7 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
                     <td className="px-3"><div className="font-medium">{PLANS.find(p => p[0] === r.subscription_plan)?.[1] || r.subscription_plan || '—'}</div><div className="font-mono text-[12px] text-slate-500">{fmtDate(r.subscription_due_date)}</div></td>
                     <td className="px-3"><Pill label={bl} tone={bt} /></td>
                     <td className="px-3">{r.sales_rep_name || <span className="text-slate-400">Unassigned</span>}</td>
+                    <td className="px-3"><div className="font-mono text-[12px] text-slate-600 whitespace-nowrap">{fmtDate(r.registered_at)}</div><div className="text-[11px] text-slate-400" title={r.signup_source_inferred ? 'Signed up before the channel was recorded — inferred from the sales rep' : undefined}>{SOURCE_LABEL[r.signup_source] || r.signup_source || ''}{r.signup_source_inferred ? '*' : ''}</div></td>
                     <td className="px-3 font-mono text-[12px] text-slate-600">{ago(r.last_active_at)}</td>
                     <td className="px-3"><Pill label={sl} tone={st} /></td>
                   </tr>
@@ -278,7 +282,7 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
 }
 
 // ── Side panel for one tenant ────────────────────────────────────────────────
-const TABS = ['Overview', 'Modules', 'Owner & access', 'Billing', 'Invoices', 'Maintenance'] as const;
+const TABS = ['Overview', 'Onboarding', 'Modules', 'Owner & access', 'Billing', 'Invoices', 'Maintenance'] as const;
 function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }: { id: string; token: string; api: (p: string, i?: RequestInit) => Promise<any>; role: string; reps: any[]; onClose: () => void; onChanged: () => void; onTool?: (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => void }) {
   const toast = useToast();
   const confirm = useConfirm();
@@ -470,6 +474,38 @@ function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }:
           </div>
         )}
       </>)}
+
+      {tab === 'Onboarding' && (() => {
+        const sd = t.signup_details || null;
+        const when = (v: any) => { if (!v) return '—'; const d = new Date(v); return isNaN(d.getTime()) ? String(v) : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); };
+        return (<>
+          <Section title="Registration">
+            <KV k="Signed up" v={when(t.registered_at)} />
+            <KV k="Channel" v={<>{SOURCE_LABEL[t.signup_source] || t.signup_source || '—'}{t.signup_source_inferred && <span className="text-[11.5px] text-slate-400"> · inferred (signed up before the channel was recorded)</span>}</>} />
+            <KV k="Sales rep" v={t.sales_rep_name || 'Unassigned'} />
+            <KV k="Approved" v={t.approved_at ? <>{when(t.approved_at)}{t.approved_by ? <span className="text-slate-500"> · by {t.approved_by}</span> : null}</> : (Number(t.is_active) === 0 ? 'Waiting for approval' : <span className="text-slate-400">Not recorded (approved before Oct 2026)</span>)} />
+            <KV k="Owner account created" v={when(t.owner_account_created_at)} />
+            <KV k="Billing starts" v={fmtDate(t.billing_start_date)} />
+            {t.subscription_expires_at && <KV k="Trial / legacy expiry" v={fmtDate(t.subscription_expires_at)} />}
+          </Section>
+          <Section title="What the owner entered at sign-up">
+            {sd ? (<>
+              <KV k="Owner name" v={sd.owner_name || '—'} />
+              <KV k="Email" v={sd.email || '—'} />
+              <KV k="Phone" v={sd.phone || '—'} />
+              <KV k="Business name" v={sd.business_name || '—'} />
+              <KV k="Business type" v={TYPE_LABEL[sd.property_type] || sd.property_type || TYPE_LABEL[t.property_type] || '—'} />
+              <KV k="City" v={sd.city || '—'} />
+              {sd.state && <KV k="State" v={sd.state} />}
+              <KV k="Cuisine" v={sd.cuisine_type || t.cuisine_type || '—'} />
+            </>) : (<>
+              <KV k="Recorded form" v={<span className="text-slate-400">Not recorded — this business signed up before Oct 2026</span>} />
+              <KV k="Cuisine" v={t.cuisine_type || '—'} />
+              <KV k="Business type" v={TYPE_LABEL[t.property_type] || t.property_type} />
+            </>)}
+          </Section>
+        </>);
+      })()}
 
       {tab === 'Invoices' && !isRep && <TenantInvoices tenantId={t.id} token={token} api={api} isSuper={isSuper} />}
 

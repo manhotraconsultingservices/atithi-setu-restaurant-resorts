@@ -12340,7 +12340,9 @@ async function startServer() {
                 COALESCE(r.whatsapp_enabled, 0) AS whatsapp, COALESCE(r.accounts_enabled, 0) AS accounts, COALESCE(r.people_enabled, 0) AS people,
                 COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
                 r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
-                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at
+                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at,
+                COALESCE(r.signup_source, CASE WHEN r.sales_rep_id IS NOT NULL THEN 'SALES_REP' ELSE 'PUBLIC' END) AS signup_source,
+                (r.signup_source IS NULL) AS signup_source_inferred, r.approved_at
            ${from} WHERE ${whereSql}
           ORDER BY ${SORT[sortKey]} ${dir} NULLS LAST, r.id
           LIMIT ? OFFSET ?`, [...params, limit, (page - 1) * limit]);
@@ -12366,7 +12368,10 @@ async function startServer() {
                 COALESCE(u.name, oa.owner_name) AS owner_name, COALESCE(u.email, oa.email) AS owner_email, COALESCE(u.phone, oa.phone_number) AS owner_phone,
                 r.sales_rep_id, sr.name AS sales_rep_name, r.subscription_plan, r.subscription_due_date, r.grace_period_days,
                 r.last_payment_date, r.last_payment_amount, r.last_payment_reference, r.billing_notes,
-                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at
+                (${_DIR_BILLING}) AS billing_status, r.last_active_at, r.registered_at,
+                r.signup_source, r.signup_details, r.approved_at, r.approved_by, r.billing_start_date, r.subscription_expires_at,
+                COALESCE(r.country, 'IN') AS country, oa.created_at AS owner_account_created_at,
+                (SELECT ore.cuisine_type FROM owner_restaurants ore WHERE ore.restaurant_id = r.id ORDER BY ore.added_at LIMIT 1) AS cuisine_type
            FROM restaurants r
            LEFT JOIN LATERAL (SELECT name, email, phone FROM users WHERE restaurant_id = r.id AND role = 'OWNER' ORDER BY id LIMIT 1) u ON TRUE
            LEFT JOIN owner_accounts oa ON LOWER(oa.email) = LOWER(r.admin_id)
@@ -12381,7 +12386,15 @@ async function startServer() {
         rooms = Number((await db.get("SELECT COUNT(*)::int AS n FROM rooms").catch(() => ({ n: 0 })))?.n || 0);
         halls = Number((await db.get("SELECT COUNT(*)::int AS n FROM event_venues WHERE is_active = 1").catch(() => ({ n: 0 })))?.n || 0);
       } catch { /* tenant schema not ready */ }
-      res.json({ ...r, counts: { staff_logins: Number(staff?.n || 0), rooms, halls } });
+      let signupDetails: any = null;
+      try { signupDetails = r.signup_details ? JSON.parse(r.signup_details) : null; } catch { signupDetails = null; }
+      res.json({
+        ...r, signup_details: signupDetails,
+        // Rows from before the registration record existed: the channel is inferred.
+        signup_source: r.signup_source || (r.sales_rep_id ? 'SALES_REP' : 'PUBLIC'),
+        signup_source_inferred: !r.signup_source,
+        counts: { staff_logins: Number(staff?.n || 0), rooms, halls },
+      });
     } catch (err: any) {
       console.error('[admin] tenant overview failed:', err);
       res.status(500).json({ error: 'Failed to load the tenant' });
@@ -12616,6 +12629,10 @@ async function startServer() {
       // Check previous status before updating (to detect pending→active transition)
       const prev = await centralDb.get("SELECT is_active, name, admin_id FROM restaurants WHERE id = ?", [req.params.id]);
       await centralDb.run("UPDATE restaurants SET is_active = ? WHERE id = ?", [is_active, req.params.id]);
+      if (Number(is_active) === 1 && prev && Number(prev.is_active) === 0) {
+        await centralDb.run("UPDATE restaurants SET approved_at = COALESCE(approved_at, NOW()), approved_by = COALESCE(approved_by, ?) WHERE id = ?",
+          [String((req.user as any)?.email || (req.user as any)?.name || req.user?.id || req.user?.role || 'admin'), req.params.id]).catch(() => {});
+      }
 
       // If activating a previously pending (is_active=0) restaurant, send approval email
       if (is_active === 1 && prev && prev.is_active === 0) {
@@ -16248,10 +16265,13 @@ async function startServer() {
 
       // Insert into legacy restaurants table — is_active=0 (pending admin approval)
       await centralDb.run(
-        `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at, slug, property_type)
-         VALUES (?, ?, ?, ?, ?, 0, NOW(), ?, ?)
+        `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at, slug, property_type, signup_source, signup_details)
+         VALUES (?, ?, ?, ?, ?, 0, NOW(), ?, ?, 'PUBLIC', ?)
          ON CONFLICT (id) DO NOTHING`,
-        [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim(), newSlug, propertyType]
+        [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim(), newSlug, propertyType,
+         // What the owner typed on the sign-up form, kept as entered (registration record).
+         JSON.stringify({ owner_name: owner_name || null, email: email.toLowerCase(), phone: phone || null, business_name: restaurant_name.trim(),
+           city: location_city.trim(), cuisine_type: cuisine_type || null, property_type: propertyType })]
       );
 
       // New tenant: stamp the billing start date + ping the admin group on Telegram.
@@ -67744,9 +67764,11 @@ ${data.tenant.name}`;
       const repCreatedSlug = await generateUniqueSlug(restaurantName);
 
       await centralDb.run(`
-        INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id, registered_at, subscription_expires_at, slug)
-        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-      `, [restaurantId, restaurantName, userId, state, city, sales_rep_id || null, now, expiresAt.toISOString(), repCreatedSlug]);
+        INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id, registered_at, subscription_expires_at, slug, signup_source, signup_details)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+      `, [restaurantId, restaurantName, userId, state, city, sales_rep_id || null, now, expiresAt.toISOString(), repCreatedSlug,
+          sales_rep_id ? 'SALES_REP' : 'REGISTER_FORM',
+          JSON.stringify({ owner_name: name || null, email: email || null, phone: phone || null, business_name: restaurantName, state: state || null, city: city || null, sales_rep_id: sales_rep_id || null })]);
 
       await centralDb.run(`
         INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role)
@@ -71636,8 +71658,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'platform-billing-p3',
+    commit_marker: 'tenant-registration-record',
     code_features: [
+      'tenant-registration-record  The admin tenant directory now keeps each business registration record. Sign-up writes the channel (PUBLIC self-signup, SALES_REP onboarding or the REGISTER_FORM) and exactly what the owner entered; the first approval stamps approved_at and approved_by. A new Onboarding node in the tenant panel shows it with billing start, legacy expiry, cuisine and the owner account date, and the directory gains a Signed up column (date and channel). Older tenants have no record, so their channel is inferred from the sales rep and labelled as such; nothing is backfilled.',
       'platform-billing-p3  Automation and self-serve for tenant billing. A daily 09:15 IST run raises each tenant renewal invoice the configured days before its due date (saved rate card with auto-invoice on, preferred cycle) and sends it; admins can preview or run it from the console. The owner Subscription tab shows the price for each cycle with GST, raises an invoice for the cycle they choose (an open renewal for another cycle is cancelled and replaced), pays it on the public invoice page and lists the history; these routes stay open in read-only mode. Due-soon and overdue reminders now carry the open invoice number, amount and pay link, and the billing banner offers Pay now.',
       'platform-billing-p2  Tenants pay PLM Pundits online. Each invoice gets a Razorpay payment link on PLM Pundits own account (one live link per invoice, a fresh one when it expires). A signed webhook (raw-body HMAC, de-duplicated) and a 5-minute sweep re-read Razorpay, and a captured payment marks the invoice paid through the same markInvoicePaid as offline payments, moves the subscription due date, sends the owner a receipt and alerts the admin. Money for an invoice already paid or cancelled is kept on record and flagged for review. New public invoice page /?billing_invoice=<signed token>: view, PDF, Pay online, bank details; the tenant panel gains Payment link and Check payment.',
       'platform-billing-p1  PLM Pundits (brand Atithi-Setu) now invoices its tenants. New central tables for seller settings (Razorpay keys sealed), a negotiated rate card per tenant (monthly, quarterly, yearly prices before GST), recurring add-on lines, GST tax invoices (consecutive per-FY serial, CGST+SGST same state else IGST, never deleted: cancel keeps the row and number), lines, payments and an audit log. Admin console: Platform billing settings, Tenant invoices register (CSV for GSTR-1), and an Invoices node in each tenant panel to raise renewal or on-demand invoices, share them by email (PDF attached) or WhatsApp, copy the link, mark paid offline (moves the subscription due date) or cancel with a reason. platformBilling.ts holds the pure maths, platformInvoicePdf.ts the PDF.',

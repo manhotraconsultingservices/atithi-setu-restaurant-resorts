@@ -349,6 +349,13 @@ export async function initDb() {
   // Migration: add restaurant settings columns to existing deployments
   await centralDb.exec(`
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS gst_number TEXT;
+    -- Registration record (Oct 2026): how the business signed up, what the owner
+    -- entered, and who approved it. Older rows have none of these; the admin
+    -- console infers their channel from sales_rep_id and labels it as inferred.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS signup_source TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS signup_details TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS approved_by TEXT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS gst_percentage DOUBLE PRECISION DEFAULT 5;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS is_gst_enabled INT DEFAULT 0;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS template_id TEXT DEFAULT 'CLASSIC';
