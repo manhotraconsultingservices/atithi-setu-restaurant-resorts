@@ -129,6 +129,9 @@ export async function generatePlatformInvoicePdf(d: PlatformInvoicePdfData): Pro
       // ── Billed by / Billed to (equal-height boxes) ───────────────────────
       const bw = (W - 12) / 2;
       const party = (title: string, name: string, lines: string[]) => ({ title, name, lines: lines.filter(Boolean) });
+      // A buyer GSTIN in the wrong format (e.g. a test value saved on an older
+      // invoice) is not a GSTIN: print the buyer as unregistered.
+      const buyerGstin = /^\d{2}[A-Z0-9]{13}$/i.test(String(d.buyer.gstin || '').trim()) ? String(d.buyer.gstin).trim().toUpperCase() : null;
       const seller = party('BILLED BY', d.seller.name || 'PLM Pundits', [
         d.seller.address || '', [d.seller.city, d.seller.pincode].filter(Boolean).join(' '), `State: ${withCode(d.seller.state, d.seller.gstin)}`,
         d.seller.gstin ? `GSTIN: ${d.seller.gstin}` : '', d.seller.pan ? `PAN: ${d.seller.pan}` : '', [d.seller.email, d.seller.phone].filter(Boolean).join('  ·  '),
@@ -136,7 +139,7 @@ export async function generatePlatformInvoicePdf(d: PlatformInvoicePdfData): Pro
       const buyer = party('BILLED TO', d.buyer.business || d.buyer.name || 'Customer', [
         d.buyer.business && d.buyer.name && d.buyer.name !== d.buyer.business ? `Attn: ${d.buyer.name}` : '',
         d.buyer.address || '', `State: ${withCode(d.buyer.state, d.buyer.gstin)}`,
-        d.buyer.gstin ? `GSTIN: ${d.buyer.gstin}` : 'GSTIN: Unregistered', [d.buyer.email, d.buyer.phone].filter(Boolean).join('  ·  '),
+        buyerGstin ? `GSTIN: ${buyerGstin}` : 'GSTIN: Unregistered', [d.buyer.email, d.buyer.phone].filter(Boolean).join('  ·  '),
       ]);
       const partyH = (p: any) => {
         doc.font('Helvetica-Bold').fontSize(10.5); let h = 22 + doc.heightOfString(p.name, { width: bw - 20 }) + 4;
