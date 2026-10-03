@@ -441,7 +441,7 @@ const VERTICAL_LABEL: Record<string, string> = {
   EVENT_PLAN: 'Event planning', RETAIL: 'Shopping & retail', FINANCE: 'Finance & banking', EDU: 'Education', HEALTH: 'Medical & health', BEAUTY: 'Beauty, spa & salon',
   ENTERTAIN: 'Entertainment', GROCERY: 'Food & grocery', AUTO: 'Automotive', APPAREL: 'Clothing & apparel', GOVT: 'Public service', NONPROFIT: 'Non-profit', NOT_A_BIZ: 'Not a business',
 };
-const NAME_STATUS: Record<string, string> = { APPROVED: 'Approved', AVAILABLE_WITHOUT_REVIEW: 'Live (not reviewed)', DECLINED: 'Declined', EXPIRED: 'Expired', PENDING_REVIEW: 'In review', NONE: 'Not set', NON_EXISTS: 'No approved display name yet — request one in WhatsApp Manager' };
+const NAME_STATUS: Record<string, string> = { APPROVED: 'Approved', AVAILABLE_WITHOUT_REVIEW: 'Live (not reviewed)', DECLINED: 'Declined', EXPIRED: 'Expired', PENDING_REVIEW: 'In review', NONE: 'Not set', NON_EXISTS: 'Set (no review on record)' };
 
 // Square, small JPEG for the profile photo (Meta shows it as a circle).
 async function toSquareJpeg(file: File, size = 640): Promise<string> {
@@ -505,7 +505,8 @@ function BusinessProfileCard({ token }: { token: string }) {
           <p className="text-[13.5px] text-slate-700">What guests and tenants see when they tap the number <b>{p.display_phone_number || ''}</b>.</p>
           <div className="mt-2 flex flex-wrap gap-2 text-[12.5px]">
             <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 font-medium">Display name: <b>{p.verified_name || '—'}</b></span>
-            <span className={`px-2 py-0.5 rounded-full font-medium ${p.name_status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>{NAME_STATUS[p.name_status] || p.name_status || 'Unknown'}</span>
+            <span title={p.name_status === 'NON_EXISTS' ? 'Meta shows this name on the profile. It was set when the number was registered and has no separate review record.' : undefined}
+              className={`px-2 py-0.5 rounded-full font-medium ${['APPROVED', 'AVAILABLE_WITHOUT_REVIEW', 'NON_EXISTS'].includes(p.name_status) && p.verified_name ? 'bg-emerald-100 text-emerald-800' : p.name_status === 'DECLINED' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-900'}`}>{NAME_STATUS[p.name_status] || p.name_status || 'Unknown'}</span>
             {p.quality_rating && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 font-medium">Quality: {String(p.quality_rating).toLowerCase()}</span>}
           </div>
           <label className="mt-3 inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-slate-300 bg-white text-[13px] font-semibold text-slate-800 cursor-pointer">
