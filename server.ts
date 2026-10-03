@@ -18,6 +18,7 @@ import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, Adap
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
 import { generateReceiptVoucherPdf } from "./receiptVoucherPdf.ts";
+import { registerPlatformBilling } from "./platformBillingServer.ts";
 import { generateRefundVoucherPdf } from "./refundVoucherPdf.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
 import {
@@ -69913,6 +69914,9 @@ ${data.tenant.name}`;
   };
 
   // Admin: list all tenants with billing status
+  // Platform billing (Oct 2026): PLM Pundits invoices its tenants; see platformBillingServer.ts.
+  registerPlatformBilling(app as any, { authenticate, isAdmin, isAdminOrCto, notifyPlatformAdmin, appOriginFromReq });
+
   app.get("/api/admin/tenants/billing", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
     try {
       const rows: any[] = await centralDb.query(`
@@ -71622,8 +71626,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-ledger-record-opening',
+    commit_marker: 'platform-billing-p1',
     code_features: [
+      'platform-billing-p1  PLM Pundits (brand Atithi-Setu) now invoices its tenants. New central tables for seller settings (Razorpay keys sealed), a negotiated rate card per tenant (monthly, quarterly, yearly prices before GST), recurring add-on lines, GST tax invoices (consecutive per-FY serial, CGST+SGST same state else IGST, never deleted: cancel keeps the row and number), lines, payments and an audit log. Admin console: Platform billing settings, Tenant invoices register (CSV for GSTR-1), and an Invoices node in each tenant panel to raise renewal or on-demand invoices, share them by email (PDF attached) or WhatsApp, copy the link, mark paid offline (moves the subscription due date) or cancel with a reason. platformBilling.ts holds the pure maths, platformInvoicePdf.ts the PDF.',
       'inventory-ledger-record-opening  An item whose stock figure had no opening movement behind it (spa demo seed, hotel fold) could never be healed: adjust-stock and counts compute their change from the stock figure, so the gap carried forward for ever and the item stayed banded LEDGER_MISMATCH. New POST /inventory/ledger-integrity/:ingId/record-opening books the gap as one movement dated today without touching the stock figure (Full inventory access for the module, a reason, closed-period check, audited LEDGER_CORRECTED, 409 NO_GAP once healed, the insert re-checks the gap). Stock turns shows a Fix history button on flagged rows for roles allowed to use it.',
       'aiosell-webhook-noauth-log  A reservation push with no login was refused with no trace on our side, so Aiosell not attaching its credentials stayed invisible for days at pconvention. It now writes a red Sync Log line (and a NO_AUTH inbound attempt) telling the owner to ask Aiosell for Basic auth: after the reply, once per hotel code per 10 minutes, registered hotel codes only. The Sync Log also names the guest from firstName and lastName (it read a guest.name field Aiosell never sends, so every line said Guest).',
       'notif-retire-builtin-audiences  The Notifications event list still defaulted team messages to the retired built-in staff roles (Front Desk, Chef, Housekeeping, Waiter, Maintenance), which only one tenant still holds, so new switches created rows that reached nobody. Those defaults are gone (Owner, Manager and Guest stay); owners add their own custom roles per event. An old built-in role row that is still switched on stays visible and can be removed. The engine still delivers to built-in role names for staff who hold them. Manager notifications now also reach staff logins holding the Manager role, not only owner-level accounts, and the role counts sum both.',

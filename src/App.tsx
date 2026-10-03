@@ -30,6 +30,7 @@ import { DataLoaderSpa, DataLoaderEvents } from './DataLoaderModules';
 import { TenantDirectory, type ConsoleTool } from './admin/TenantDirectory';
 import { ConsoleShell } from './admin/ConsoleShell';
 import { SubscriptionPrices } from './admin/SubscriptionPrices';
+import { PlatformBillingSettings, PlatformInvoiceRegister } from './admin/PlatformBilling';
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
@@ -55036,7 +55037,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'APPROVALS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'SUBSCRIPTIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'WHATSAPP' | 'PRINT_AGENTS'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'APPROVALS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'SUBSCRIPTIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE' | 'ADMIN_ALERTS' | 'WHATSAPP' | 'PRINT_AGENTS' | 'PLATFORM_BILLING' | 'PLATFORM_INVOICES'>('RESTAURANTS');
   // Console menu counts (from the directory) and a request to open one tenant's
   // panel — set by the Ctrl K finder.
   const [dirCounts, setDirCounts] = useState<any>({});
@@ -56031,12 +56032,14 @@ function SuperAdminDashboard({ token }: { token: string }) {
           { key: 'RESTAURANTS', label: 'Directory', count: dirCounts.ALL },
           { key: 'APPROVALS', label: 'Approvals', count: dirCounts.PENDING, tone: 'warn' },
           { key: 'BILLING', label: 'Billing & renewals', count: dirCounts.OVERDUE, tone: 'crit' },
+          { key: 'PLATFORM_INVOICES', label: 'Tenant invoices' },
         ] },
         { label: 'Platform', items: [
           { key: 'USERS', label: 'Internal users' },
           { key: 'LOCATIONS', label: 'Locations' },
           { key: 'PERMISSIONS', label: 'Role access' },
           { key: 'SUBSCRIPTIONS', label: 'Subscription prices' },
+          { key: 'PLATFORM_BILLING', label: 'Platform billing' },
         ] },
         { label: 'Operations', items: [
           { key: 'PRINT_AGENTS', label: 'Print agents' },
@@ -56058,6 +56061,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
           onTool={openConsoleTool} />
       ) : viewMode === 'SUBSCRIPTIONS' ? (
         <SubscriptionPrices token={token} />
+      ) : viewMode === 'PLATFORM_BILLING' ? (
+        <PlatformBillingSettings token={token} canEdit />
+      ) : viewMode === 'PLATFORM_INVOICES' ? (
+        <PlatformInvoiceRegister token={token} onOpenTenant={id => { setViewMode('RESTAURANTS'); setOpenTenantReq({ id, n: Date.now() }); }} />
       ) : viewMode === 'USERS' ? (
         <div className="space-y-6">
           <div className="flex justify-between items-center">

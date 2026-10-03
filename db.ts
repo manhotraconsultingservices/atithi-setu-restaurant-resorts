@@ -444,6 +444,78 @@ export async function initDb() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_by TEXT
     );
+    -- Platform billing (Oct 2026): PLM Pundits (brand Atithi-Setu) invoices its
+    -- tenants. One settings row (seller identity + its own Razorpay account,
+    -- secrets sealed), a negotiated rate card and add-on lines per tenant, and
+    -- GST tax invoices that are never deleted (cancel keeps the row and number).
+    CREATE TABLE IF NOT EXISTS platform_billing_settings (
+      id TEXT PRIMARY KEY,
+      legal_name TEXT, brand_name TEXT, gstin TEXT, pan TEXT,
+      address TEXT, city TEXT, state TEXT, pincode TEXT, email TEXT, phone TEXT,
+      sac_code TEXT DEFAULT '998314', gst_rate NUMERIC(5,2) DEFAULT 18,
+      invoice_prefix TEXT DEFAULT 'PLM', auto_invoice_lead_days INT DEFAULT 7, link_expiry_days INT DEFAULT 15,
+      rzp_key_id TEXT, rzp_key_secret_sealed TEXT, rzp_webhook_secret_sealed TEXT, rzp_mode TEXT,
+      bank_account_name TEXT, bank_account_number TEXT, bank_ifsc TEXT, bank_name TEXT, upi_vpa TEXT,
+      verified_at TIMESTAMP, last_test_detail TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS tenant_rate_cards (
+      restaurant_id TEXT PRIMARY KEY,
+      preferred_cycle TEXT DEFAULT 'MONTHLY',
+      rate_monthly NUMERIC(12,2), rate_quarterly NUMERIC(12,2), rate_yearly NUMERIC(12,2),
+      auto_invoice INT DEFAULT 1,
+      bill_to_name TEXT, bill_to_address TEXT, bill_to_state TEXT, bill_to_gstin TEXT, bill_email TEXT, bill_phone TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS tenant_addon_lines (
+      id TEXT PRIMARY KEY, restaurant_id TEXT NOT NULL, description TEXT NOT NULL,
+      monthly_amount NUMERIC(12,2) NOT NULL DEFAULT 0, is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenant_addons_rid ON tenant_addon_lines(restaurant_id);
+    CREATE TABLE IF NOT EXISTS platform_invoices (
+      id TEXT PRIMARY KEY, invoice_number TEXT UNIQUE, restaurant_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'RENEWAL', cycle TEXT, period_from DATE, period_to DATE,
+      extends_subscription INT DEFAULT 0, status TEXT NOT NULL DEFAULT 'ISSUED',
+      issue_date DATE, due_date DATE,
+      subtotal NUMERIC(12,2) DEFAULT 0, cgst NUMERIC(12,2) DEFAULT 0, sgst NUMERIC(12,2) DEFAULT 0,
+      igst NUMERIC(12,2) DEFAULT 0, gst_rate NUMERIC(5,2) DEFAULT 0, total NUMERIC(12,2) DEFAULT 0,
+      seller_json TEXT, buyer_json TEXT, place_of_supply TEXT, notes TEXT,
+      source TEXT DEFAULT 'ADMIN', created_by TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      paid_at TIMESTAMP, paid_amount NUMERIC(12,2), payment_ref TEXT,
+      cancelled_at TIMESTAMP, cancelled_by TEXT, cancel_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_platform_invoices_rid ON platform_invoices(restaurant_id, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_invoice_renewal ON platform_invoices(restaurant_id, period_from) WHERE kind = 'RENEWAL' AND status <> 'CANCELLED';
+    CREATE TABLE IF NOT EXISTS platform_invoice_lines (
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL, line_no INT DEFAULT 1, description TEXT NOT NULL,
+      sac TEXT, qty NUMERIC(12,3) DEFAULT 1, rate NUMERIC(12,2) DEFAULT 0, amount NUMERIC(12,2) DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_platform_invoice_lines_inv ON platform_invoice_lines(invoice_id);
+    CREATE TABLE IF NOT EXISTS platform_payment_links (
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL, gateway TEXT DEFAULT 'RAZORPAY', mode TEXT,
+      gateway_link_id TEXT, url TEXT, amount_paise BIGINT, status TEXT DEFAULT 'CREATING',
+      expires_at TIMESTAMP, sent_channels TEXT, last_checked_at TIMESTAMP, last_error TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, paid_at TIMESTAMP, cancelled_at TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_platform_links_inv ON platform_payment_links(invoice_id);
+    CREATE TABLE IF NOT EXISTS platform_payments (
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL, link_id TEXT, gateway TEXT NOT NULL,
+      gateway_payment_id TEXT NOT NULL, amount_paise BIGINT NOT NULL, fee_paise BIGINT, tax_paise BIGINT,
+      method TEXT, source TEXT, reference TEXT, paid_at TIMESTAMP, recorded_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (gateway, gateway_payment_id)
+    );
+    CREATE TABLE IF NOT EXISTS platform_webhook_events (
+      id TEXT PRIMARY KEY, gateway TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT,
+      link_id TEXT, outcome TEXT, detail TEXT, received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (gateway, event_id)
+    );
+    CREATE TABLE IF NOT EXISTS platform_invoice_audit (
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL, action TEXT NOT NULL,
+      actor TEXT, detail TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_platform_invoice_audit_inv ON platform_invoice_audit(invoice_id, created_at);
     -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
     -- exact India / GST / ₹ behaviour for every pre-existing tenant.
     --   country         ISO-3166 alpha-2, selects the default tax preset.

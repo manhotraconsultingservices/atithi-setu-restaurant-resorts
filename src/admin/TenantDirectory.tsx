@@ -9,6 +9,7 @@ import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { usePaymentDialog } from '../components/PaymentDialog';
 import { todayIST } from '../lib/utils';
+import { TenantInvoices } from './TenantInvoices';
 
 type TRow = any;
 const CHIPS: [string, string][] = [
@@ -271,14 +272,14 @@ export function TenantDirectory({ token, role, fixedChip, heading, blurb, openRe
         </div>
       </div>
 
-      {openId && <TenantPanel id={openId} api={api} role={role} reps={data.reps} onClose={() => setOpenId(null)} onChanged={load} onTool={onTool} />}
+      {openId && <TenantPanel id={openId} token={token} api={api} role={role} reps={data.reps} onClose={() => setOpenId(null)} onChanged={load} onTool={onTool} />}
     </div>
   );
 }
 
 // ── Side panel for one tenant ────────────────────────────────────────────────
-const TABS = ['Overview', 'Modules', 'Owner & access', 'Billing', 'Maintenance'] as const;
-function TenantPanel({ id, api, role, reps, onClose, onChanged, onTool }: { id: string; api: (p: string, i?: RequestInit) => Promise<any>; role: string; reps: any[]; onClose: () => void; onChanged: () => void; onTool?: (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => void }) {
+const TABS = ['Overview', 'Modules', 'Owner & access', 'Billing', 'Invoices', 'Maintenance'] as const;
+function TenantPanel({ id, token, api, role, reps, onClose, onChanged, onTool }: { id: string; token: string; api: (p: string, i?: RequestInit) => Promise<any>; role: string; reps: any[]; onClose: () => void; onChanged: () => void; onTool?: (tool: ConsoleTool, tenantId: string, module?: 'HOTEL' | 'SPA' | 'EVENTS') => void }) {
   const toast = useToast();
   const confirm = useConfirm();
   const prompt = usePaymentDialog();
@@ -378,7 +379,7 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged, onTool }: { id: 
         {t.slug && <a href={`https://${t.slug}.${apex}`} target="_blank" rel="noreferrer" className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><ExternalLink size={13} />Open site</a>}
         {isHotel && <a href={`/book/${t.booking_slug || t.id}`} target="_blank" rel="noreferrer" className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12.5px] inline-flex items-center gap-1.5"><ExternalLink size={13} />Booking page</a>}
       </>}
-      tabs={<div className="flex gap-1 border-b border-slate-200 px-3 overflow-x-auto" role="tablist">{TABS.map(x => (
+      tabs={<div className="flex gap-1 border-b border-slate-200 px-3 overflow-x-auto" role="tablist">{TABS.filter(x => x !== 'Invoices' || !isRep).map(x => (
         <button key={x} type="button" role="tab" aria-selected={tab === x} onClick={() => setTab(x)}
           className={`px-2 py-2.5 text-[13px] border-b-2 whitespace-nowrap ${tab === x ? 'border-brand text-slate-900 font-semibold' : 'border-transparent text-slate-500'}`}>{x}</button>
       ))}</div>}>
@@ -469,6 +470,8 @@ function TenantPanel({ id, api, role, reps, onClose, onChanged, onTool }: { id: 
           </div>
         )}
       </>)}
+
+      {tab === 'Invoices' && !isRep && <TenantInvoices tenantId={t.id} token={token} api={api} isSuper={isSuper} />}
 
       {tab === 'Billing' && (<>
         <div className="flex items-center gap-2"><Pill label={bl} tone={bt} />{Number(t.access_revoked) === 1 && t.access_revoked_reason && <span className="text-[12px] text-slate-500">Reason: {t.access_revoked_reason}</span>}</div>
