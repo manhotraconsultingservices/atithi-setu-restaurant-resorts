@@ -161,6 +161,7 @@ export function PlatformWhatsApp({ token, events }: { token: string; events: { i
 
   return (
     <div className="space-y-6">
+      {cfg.connected !== false && <BusinessProfileCard token={token} />}
       <div className={`${CARD} max-w-3xl`}>
         <h3 className="text-xl font-bold flex items-center gap-2"><MessageCircle size={20} className="text-emerald-600" /> WhatsApp sender</h3>
         <div className={`mt-4 px-4 py-3 rounded-xl text-sm border ${statusCls}`}>{statusText}{cfg.verified_name ? ` ${cfg.verified_name}${cfg.display_phone_number ? ` · ${cfg.display_phone_number}` : ''}.` : ''}</div>
@@ -428,6 +429,107 @@ function MessagingCostReport({ token }: { token: string }) {
       )}
       <div className="mt-4">
         <DataTable data={rows} columns={columns} rowKey={r => r.restaurant_id} columnChooser columnFilters tableId="admin-messaging-cost" exportFilename="messaging-cost-by-tenant" emptyMessage={data ? 'No messages in this period.' : 'Loading…'} />
+      </div>
+    </div>
+  );
+}
+
+
+// ── Business profile: what people see when they tap the sender's number ─────
+const VERTICAL_LABEL: Record<string, string> = {
+  UNDEFINED: 'Not set', OTHER: 'Other', PROF_SERVICES: 'Professional services', HOTEL: 'Hotel & lodging', RESTAURANT: 'Restaurant', TRAVEL: 'Travel & transport',
+  EVENT_PLAN: 'Event planning', RETAIL: 'Shopping & retail', FINANCE: 'Finance & banking', EDU: 'Education', HEALTH: 'Medical & health', BEAUTY: 'Beauty, spa & salon',
+  ENTERTAIN: 'Entertainment', GROCERY: 'Food & grocery', AUTO: 'Automotive', APPAREL: 'Clothing & apparel', GOVT: 'Public service', NONPROFIT: 'Non-profit', NOT_A_BIZ: 'Not a business',
+};
+const NAME_STATUS: Record<string, string> = { APPROVED: 'Approved', AVAILABLE_WITHOUT_REVIEW: 'Live (not reviewed)', DECLINED: 'Declined', EXPIRED: 'Expired', PENDING_REVIEW: 'In review', NONE: 'Not set' };
+
+// Square, small JPEG for the profile photo (Meta shows it as a circle).
+async function toSquareJpeg(file: File, size = 640): Promise<string> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('That file is not an image.')); i.src = url; });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const c = document.createElement('canvas'); c.width = size; c.height = size;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, size, size);
+    ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    return c.toDataURL('image/jpeg', 0.9);
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function BusinessProfileCard({ token }: { token: string }) {
+  const toast = useToast();
+  const [p, setP] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [f, setF] = useState<any>({});
+  const [busy, setBusy] = useState(false);
+  const call = async (path: string, init: RequestInit = {}) => {
+    const r = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b?.error || `Request failed (${r.status})`);
+    return b;
+  };
+  const load = async () => {
+    try { const d = await call('/api/admin/whatsapp/business-profile'); setP(d); setF({ ...d, website1: d.websites?.[0] || '', website2: d.websites?.[1] || '' }); setErr(''); }
+    catch (e: any) { setErr(e.message); }
+  };
+  useEffect(() => { load(); }, [token]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await call('/api/admin/whatsapp/business-profile', { method: 'PUT', body: JSON.stringify({ about: f.about, description: f.description, address: f.address, email: f.email, vertical: f.vertical, websites: [f.website1, f.website2].filter(Boolean) }) });
+      toast.success('WhatsApp profile updated.'); await load();
+    } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+  const upload = async (file?: File | null) => {
+    if (!file) return;
+    setBusy(true);
+    try { const image = await toSquareJpeg(file); await call('/api/admin/whatsapp/business-profile/photo', { method: 'POST', body: JSON.stringify({ image }) }); toast.success('Logo updated. WhatsApp can take a few minutes to show it.'); await load(); }
+    catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+  };
+  const field = 'w-full h-10 rounded-lg border border-slate-300 bg-white px-3 text-[14px] text-slate-900 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600';
+  const lab = 'text-[12.5px] font-semibold text-slate-800';
+  if (err) return <div className={`${CARD} max-w-3xl`}><h3 className="text-xl font-bold text-slate-900">WhatsApp business profile</h3><p className="text-sm text-rose-700 mt-2">{err}</p></div>;
+  if (!p) return <div className={`${CARD} max-w-3xl`}><p className="text-sm text-slate-600">Loading WhatsApp profile…</p></div>;
+  const counter = (v: string, max: number) => <span className={`text-[11.5px] ${String(v || '').length > max ? 'text-rose-700' : 'text-slate-500'}`}>{String(v || '').length}/{max}</span>;
+  return (
+    <div className={`${CARD} max-w-3xl space-y-4`}>
+      <div className="flex items-start gap-4 flex-wrap">
+        <div className="relative">
+          {p.profile_picture_url
+            ? <img src={p.profile_picture_url} alt="WhatsApp profile logo" className="w-20 h-20 rounded-full object-cover border border-slate-200" />
+            : <div className="w-20 h-20 rounded-full bg-slate-100 border border-slate-200 grid place-items-center text-[11px] text-slate-500 text-center px-2">No logo</div>}
+        </div>
+        <div className="flex-1 min-w-[220px]">
+          <h3 className="text-xl font-bold text-slate-900">WhatsApp business profile</h3>
+          <p className="text-[13.5px] text-slate-700">What guests and tenants see when they tap the number <b>{p.display_phone_number || ''}</b>.</p>
+          <div className="mt-2 flex flex-wrap gap-2 text-[12.5px]">
+            <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 font-medium">Display name: <b>{p.verified_name || '—'}</b></span>
+            <span className={`px-2 py-0.5 rounded-full font-medium ${p.name_status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>{NAME_STATUS[p.name_status] || p.name_status || 'Unknown'}</span>
+            {p.quality_rating && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-800 font-medium">Quality: {String(p.quality_rating).toLowerCase()}</span>}
+          </div>
+          <label className="mt-3 inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-slate-300 bg-white text-[13px] font-semibold text-slate-800 cursor-pointer">
+            {busy ? <RefreshCw size={14} className="animate-spin" /> : null}{p.profile_picture_url ? 'Change logo' : 'Upload logo'}
+            <input type="file" accept="image/png,image/jpeg" className="hidden" disabled={busy} onChange={e => { upload(e.target.files?.[0]); e.target.value = ''; }} />
+          </label>
+          <span className="ml-2 text-[12px] text-slate-600">Square works best; it is cropped to a circle.</span>
+        </div>
+      </div>
+      <div className="grid md:grid-cols-2 gap-3">
+        <label className="flex flex-col gap-1 md:col-span-2"><span className="flex justify-between"><span className={lab}>About (one line)</span>{counter(f.about, 139)}</span>
+          <input className={field} value={f.about || ''} onChange={e => setF({ ...f, about: e.target.value })} placeholder="Hotel & restaurant software by PLM Pundits" /></label>
+        <label className="flex flex-col gap-1 md:col-span-2"><span className="flex justify-between"><span className={lab}>Description</span>{counter(f.description, 512)}</span>
+          <textarea rows={3} className={`${field} h-auto py-2`} value={f.description || ''} onChange={e => setF({ ...f, description: e.target.value })} /></label>
+        <label className="flex flex-col gap-1"><span className={lab}>Category</span>
+          <select className={field} value={f.vertical || 'UNDEFINED'} onChange={e => setF({ ...f, vertical: e.target.value })}>{(p.verticals || []).map((v: string) => <option key={v} value={v}>{VERTICAL_LABEL[v] || v}</option>)}</select></label>
+        <label className="flex flex-col gap-1"><span className={lab}>Email</span><input className={field} value={f.email || ''} onChange={e => setF({ ...f, email: e.target.value })} placeholder="billing@atithi-setu.com" /></label>
+        <label className="flex flex-col gap-1"><span className={lab}>Website</span><input className={field} value={f.website1 || ''} onChange={e => setF({ ...f, website1: e.target.value })} placeholder="https://atithi-setu.com" /></label>
+        <label className="flex flex-col gap-1"><span className={lab}>Second website (optional)</span><input className={field} value={f.website2 || ''} onChange={e => setF({ ...f, website2: e.target.value })} /></label>
+        <label className="flex flex-col gap-1 md:col-span-2"><span className={lab}>Address</span><input className={field} value={f.address || ''} onChange={e => setF({ ...f, address: e.target.value })} /></label>
+      </div>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-[12px] text-slate-600 max-w-md">The display name and the verified tick are set in Meta's WhatsApp Manager — Meta reviews them. Chats show the name instead of the number only once Meta verifies the business.</p>
+        <button type="button" disabled={busy} onClick={save} className="h-10 px-5 rounded-lg bg-emerald-600 text-white text-[13.5px] font-semibold disabled:opacity-40">Save profile</button>
       </div>
     </div>
   );

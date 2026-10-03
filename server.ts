@@ -11975,6 +11975,79 @@ async function startServer() {
     };
   };
 
+  // ── WhatsApp business profile (what people see when they tap the number) ──
+  // Read and edit the shared sender's public profile through Meta's Graph API:
+  // about line, description, address, email, websites, category and the logo.
+  // The display name itself is shown read-only — Meta reviews any change to it.
+  const _WA_GRAPH = 'https://graph.facebook.com/v20.0';
+  const _waGraph = async (path: string, init: any = {}) => {
+    const { accessToken } = whatsAppCreds();
+    if (!accessToken) throw Object.assign(new Error('WhatsApp is not connected — add the Meta credentials first.'), { status: 409 });
+    const r = await fetch(`${_WA_GRAPH}${path}`, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...(init.headers || {}) }, signal: AbortSignal.timeout(20000) });
+    const text = await r.text();
+    let body: any = {}; try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+    if (!r.ok) throw Object.assign(new Error(body?.error?.error_user_msg || body?.error?.message || `Meta returned HTTP ${r.status}`), { status: 400 });
+    return body;
+  };
+  const WA_VERTICALS = ['UNDEFINED', 'OTHER', 'AUTO', 'BEAUTY', 'APPAREL', 'EDU', 'ENTERTAIN', 'EVENT_PLAN', 'FINANCE', 'GROCERY', 'GOVT', 'HOTEL', 'HEALTH', 'NONPROFIT', 'PROF_SERVICES', 'RETAIL', 'TRAVEL', 'RESTAURANT', 'NOT_A_BIZ'];
+  app.get("/api/admin/whatsapp/business-profile", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const { phoneNumberId } = whatsAppCreds();
+      if (!phoneNumberId) return res.status(409).json({ error: 'WhatsApp is not connected — add the Meta credentials first.' });
+      const prof = await _waGraph(`/${phoneNumberId}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`);
+      const num: any = await _waGraph(`/${phoneNumberId}?fields=verified_name,display_phone_number,name_status,quality_rating,new_name_status`).catch(() => ({}));
+      const p = Array.isArray(prof?.data) ? (prof.data[0] || {}) : {};
+      res.json({
+        about: p.about || '', address: p.address || '', description: p.description || '', email: p.email || '',
+        websites: Array.isArray(p.websites) ? p.websites : [], vertical: p.vertical || 'UNDEFINED', profile_picture_url: p.profile_picture_url || null,
+        verified_name: num.verified_name || null, display_phone_number: num.display_phone_number || null,
+        name_status: num.name_status || null, new_name_status: num.new_name_status || null, quality_rating: num.quality_rating || null,
+        verticals: WA_VERTICALS,
+      });
+    } catch (e: any) { res.status(e?.status || 500).json({ error: e?.message || 'Could not read the WhatsApp profile' }); }
+  });
+  app.put("/api/admin/whatsapp/business-profile", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { phoneNumberId } = whatsAppCreds();
+      if (!phoneNumberId) return res.status(409).json({ error: 'WhatsApp is not connected — add the Meta credentials first.' });
+      const b = req.body || {};
+      const str = (v: any, max: number, label: string) => { const t = String(v ?? '').trim(); if (t.length > max) throw Object.assign(new Error(`${label} can be at most ${max} characters.`), { status: 400 }); return t; };
+      const websites = (Array.isArray(b.websites) ? b.websites : []).map((w: any) => String(w || '').trim()).filter(Boolean).slice(0, 2);
+      for (const w of websites) if (!/^https?:\/\/\S+$/i.test(w) || w.length > 256) return res.status(400).json({ error: `Website must start with http:// or https:// — "${w}"` });
+      const email = str(b.email, 128, 'Email');
+      if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'That email address does not look right.' });
+      const vertical = WA_VERTICALS.includes(String(b.vertical || '')) ? String(b.vertical) : 'UNDEFINED';
+      const payload: any = {
+        messaging_product: 'whatsapp', about: str(b.about, 139, 'About'), address: str(b.address, 256, 'Address'),
+        description: str(b.description, 512, 'Description'), email, websites, vertical,
+      };
+      if (!payload.about) delete payload.about; // Meta rejects an empty about line
+      await _waGraph(`/${phoneNumberId}/whatsapp_business_profile`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      res.json({ success: true });
+    } catch (e: any) { res.status(e?.status || 500).json({ error: e?.message || 'Could not save the WhatsApp profile' }); }
+  });
+  // Logo: the page sends a square JPEG/PNG (resized in the browser) as base64.
+  // Meta's resumable upload gives a handle, which is then set on the profile.
+  app.post("/api/admin/whatsapp/business-profile/photo", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { phoneNumberId, accessToken } = whatsAppCreds();
+      if (!phoneNumberId || !accessToken) return res.status(409).json({ error: 'WhatsApp is not connected — add the Meta credentials first.' });
+      const m = /^data:(image\/(?:jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(String(req.body?.image || ''));
+      if (!m) return res.status(400).json({ error: 'Send a JPEG or PNG image.' });
+      const bytes = Buffer.from(m[2], 'base64');
+      if (bytes.length < 1000 || bytes.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'The image must be between 1 KB and 5 MB.' });
+      const app_: any = await _waGraph('/app');
+      if (!app_?.id) return res.status(400).json({ error: 'Meta did not return the app for this access token.' });
+      const session: any = await _waGraph(`/${app_.id}/uploads?file_length=${bytes.length}&file_type=${encodeURIComponent(m[1])}`, { method: 'POST' });
+      if (!session?.id) return res.status(400).json({ error: 'Meta did not open an upload session.' });
+      const up = await fetch(`${_WA_GRAPH}/${session.id}`, { method: 'POST', headers: { Authorization: `OAuth ${accessToken}`, file_offset: '0', 'Content-Type': m[1] }, body: bytes, signal: AbortSignal.timeout(30000) });
+      const upBody: any = await up.json().catch(() => ({}));
+      if (!up.ok || !upBody?.h) return res.status(400).json({ error: upBody?.error?.message || 'Meta refused the image upload.' });
+      await _waGraph(`/${phoneNumberId}/whatsapp_business_profile`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messaging_product: 'whatsapp', profile_picture_handle: upBody.h }) });
+      res.json({ success: true });
+    } catch (e: any) { res.status(e?.status || 500).json({ error: e?.message || 'Could not update the WhatsApp logo' }); }
+  });
+
   app.get("/api/admin/whatsapp/config", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try { res.json(await _waConfigView(req)); }
     catch (err: any) { res.status(500).json({ error: 'Could not load the WhatsApp settings.' }); }
@@ -71659,8 +71732,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'platform-billing-wa-template-2',
+    commit_marker: 'platform-wa-profile-shortlinks',
     code_features: [
+      'platform-wa-profile-shortlinks  /internal WhatsApp gains a Business profile card: read the shared sender display name, its review status and quality rating, and edit what people see when they tap the number (about, description, address, email, websites, category) plus upload the logo (resized in the browser, Meta resumable upload, set as profile_picture_handle). Platform invoice links are now short and always on the main address (erp.atithi-setu.com/b/<code>, a stateless signed code of the invoice id; PLATFORM_LINK_ORIGIN overrides), so a FRONTEND_URL pointing at dev-erp never reaches a customer message.',
       'platform-billing-wa-template  Platform invoices never reached WhatsApp because no approved template was mapped for them, and Meta refuses a business-initiated free-text message. sendInvoice now uses the PLATFORM_INVOICE / PLATFORM_RECEIPT mapping when set, else the approved payment_request (sender, name, amount, link) and invoice_ready (sender, name, amount, number) templates. Share takes an optional one-off email / WhatsApp recipient for that send only (recorded in the audit), for a copy or a test.',
       'platform-billing-v2-table-pdf  Tenant panel Invoices becomes a table (invoice, issued, covers with the due date it moves, amount, status, last send per channel, actions) in a wider panel, with a summary strip (next due, outstanding, rate card) and a plain statement of whether renewals raise themselves, when, or exactly why not, and where they will be sent. The rate card, bill-to and add-ons move to the Billing node. Ad-hoc invoices keep the option to pay for subscription time. A malformed buyer GSTIN (a test value) is no longer printed; the buyer is treated as unregistered. The invoice PDF is redesigned as a standard GST tax invoice: branded band, key-facts grid with state codes, billed by and billed to, per-line taxable value and GST, tax summary, totals, amount in words, how-to-pay box, declaration, PAID or CANCELLED stamp and page footer.',
       'platform-billing-multi-gateway  PLM Pundits can run Razorpay, PhonePe and Paytm side by side for tenant invoices: a platform_gateway_configs row per gateway (fields from each adapter, secrets sealed, connection test before switching on, one default). Links, reconcile, cancel and the webhook (/api/public/platform-billing/webhook/:gateway, each verified with its own secret) all follow the link gateway; the public invoice page shows a Pay with button per gateway. The earlier Razorpay keys are read as a Razorpay config until saved again. The Platform billing page is regrouped into Company, Invoicing, Payment gateways and Bank sections with stronger contrast.',

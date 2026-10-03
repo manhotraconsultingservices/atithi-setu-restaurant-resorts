@@ -51,7 +51,7 @@ export async function ensurePaymentLink(inv: any, origin: string, gatewayId?: st
       referenceId: linkId, amountPaise,
       description: `${s.brand_name || 'Atithi-Setu'} invoice ${inv.invoice_number}`,
       customer: { name: inv.buyer?.business || inv.buyer?.name, email: inv.buyer?.email || undefined, phone: inv.buyer?.phone || undefined },
-      expiresAt, callbackUrl: `${invoicePageUrl(origin, inv.id)}&paid=1`,
+      expiresAt, callbackUrl: `${invoicePageUrl(origin, inv.id)}?paid=1`,
       webhookUrl: platformWebhookUrl(origin, gw.id),
       notes: { platform_invoice: inv.id, invoice_number: inv.invoice_number, tenant: inv.restaurant_id },
     });

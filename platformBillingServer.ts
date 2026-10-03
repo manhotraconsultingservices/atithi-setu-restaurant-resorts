@@ -316,7 +316,29 @@ export function issueInvoiceToken(invoiceId: string): string {
   const b64 = Buffer.from(invoiceId).toString('base64url');
   return `${b64}.${createHmac('sha256', TOKEN_SECRET).update(invoiceId).digest('base64url').slice(0, 32)}`;
 }
+// Short code for links in messages: the invoice id (PINV-<ms>-<6 hex>) packed as
+// base36 ms + hex, plus a 10-character signature — erp.atithi-setu.com/b/<code>.
+// Stateless, so no lookup table; the long token above still works.
+export function invoiceShortCode(invoiceId: string): string {
+  const m = /^PINV-(\d+)-([0-9A-F]{6})$/.exec(String(invoiceId));
+  if (!m) return issueInvoiceToken(invoiceId);
+  const sig = createHmac('sha256', TOKEN_SECRET).update(invoiceId).digest('base64url').slice(0, 10);
+  return `${Number(m[1]).toString(36)}${m[2].toLowerCase()}-${sig}`;
+}
+function readShortCode(code: string): string | null {
+  const i = code.indexOf('-');
+  if (i < 8) return null;
+  const body = code.slice(0, i), sig = code.slice(i + 1);
+  if (!/^[0-9a-z]+$/.test(body) || sig.length !== 10) return null;
+  const hex = body.slice(-6), ms = parseInt(body.slice(0, -6), 36);
+  if (!/^[0-9a-f]{6}$/.test(hex) || !Number.isFinite(ms)) return null;
+  const id = `PINV-${ms}-${hex.toUpperCase()}`;
+  const want = createHmac('sha256', TOKEN_SECRET).update(id).digest('base64url').slice(0, 10);
+  const a = Buffer.from(sig), b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b) ? id : null;
+}
 export function readInvoiceToken(token: string): string | null {
+  if (token && !String(token).includes('.')) return readShortCode(String(token));
   try {
     const [b64, sig] = String(token || '').split('.');
     if (!b64 || !sig) return null;
@@ -326,7 +348,12 @@ export function readInvoiceToken(token: string): string | null {
     return a.length === b.length && timingSafeEqual(a, b) ? id : null;
   } catch { return null; }
 }
-export const invoicePageUrl = (origin: string, invoiceId: string) => `${origin}/?billing_invoice=${issueInvoiceToken(invoiceId)}`;
+// Every invoice link a person sees (email, WhatsApp, PDF, reminders, the owner's
+// tab) is the short one on the main address. PLATFORM_LINK_ORIGIN overrides it
+// (e.g. a staging server); the request origin is deliberately NOT used, so a
+// FRONTEND_URL pointing at dev-erp never leaks into a customer message.
+const LINK_ORIGIN = String(process.env.PLATFORM_LINK_ORIGIN || 'https://erp.atithi-setu.com').replace(/\/+$/, '');
+export const invoicePageUrl = (_origin: string, invoiceId: string) => `${LINK_ORIGIN}/b/${invoiceShortCode(invoiceId)}`;
 
 // ── PDF ──────────────────────────────────────────────────────────────────────
 export async function renderInvoicePdf(inv: any, origin?: string): Promise<Buffer> {
@@ -494,6 +521,15 @@ const fail = (res: Response, e: any) => {
 
 export function registerPlatformBilling(app: Express, deps: PlatformBillingDeps) {
   const { authenticate, isAdmin, isAdminOrCto, appOriginFromReq } = deps;
+
+  // Short invoice link → the public invoice page. An unknown code still lands on
+  // the page, which says the link is not valid.
+  app.get('/b/:code', (req: any, res: Response) => {
+    const code = String(req.params.code || '').slice(0, 120);
+    const ok = !!readInvoiceToken(code);
+    const extra = req.query?.paid === '1' ? '&paid=1' : '';
+    res.redirect(302, `/?billing_invoice=${encodeURIComponent(ok ? code : 'invalid')}${extra}`);
+  });
 
   // Settings (secrets write-only).
   app.get('/api/admin/platform-billing/settings', authenticate, isAdminOrCto, async (_req, res) => {
