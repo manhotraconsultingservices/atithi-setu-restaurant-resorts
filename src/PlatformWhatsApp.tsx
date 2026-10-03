@@ -441,7 +441,7 @@ const VERTICAL_LABEL: Record<string, string> = {
   EVENT_PLAN: 'Event planning', RETAIL: 'Shopping & retail', FINANCE: 'Finance & banking', EDU: 'Education', HEALTH: 'Medical & health', BEAUTY: 'Beauty, spa & salon',
   ENTERTAIN: 'Entertainment', GROCERY: 'Food & grocery', AUTO: 'Automotive', APPAREL: 'Clothing & apparel', GOVT: 'Public service', NONPROFIT: 'Non-profit', NOT_A_BIZ: 'Not a business',
 };
-const NAME_STATUS: Record<string, string> = { APPROVED: 'Approved', AVAILABLE_WITHOUT_REVIEW: 'Live (not reviewed)', DECLINED: 'Declined', EXPIRED: 'Expired', PENDING_REVIEW: 'In review', NONE: 'Not set' };
+const NAME_STATUS: Record<string, string> = { APPROVED: 'Approved', AVAILABLE_WITHOUT_REVIEW: 'Live (not reviewed)', DECLINED: 'Declined', EXPIRED: 'Expired', PENDING_REVIEW: 'In review', NONE: 'Not set', NON_EXISTS: 'No approved display name yet — request one in WhatsApp Manager' };
 
 // Square, small JPEG for the profile photo (Meta shows it as a circle).
 async function toSquareJpeg(file: File, size = 640): Promise<string> {

@@ -71732,7 +71732,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'platform-wa-profile-shortlinks',
+    commit_marker: 'platform-wa-profile-shortlinks-2',
     code_features: [
       'platform-wa-profile-shortlinks  /internal WhatsApp gains a Business profile card: read the shared sender display name, its review status and quality rating, and edit what people see when they tap the number (about, description, address, email, websites, category) plus upload the logo (resized in the browser, Meta resumable upload, set as profile_picture_handle). Platform invoice links are now short and always on the main address (erp.atithi-setu.com/b/<code>, a stateless signed code of the invoice id; PLATFORM_LINK_ORIGIN overrides), so a FRONTEND_URL pointing at dev-erp never reaches a customer message.',
       'platform-billing-wa-template  Platform invoices never reached WhatsApp because no approved template was mapped for them, and Meta refuses a business-initiated free-text message. sendInvoice now uses the PLATFORM_INVOICE / PLATFORM_RECEIPT mapping when set, else the approved payment_request (sender, name, amount, link) and invoice_ready (sender, name, amount, number) templates. Share takes an optional one-off email / WhatsApp recipient for that send only (recorded in the audit), for a copy or a test.',
