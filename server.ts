@@ -49386,11 +49386,44 @@ ${data.tenant.name}`;
 
   // ── Inbound reservation webhook (Aiosell → PMS). Single partner URL; tenant
   //    resolved by hotelCode (or an explicit :restaurantId path). Basic Auth. ──
+  // A push with NO login used to be refused without a trace, so a channel manager
+  // that forgot to attach its credentials was invisible from our side (pconvention,
+  // Oct 2026: every Aiosell reservation push was 401'd for days and only Aiosell's
+  // own log showed it). Record it in the property's Sync Log — after the response,
+  // at most once per hotel code per 10 minutes, and only for a registered hotel
+  // code, so an anonymous caller cannot use it to flood the log.
+  const _aiosellNoAuthSeen = new Map<string, number>();
+  const aiosellNoteNoAuth = (req: Request) => {
+    try {
+      const body: any = req.body || {};
+      const hotelCode = String(body.hotelCode || '').trim().slice(0, 64);
+      if (!hotelCode) return;
+      const now = Date.now();
+      if (now - (_aiosellNoAuthSeen.get(hotelCode) || 0) < 10 * 60 * 1000) return;
+      _aiosellNoAuthSeen.set(hotelCode, now);
+      if (_aiosellNoAuthSeen.size > 500) _aiosellNoAuthSeen.clear();
+      setImmediate(async () => {
+        try {
+          const rid = await aiosellResolveTenant(hotelCode);
+          if (!rid) return;
+          const ip = aiosellClientIp(req);
+          const action = String(body.action || '').toLowerCase();
+          aiosellLogInboundAttempt({ hotelCode, presentedUser: null, restaurantId: rid, action, outcome: 'NO_AUTH', reason: 'no Basic Authorization header on the request', ip });
+          logAiosellSync(await getTenantDb(rid), {
+            direction: 'IN', operation: 'RESERVATION', trigger: 'webhook', actor: String(body.channel || 'Aiosell'),
+            status: 'FAIL', summary: 'Rejected inbound webhook — Aiosell sent no username/password',
+            detail: `booking ${String(body.bookingId || '').slice(0, 40)} · hotelCode ${hotelCode} · from ${ip || 'unknown IP'}. Ask Aiosell to send your Aiosell username and password (Basic auth) on Reservation Out. Repeats within 10 minutes are not logged.`,
+          });
+        } catch { /* diagnostics never block */ }
+      });
+    } catch { /* diagnostics never block */ }
+  };
   const aiosellWebhookHandler = async (req: Request, res: Response) => {
     // Auth-FIRST: reject anything without a well-formed Basic header before doing
-    // ANY body parsing or DB work (no tenant-existence probing, no DoS amplification).
+    // any DB work on the request path (no tenant-existence probing, no DoS
+    // amplification). The throttled diagnostic runs after the reply.
     const auth = req.headers['authorization'];
-    if (!/^Basic\s+.+/i.test(String(auth || ''))) return res.status(401).json({ success: false, message: 'Unauthorized' });
+    if (!/^Basic\s+.+/i.test(String(auth || ''))) { res.status(401).json({ success: false, message: 'Unauthorized' }); aiosellNoteNoAuth(req); return; }
     // Past this point the caller sent a Basic header — almost certainly a real
     // integration (Aiosell), so it's safe to record for delivery diagnostics.
     const ip = aiosellClientIp(req);
@@ -49446,7 +49479,14 @@ ${data.tenant.name}`;
       // Log the inbound OTA hand-off in plain English (guest + channel + stay).
       try {
         const ch = String((body as any).channel || (body as any).ota || '').trim() || 'OTA';
-        const gname = (body as any).guest?.name || (body as any).guestName || 'Guest';
+        // Aiosell sends guest.firstName / lastName (no guest.name); an OTA that hides
+        // the name sends the literal string "null", so drop those parts.
+        const _nm = (v: any) => { const t = String(v ?? '').trim(); return t && t.toLowerCase() !== 'null' ? t : ''; };
+        const gname = _nm((body as any).guest?.name)
+          || [_nm((body as any).guest?.firstName), _nm((body as any).guest?.lastName)].filter(Boolean).join(' ')
+          || _nm((body as any).guestName)
+          || String((body as any).rooms?.[0]?.guestName || '').split(/\s+/).map(_nm).filter(Boolean).join(' ')
+          || 'Guest';
         const stay = ((body as any).checkin || (body as any).checkIn) && ((body as any).checkout || (body as any).checkOut)
           ? ` · ${(body as any).checkin || (body as any).checkIn}→${(body as any).checkout || (body as any).checkOut}` : '';
         const actWord = action === 'cancel' ? 'cancellation' : action === 'modify' ? 'modification' : 'booking';
@@ -71531,8 +71571,9 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'notif-retire-builtin-audiences',
+    commit_marker: 'aiosell-webhook-noauth-log',
     code_features: [
+      'aiosell-webhook-noauth-log  A reservation push with no login was refused with no trace on our side, so Aiosell not attaching its credentials stayed invisible for days at pconvention. It now writes a red Sync Log line (and a NO_AUTH inbound attempt) telling the owner to ask Aiosell for Basic auth: after the reply, once per hotel code per 10 minutes, registered hotel codes only. The Sync Log also names the guest from firstName and lastName (it read a guest.name field Aiosell never sends, so every line said Guest).',
       'notif-retire-builtin-audiences  The Notifications event list still defaulted team messages to the retired built-in staff roles (Front Desk, Chef, Housekeeping, Waiter, Maintenance), which only one tenant still holds, so new switches created rows that reached nobody. Those defaults are gone (Owner, Manager and Guest stay); owners add their own custom roles per event. An old built-in role row that is still switched on stays visible and can be removed. The engine still delivers to built-in role names for staff who hold them. Manager notifications now also reach staff logins holding the Manager role, not only owner-level accounts, and the role counts sum both.',
       'notif-custom-role-recipients  Team notifications could only go to the built-in role names in the event catalogue (Front Desk, Housekeeping), which no staff member holds now that every login has a custom role, so those alerts reached nobody. Each event in Notifications, Automations now takes any of the property custom roles as extra team recipients, sharing the team channel switches, and every recipient role shows how many active staff it reaches. New GET /api/owner/notification-settings/roles; the save takes a remove list for custom-role rows and refuses a role that does not exist. NO_RECIPIENTS names a custom role by its name.',
       'notif-engine-diagnostics  pconvention sent no booking notifications for a week with nothing in its Notifications log: an engine error went only to the server console, and a switched-on setting with nobody to send to wrote nothing. Both now write a log row (ENGINE_ERROR with the error text, NO_RECIPIENTS naming the role) so the owner can see why. Diagnostics never throw.',
