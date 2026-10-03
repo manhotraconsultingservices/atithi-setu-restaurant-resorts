@@ -31,6 +31,7 @@ import { TenantDirectory, type ConsoleTool } from './admin/TenantDirectory';
 import { ConsoleShell } from './admin/ConsoleShell';
 import { SubscriptionPrices } from './admin/SubscriptionPrices';
 import { PlatformBillingSettings, PlatformInvoiceRegister } from './admin/PlatformBilling';
+import { SubscriptionBilling } from './SubscriptionBilling';
 // Public PLM Pundits invoice page (?billing_invoice=), loaded only when opened.
 const PlatformInvoicePage = React.lazy(() => import('./PlatformInvoicePage'));
 import { RowActions } from './components/RowActions';
@@ -3907,6 +3908,7 @@ function BrandAnnouncementBanner({ restaurantId, token }: { restaurantId: string
 }
 
 function BillingNotice({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const { t: tB } = useT();
   const [status, setStatus] = React.useState<any>(null);
   const [bannerDismissedUntil, setBannerDismissedUntil] = React.useState<number>(() => {
     try { return Number(localStorage.getItem(`billing_banner_dismissed_${restaurantId}`) || 0); } catch { return 0; }
@@ -4052,6 +4054,12 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
               </div>
             </div>
             <div className="flex gap-2 shrink-0">
+              {status.open_invoice?.pay_url && (
+                <a href={status.open_invoice.pay_url} data-allow-readonly
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap">
+                  {tB('sub.payNow')}{status.open_invoice.amount_due ? ` — ₹${Number(status.open_invoice.amount_due).toLocaleString('en-IN')}` : ''}
+                </a>
+              )}
               <a
                 href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need to restore service for my Atithi-Setu account: ${status.tenant_name || restaurantId}`)}`}
                 target="_blank" rel="noopener noreferrer"
@@ -4119,6 +4127,12 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
             </div>
           </div>
           <div className="flex gap-2 shrink-0">
+            {status.open_invoice?.pay_url && (
+                <a href={status.open_invoice.pay_url} data-allow-readonly
+                  className="px-4 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap">
+                  {tB('sub.payNow')}{status.open_invoice.amount_due ? ` — ₹${Number(status.open_invoice.amount_due).toLocaleString('en-IN')}` : ''}
+                </a>
+              )}
             <a
               href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need help with my Atithi-Setu subscription. Account: ${status.tenant_name || restaurantId}`)}`}
               target="_blank" rel="noopener noreferrer"
@@ -32078,12 +32092,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
                 </div>
 
-                <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100 flex gap-4">
-                  <Info className="text-blue-500 shrink-0" size={20} />
-                  <p className="text-xs text-blue-700 leading-relaxed">
-                    Your subscription is managed by your assigned Sales Representative. For renewals or plan upgrades, please contact support or your representative.
-                  </p>
-                </div>
+                {/* Renew + pay online, invoice history (platform billing, Oct 2026). */}
+                <SubscriptionBilling restaurantId={restaurantId} token={token} />
               </div>
             );
           })()}
@@ -57440,7 +57450,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
           <p className="text-[11px] text-[#9c8e85]">Version is reported by agents on v3.4.1+; older online agents show &quot;Online (old build)&quot; until they self-update. Online = checked in within {agentRollout?.online_window_seconds || 90}s (agents poll about once a second).</p>
         </div>
       ) : viewMode === 'WHATSAPP' ? (
-        <PlatformWhatsApp token={token} events={NOTIFICATION_EVENTS} />
+        <PlatformWhatsApp token={token} events={[...NOTIFICATION_EVENTS,
+          // PLM Pundits → tenant owner. Template variables: {{1}} business, {{2}} invoice no,
+          // {{3}} amount, {{4}} due date (invoice only), last = invoice link.
+          { id: 'PLATFORM_INVOICE', label: 'Subscription invoice to the owner', group: 'Platform billing' },
+          { id: 'PLATFORM_RECEIPT', label: 'Subscription payment receipt', group: 'Platform billing' }]} />
       ) : viewMode === 'ADMIN_ALERTS' ? (
         <div className="space-y-6">
           <div className="bg-white rounded-[32px] border border-brand/10 shadow-sm p-6 md:p-8 max-w-2xl">

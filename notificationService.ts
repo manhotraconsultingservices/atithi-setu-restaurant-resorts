@@ -1564,6 +1564,9 @@ export function buildNotificationContent(
         : 'soon';
       const daysAhead = Number(data.days_until_due ?? 3);
       const amount = data.amount_due ? `₹${Number(data.amount_due).toLocaleString('en-IN')}` : 'your subscription fee';
+      // An open PLM Pundits invoice adds its number and a pay-online link (platform billing, Oct 2026).
+      const payText = data.pay_url ? `Invoice ${data.invoice_number || ''}: view and pay online at ${data.pay_url}\n\n` : '';
+      const payHtml = data.pay_url ? `<p><a href="${data.pay_url}" style="display:inline-block;background:#0E7490;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Pay online${data.invoice_number ? ` — ${data.invoice_number}` : ''}</a></p>` : '';
       return {
         subject: `Subscription renewal due ${daysAhead === 0 ? 'today' : `in ${daysAhead} day${daysAhead === 1 ? '' : 's'}`} — ${r}`,
         text:
@@ -1572,6 +1575,7 @@ export function buildNotificationContent(
           `Amount due: ${amount}\n` +
           `Due date: ${dueDate}\n\n` +
           `To avoid any service interruption, please complete payment by the due date.\n\n` +
+          payText +
           `Need help or have questions?\n` +
           `📧 billing@atithi-setu.com\n` +
           `💬 WhatsApp +91 70111 89371\n\n` +
@@ -1586,6 +1590,7 @@ export function buildNotificationContent(
           `<tr><td style="padding:10px 14px;border:1px solid #d1fae5;font-weight:600">Due date</td><td style="padding:10px 14px;border:1px solid #d1fae5">${dueDate}</td></tr>` +
           `</table>` +
           `<p>To avoid any service interruption, please complete payment by the due date.</p>` +
+          payHtml +
           `<div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:6px;padding:14px;margin:16px 0">` +
           `<strong>Need help?</strong><br>` +
           `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
@@ -1604,6 +1609,8 @@ export function buildNotificationContent(
       const daysPast = Number(data.days_past_due ?? 0);
       const daysUntilSuspension = Number(data.days_until_suspension ?? 0);
       const isFinalNotice = daysUntilSuspension <= 1;
+      const payText = data.pay_url ? `Invoice ${data.invoice_number || ''}${data.amount_due ? ` (₹${Number(data.amount_due).toLocaleString('en-IN')})` : ''}: pay online at ${data.pay_url}\n\n` : '';
+      const payHtml = data.pay_url ? `<p><a href="${data.pay_url}" style="display:inline-block;background:#0E7490;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Pay online${data.amount_due ? ` — ₹${Number(data.amount_due).toLocaleString('en-IN')}` : ''}</a></p>` : '';
       return {
         subject: isFinalNotice
           ? `Final notice — service will be limited to read-only soon (${r})`
@@ -1617,6 +1624,7 @@ export function buildNotificationContent(
             : `Our records show your subscription payment was due on ${dueDate} and is now ${daysPast} day${daysPast === 1 ? '' : 's'} past due.\n\n` +
               `Service is continuing uninterrupted while we wait for payment. After ${daysUntilSuspension} more day${daysUntilSuspension === 1 ? '' : 's'}, the account may be moved to read-only mode.\n\n`) +
           `Your data is safe and will remain accessible throughout.\n\n` +
+          payText +
           `Please complete payment or contact us:\n` +
           `📧 billing@atithi-setu.com\n` +
           `💬 WhatsApp +91 70111 89371\n\n` +
@@ -1633,6 +1641,7 @@ export function buildNotificationContent(
             ? `<strong>What happens next:</strong><br>If payment is not received within the next <strong>${Math.max(daysUntilSuspension, 0)} day${daysUntilSuspension === 1 ? '' : 's'}</strong>, your account will be moved to <strong>read-only mode</strong>. You'll still be able to view, export and download your data; creating, editing and deleting will be paused until payment is received. <strong>Your data is safe.</strong>`
             : `Service is continuing uninterrupted. After <strong>${daysUntilSuspension} more day${daysUntilSuspension === 1 ? '' : 's'}</strong> the account may be moved to read-only mode. Your data remains safe and accessible.`) +
           `</div>` +
+          payHtml +
           `<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin:16px 0">` +
           `<strong>To complete payment or get help:</strong><br>` +
           `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
