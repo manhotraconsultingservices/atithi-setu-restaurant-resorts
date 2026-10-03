@@ -12,9 +12,10 @@ import cron from 'node-cron';
 import { centralDb } from './db.ts';
 import {
   BillingError, getBillingSettings, tenantBillingProfile, effectiveRateCard, activeAddons, issuePlatformInvoice,
-  loadInvoice, listInvoices, sendInvoice, cancelInvoice, invoicePageUrl, renderInvoicePdf, razorpayCreds, auditInvoice,
+  loadInvoice, listInvoices, sendInvoice, cancelInvoice, invoicePageUrl, renderInvoicePdf, auditInvoice,
   type PlatformBillingDeps,
 } from './platformBillingServer.ts';
+import { enabledPlatformGateways } from './platformBillingGateways.ts';
 import { BILLING_CYCLES, CYCLE_LABEL, computeCycleLines, computeGst, nextPeriod, normaliseCycle, addDaysYmd } from './platformBilling.ts';
 
 const nowIstYmd = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
@@ -117,7 +118,7 @@ export function registerPlatformBillingAuto(app: Express, deps: AutoDeps) {
         plan: profile.subscription_plan, due_date: profile.due_date, preferred_cycle: card.preferred_cycle,
         cycles, addons: addons.map(a => ({ description: a.description, monthly_amount: num(a.monthly_amount) })),
         open_invoice: shaped.find(i => i.status === 'ISSUED') || null, invoices: shaped,
-        online_available: !!razorpayCreds(s), billing_ready: !!(s.gstin && s.state && s.address),
+        online_available: (await enabledPlatformGateways()).length > 0, billing_ready: !!(s.gstin && s.state && s.address),
         seller: { name: s.legal_name, brand: s.brand_name, email: s.email, phone: s.phone },
       });
     } catch (e) { fail(res, e); }

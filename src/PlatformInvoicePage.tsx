@@ -12,7 +12,7 @@ const fmt = (s: any) => { if (!s) return '—'; const d = new Date(String(s).len
 export default function PlatformInvoicePage({ token }: { token: string }) {
   const [inv, setInv] = useState<any>(null);
   const [err, setErr] = useState('');
-  const [paying, setPaying] = useState(false);
+  const [paying, setPaying] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(() => new URLSearchParams(window.location.search).get('paid') === '1');
   const tries = useRef(0);
   const base = `/api/public/platform-billing/invoice/${encodeURIComponent(token)}`;
@@ -45,14 +45,15 @@ export default function PlatformInvoicePage({ token }: { token: string }) {
     return () => { stop = true; };
   }, [waiting]);
 
-  const pay = async () => {
-    setPaying(true); setErr('');
+  // Each gateway PLM Pundits has switched on gets its own button; the default first.
+  const pay = async (gateway: string | null) => {
+    setPaying(gateway || 'ANY'); setErr('');
     try {
-      const r = await fetch(`${base}/pay`, { method: 'POST' });
+      const r = await fetch(`${base}/pay`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gateway }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'Online payment could not be started.');
       window.location.href = d.url;
-    } catch (e: any) { setErr(e.message); setPaying(false); }
+    } catch (e: any) { setErr(e.message); setPaying(null); }
   };
 
   if (err && !inv) return <Shell><div className="text-center py-16"><XCircle className="mx-auto text-rose-500" size={36} /><p className="mt-3 text-slate-700">{err}</p></div></Shell>;
@@ -98,11 +99,16 @@ export default function PlatformInvoicePage({ token }: { token: string }) {
       {err && <div className="mt-4 text-[13px] text-rose-700 bg-rose-50 rounded-lg px-3 py-2">{err}</div>}
 
       <div className="mt-5 flex flex-wrap gap-2">
-        {!paid && !cancelled && inv.online_available && (
-          <button type="button" onClick={pay} disabled={paying || waiting} className="h-11 px-5 rounded-xl bg-[#0E7490] text-white font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+        {!paid && !cancelled && inv.online_available && ((inv.gateways || []).length > 1 ? (inv.gateways || []).map((g: any, i: number) => (
+          <button key={g.id} type="button" onClick={() => pay(g.id)} disabled={!!paying || waiting}
+            className={`h-11 px-5 rounded-xl font-semibold inline-flex items-center gap-2 disabled:opacity-50 ${i === 0 ? 'bg-[#0E7490] text-white' : 'border border-[#0E7490] text-[#0E7490] bg-white'}`}>
+            {paying === g.id ? <Loader2 size={16} className="animate-spin" /> : <CreditCard size={16} />}Pay with {g.label}
+          </button>
+        )) : (
+          <button type="button" onClick={() => pay((inv.gateways || [])[0]?.id || null)} disabled={!!paying || waiting} className="h-11 px-5 rounded-xl bg-[#0E7490] text-white font-semibold inline-flex items-center gap-2 disabled:opacity-50">
             {paying ? <Loader2 size={16} className="animate-spin" /> : <CreditCard size={16} />}Pay {inr(inv.total)} online
           </button>
-        )}
+        ))}
         <a href={`${base}/pdf`} target="_blank" rel="noreferrer" className="h-11 px-5 rounded-xl border border-slate-200 bg-white text-slate-800 font-medium inline-flex items-center gap-2"><FileText size={16} />Download PDF</a>
       </div>
       {!paid && !cancelled && inv.bank && (

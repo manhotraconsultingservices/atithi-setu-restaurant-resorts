@@ -466,6 +466,14 @@ export async function initDb() {
       verified_at TIMESTAMP, last_test_detail TEXT,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_by TEXT
     );
+    -- PLM Pundits' own payment gateways for tenant invoices (Razorpay, PhonePe,
+    -- Paytm), several can be on at once with one default. Mirrors the tenant
+    -- payment_gateway_configs: public fields as JSON, each secret sealed.
+    CREATE TABLE IF NOT EXISTS platform_gateway_configs (
+      gateway TEXT PRIMARY KEY, is_enabled INT DEFAULT 0, is_default INT DEFAULT 0, mode TEXT,
+      public_fields TEXT, secret_fields TEXT, verified_at TIMESTAMP, last_error TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_by TEXT
+    );
     CREATE TABLE IF NOT EXISTS tenant_rate_cards (
       restaurant_id TEXT PRIMARY KEY,
       preferred_cycle TEXT DEFAULT 'MONTHLY',
