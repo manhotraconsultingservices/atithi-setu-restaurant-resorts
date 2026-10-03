@@ -31,6 +31,8 @@ import { TenantDirectory, type ConsoleTool } from './admin/TenantDirectory';
 import { ConsoleShell } from './admin/ConsoleShell';
 import { SubscriptionPrices } from './admin/SubscriptionPrices';
 import { PlatformBillingSettings, PlatformInvoiceRegister } from './admin/PlatformBilling';
+// Public PLM Pundits invoice page (?billing_invoice=), loaded only when opened.
+const PlatformInvoicePage = React.lazy(() => import('./PlatformInvoicePage'));
 import { RowActions } from './components/RowActions';
 import { useBuyerGstEditor } from './components/BuyerGstEditor';
 import { moduleOn, moduleOff, setTenantModules, businessModules } from './tenantModules';
@@ -1913,6 +1915,9 @@ export default function App() {
   // The gateway sends a guest back here after paying on a public page.
   const __payResult = new URLSearchParams(window.location.search).get('pay_result');
   if (__payResult) return <PaymentResultPage token={__payResult} />;
+  // A PLM Pundits subscription invoice opened from its email / WhatsApp link.
+  const __billingInvoice = new URLSearchParams(window.location.search).get('billing_invoice');
+  if (__billingInvoice) return <React.Suspense fallback={null}><PlatformInvoicePage token={__billingInvoice} /></React.Suspense>;
 
   if (view === 'LANDING') {
     return (

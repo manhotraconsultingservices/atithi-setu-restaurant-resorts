@@ -4,7 +4,7 @@
 // with Generate, Share (email / WhatsApp), PDF, Copy link, Mark paid and Cancel.
 // Calls /api/admin/tenants/:id/rate-card, /addons, /platform-invoices.
 import React, { useCallback, useEffect, useState } from 'react';
-import { FileText, Send, Link2, Plus, Trash2, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
+import { FileText, Send, Link2, Plus, Trash2, CheckCircle2, XCircle, RefreshCw, CreditCard } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { usePaymentDialog } from '../components/PaymentDialog';
 
@@ -95,6 +95,15 @@ export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: st
       await navigator.clipboard.writeText(d.page_url);
       toast.success('Invoice link copied — the owner can view and pay from it.');
     } catch (e: any) { toast.error(e.message || 'Could not copy the link.'); }
+  };
+  const copyPayLink = async (inv: any) => {
+    const r = await act(() => api(`/api/admin/platform-invoices/${inv.id}/payment-link`, { method: 'POST' }));
+    if (!r?.url) return;
+    try { await navigator.clipboard.writeText(r.url); toast.success('Razorpay payment link copied.'); } catch { toast.info(r.url); }
+  };
+  const checkPayment = async (inv: any) => {
+    const r = await act(() => api(`/api/admin/platform-invoices/${inv.id}/refresh`, { method: 'POST' }));
+    if (r?.invoice) r.invoice.status === 'PAID' ? toast.success(`${inv.invoice_number} is paid.`) : toast.info('No payment has reached Razorpay for this invoice yet.');
   };
   const markPaid = async (inv: any) => {
     const v = await prompt({ title: `Record payment for ${inv.invoice_number}`, body: `${inr(inv.total)} received outside the payment link.${inv.extends_subscription && inv.period_to ? ` The subscription moves to ${fmt(inv.period_to)}.` : ''}`,
@@ -208,6 +217,8 @@ export function TenantInvoices({ tenantId, token, api, isSuper }: { tenantId: st
                   <IconBtn onClick={() => openPdf(inv)} icon={<FileText size={13} />} label="PDF" />
                   {inv.status !== 'CANCELLED' && <IconBtn onClick={() => copyLink(inv)} icon={<Link2 size={13} />} label="Copy link" />}
                   {inv.status !== 'CANCELLED' && isSuper && <IconBtn off={busy} onClick={() => share(inv)} icon={<Send size={13} />} label={inv.status === 'PAID' ? 'Send again' : 'Share'} />}
+                  {inv.status === 'ISSUED' && isSuper && <IconBtn off={busy} onClick={() => copyPayLink(inv)} icon={<CreditCard size={13} />} label="Payment link" />}
+                  {inv.status === 'ISSUED' && isSuper && <IconBtn off={busy} onClick={() => checkPayment(inv)} icon={<RefreshCw size={13} />} label="Check payment" />}
                   {inv.status === 'ISSUED' && isSuper && <IconBtn off={busy} onClick={() => markPaid(inv)} icon={<CheckCircle2 size={13} />} label="Mark paid" />}
                   {inv.status === 'ISSUED' && isSuper && <IconBtn off={busy} tone="danger" onClick={() => cancel(inv)} icon={<XCircle size={13} />} label="Cancel" />}
                 </div>

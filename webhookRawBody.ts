@@ -17,6 +17,7 @@
 
 const SIGNED_WEBHOOK_PATHS: RegExp[] = [
   /^\/api\/public\/payments\/webhook\//i,                            // payment gateways (Razorpay)
+  /^\/api\/public\/platform-billing\/webhook\//i,                    // PLM Pundits' own Razorpay (tenant invoices)
   /^\/api\/webhooks\/whatsapp\/?$/i,                                 // Meta WhatsApp Cloud API
   /^\/api\/public\/restaurant\/[^/]+\/channel-webhook\/[^/]+\/?$/i,  // OTA channels
   /^\/api\/integrations\/[^/]+\/webhook\/[^/]+\/?$/i,                // delivery aggregators
